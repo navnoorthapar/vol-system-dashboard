@@ -311,7 +311,7 @@ jobs:
 
       # D2: the expiry count is read from the page, so a day listing more expiries
       # moves the budget with it; the daily bot's deploy never runs this
-      - name: Surface page weight (450 kB at 45 expiries, + 7 kB an expiry past)
+      - name: Surface page weight (450 kB at 45 expiries, + 7 kB an expiry past, − 5.5 kB an expiry short)
         run: python scripts/ci/page_budget.py "$RUNNER_TEMP/site"
 
       - name: Set up Node

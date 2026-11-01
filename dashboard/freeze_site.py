@@ -25,8 +25,10 @@ It FAILS CLOSED: nothing is written and the script exits 1 if any page
   * references a session data file (data/<kind>-<session>-<sha256[:16]>.json,
     app.publish_json: the Surface smile's every expiry, its heatmaps' cell
     details) that /data/<name> does not serve, whose bytes' sha384 is not the
-    integrity value the page gives it, or whose name is not its sha256; only the
-    referenced files are written;
+    integrity value the page gives it, or whose name is not its sha256, or that
+    lacks the cell details of a heatmap reading it (its "heat" entry under the
+    table's id: without it desk.js has no numbers to show); only the referenced
+    files are written;
 or if a vendored file under dashboard/static/vendor no longer matches the SRI
 hash the pages carry (app.VENDORED). scripts/cloud_refresh.py then stops before
 the deploy step, so the previous good build stays live.
@@ -189,6 +191,7 @@ _DATA_PATH = re.compile(r"\bdata/[\w.-]+\.json\b")
 _DATA_ATTR = re.compile(r'<[^<>]*\bdata-src="(data/[^"]*)"[^<>]*>')
 _INTEGRITY_ATTR = re.compile(r'\bdata-integrity="([^"]*)"')
 _DATA_NAME = re.compile(r"data/[\w.-]+-([0-9a-f]{16})\.json")
+_ID_ATTR = re.compile(r'(?<![\w-])id="([^"]*)"')
 
 
 def data_refs(html: str) -> tuple[dict[str, str], list[str]]:
@@ -225,6 +228,21 @@ def data_refs(html: str) -> tuple[dict[str, str], list[str]]:
     return refs, problems
 
 
+def _heat_ids(html: str, src: str) -> list[str]:
+    """The ids of the elements (the heatmap tables) that read their cells from src."""
+    return [i.group(1) for m in _DATA_ATTR.finditer(html) if m.group(1) == src
+            for i in [_ID_ATTR.search(m.group(0))] if i]
+
+
+def _heat_of(body: bytes) -> dict:
+    """A data file's "heat" entry ({} when it has none or does not parse)."""
+    try:
+        heat = json.loads(body).get("heat")
+    except (ValueError, AttributeError):
+        return {}
+    return heat if isinstance(heat, dict) else {}
+
+
 def collect_data(mod: Any, pages: dict) -> tuple[dict[str, bytes], list[str]]:
     """Every data file the rendered pages reference, fetched from /data/<name> as
     the pages do and checked against its integrity value and its name."""
@@ -245,6 +263,8 @@ def collect_data(mod: Any, pages: dict) -> tuple[dict[str, bytes], list[str]]:
             m = _DATA_NAME.fullmatch(src)
             if not m or hashlib.sha256(body).hexdigest()[:16] != m.group(1):
                 problems.append(f"{route}: data file {src} is not named by its sha256")
+            problems += [f"{route}: data file {src} has no cell details for #{t}"
+                         for t in _heat_ids(page["html"], src) if t not in _heat_of(body)]
             files[src] = body
     return files, problems
 

@@ -2761,21 +2761,25 @@ def test_the_smile_spec_is_a_template_and_its_quotes_one_session_data_file(dash,
 
 def _syn_expected_strip(n: int, roots: bool) -> dict[str, dict]:
     """The synthetic session's smile tabs and status lines, computed here from its
-    residual table: {expiry: T, tab text, settlement, whether it opens a month,
-    status line} (date · weekday · AM/PM · days · F · quotes · median half-spread)."""
+    residual table: {expiry: T, tab text (the days without desk.css's 'd'), settlement,
+    whether it opens a month, status line} (expiry k of N · date · weekday · AM/PM ·
+    days · F · quotes · median half-spread); the first tab of a year past the
+    session's carries it ("Jan 15 ’27")."""
     res = _syn_session(n, roots)["residuals"]
     mkt = res[res["model"] == SYN_MODELS[0]]
     months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
     out: dict[str, dict] = {}
     prev = None
-    for e, q in mkt.groupby("expiry", sort=True):
+    groups = list(mkt.groupby("expiry", sort=True))
+    for k, (e, q) in enumerate(groups, 1):
         T, day = float(q["T_days"].median()), pd.Timestamp(e)
         settle = {"SPX": "AM", "SPXW": "PM"}[q["root"].iloc[0]] if roots else None
         tag = [settle] if settle else []
-        out[e] = {"T": T, "settle": settle, "mo": prev is not None and prev[:7] != e[:7],
-                  "label": " · ".join([f"{months[day.month - 1]} {day.day}", f"{T:.0f}d", *tag]),
-                  "status": " · ".join([e, day.day_name()[:3], *tag, f"{T:.0f} days",
-                                        f"F {q['forward'].iloc[0]:,.2f}", f"{len(q)} quotes",
+        year = f" ’{e[2:4]}" if e[:4] != (prev or SESSION)[:4] else ""
+        out[e] = {"T": T, "settle": settle, "mo": prev is not None and prev[:7] != e[:7], "days": f"{T:.0f}",
+                  "label": " · ".join([f"{months[day.month - 1]} {day.day}{year}", f"{T:.0f}", *tag]),
+                  "status": " · ".join([f"Expiry {k} of {len(groups)}", e, day.day_name()[:3], *tag,
+                                        f"{T:.0f} days", f"F {q['forward'].iloc[0]:,.2f}", f"{len(q)} quotes",
                                         f"median half-spread {q['half_spread_vp'].median():.2f} vol pts"])}
         prev = e
     return out
@@ -2794,7 +2798,14 @@ def test_the_smile_tabs_name_each_expiry_and_a_settlement_only_from_its_occ_root
     never a Yahoo chain's, never guessed from the date); a month's first expiry opens
     a group (.mo); and one status line under the tabs names the selected expiry
     (date · weekday · AM/PM · days · F · quotes · median half-spread), the server's
-    for the default expiry, from its row of 'Quotes per expiry', which now holds F."""
+    for the default expiry, from its row of 'Quotes per expiry', which now holds F.
+    D3 review: 'Nov 19 · 24d' and 'Nov 19 · 388d' were told apart only by the days, and
+    the strip showed 5-7 tabs with no sign of the rest: the first tab of each year past
+    the session's carries it ("Jan 15 ’27 · 81d"), the status line starts 'Expiry k of
+    N', and the days sit in an <i> whose 'd' desk.css writes and names ' days' (a
+    screen reader read '30d')."""
+    css = (ROOT / "dashboard" / "static" / "desk.css").read_text()
+    assert re.search(r'\.exp-strip i::after\s*\{\s*content:\s*"d"\s*/\s*" days";\s*\}', css)
     for n, roots in ((17, False), (45, True)):
         (tmp_path / f"n{n}").mkdir()
         monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path / f"n{n}", n, roots))
@@ -2803,8 +2814,10 @@ def test_the_smile_tabs_name_each_expiry_and_a_settlement_only_from_its_occ_root
         want = _syn_expected_strip(n, roots)
         tabs = SMILE_TAB.findall(html)
         assert [t[2] for t in tabs] == list(want)
+        assert any("’" in w["label"] for w in want.values())
         for mo, _sel, e, settle, inner in tabs:
             assert _html_unescape(re.sub(r"<[^>]+>", "", inner)) == want[e]["label"], e
+            assert re.search(r"<i>(\d+)</i>", inner).group(1) == want[e]["days"], e
             assert (settle or None) == want[e]["settle"], e
             assert bool(mo) == want[e]["mo"], e
         assert {t[3] for t in tabs} == ({"AM", "PM"} if roots else {""})
@@ -3018,6 +3031,66 @@ def test_surface_page_weight_grows_at_most_7000_bytes_an_expiry(dash, tmp_path, 
     slope = [(size[b] - size[a]) / (b - a) for a, b in itertools.pairwise(sorted(size))]
     assert max(slope) <= 7_000, (size, slope)
     assert size[17] <= 300_000, size
+
+
+def _earlier_copies(data: Path, ages: list[int], ref: str, dash) -> list[str]:
+    """Copies of the store's SESSION as earlier stored sessions, one per age in NYSE
+    sessions before ref (dash.session_age), each JSON artifact's session renamed."""
+    out = []
+    for age in ages:
+        day = pd.Timestamp(ref)
+        while dash.session_age(day.strftime("%Y-%m-%d"), ref) < age or day.weekday() > 4:
+            day -= pd.Timedelta(days=1)
+        name = day.strftime("%Y-%m-%d")
+        shutil.copytree(data / "surface" / SESSION, data / "surface" / name)
+        for f in (data / "surface" / name).glob("*.json"):
+            obj = json.loads(f.read_text())
+            obj["session"] = name
+            f.write_text(json.dumps(obj))
+        out.append(name)
+    return out
+
+
+def test_surface_page_does_not_grow_past_its_compared_sessions(dash, tmp_path, monkeypatch):
+    """D2: #surface-change compared the headline with every earlier stored session, and
+    the ATM and RR25 term charts drew them all: about 11 kB a session at 45 expiries,
+    so the page outgrew its 450 kB budget at eight earlier sessions and kept growing a
+    session a day. It compares at most len(COMPARE_LAGS) + 1 (the newest earlier one
+    and the newest at least each lag back). On synthetic 45-expiry stores with N
+    earlier sessions that fill every lag and with one more, the page has the same
+    views and the same size, give or take a digit."""
+    lags = getattr(dash, "COMPARE_LAGS", (5, 21, 63))
+    size, views = {}, {}
+    for extra in (False, True):
+        root = tmp_path / str(extra)
+        root.mkdir()
+        data = _surface_store(root, 45, roots=True)
+        _earlier_copies(data, [1, *lags] + ([2] if extra else []), SESSION, dash)
+        monkeypatch.setattr(dash, "DATA", data)
+        resp, html = _get(dash, "/surface")
+        assert _errors(resp) == 0
+        size[extra] = len(html.encode("utf-8"))
+        views[extra] = re.findall(r'role="tab" aria-selected="(?:true|false)" aria-controls="vs-([\d-]+)"',
+                                  html)
+    assert len(views[False]) == len(lags) + 1, views
+    assert views[True] == views[False], views
+    assert abs(size[True] - size[False]) <= 64, size
+
+
+def test_compared_sessions_are_the_newest_and_the_newest_past_each_lag_once(dash):
+    """D2: the newest earlier session, then per lag the newest at least that many NYSE
+    sessions back; one session past two lags is compared once, a lag none reaches adds
+    none, and the rest of the store is left out."""
+    head, lags = "2026-10-28", dash.COMPARE_LAGS
+    day, by_age = pd.Timestamp(head), {}
+    while len(by_age) < lags[-1] + 40:
+        day -= pd.Timedelta(days=1)
+        by_age.setdefault(dash.session_age(day.strftime("%Y-%m-%d"), head), day.strftime("%Y-%m-%d"))
+    ages = [1, 2, lags[0] + 1, lags[-1] + 30, lags[-1] + 35]   # one past every lag but the first
+    got = dash.compared_sessions(head, [by_age[a] for a in ages])
+    want = [by_age[1], by_age[lags[0] + 1]] + ([by_age[lags[-1] + 30]] if len(lags) > 1 else [])
+    assert got == sorted(dict.fromkeys(want), reverse=True)
+    assert dash.compared_sessions(head, []) == []
 
 
 def _card(html: str, href: str) -> str:
@@ -3412,9 +3485,13 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     # the register is append-only, so the page grows by a round at a time
     # research.html: 430 kB to 400 kB again (D2): its specs are compact and leave out the
     # fields the page renders as HTML (app.spec_json; about 409 to 358 kB)
-    budget = {"index.html": 120_000, "surface.html": 600_000, "calibration.html": 300_000,
-              "risk.html": 300_000, "research.html": 400_000, "corrections.html": 150_000,
-              "model-risk.html": 100_000}
+    # surface.html: 600 kB, flat, until D2 held it to CI's formula (page_budget.py: 450 kB
+    # at 45 expiries, 5.5 kB less an expiry short), read off the page as CI reads it
+    pb = _load("page_budget_for_fixtures", "scripts/ci/page_budget.py")
+    surf = (out / "surface.html").read_text(encoding="utf-8")
+    budget = {"index.html": 120_000, "surface.html": pb.budget(len(pb.TAB.findall(surf))),
+              "calibration.html": 300_000, "risk.html": 300_000, "research.html": 400_000,
+              "corrections.html": 150_000, "model-risk.html": 100_000}
     # model-risk.html: 80 kB until VALIDATOR-12/13 added M21–M23, three checks and a
     # monitoring line per production model (about 88 kB). Its history strips draw one dot
     # per stored session, about 150 bytes each, and the daily job adds a session a day:
@@ -4603,19 +4680,26 @@ _STRIP_JS = """async (step) => {
   await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   const sel = tabs.find(t => t.getAttribute('aria-selected') === 'true');
   const l = list.getBoundingClientRect(), t = sel.getBoundingClientRect();
-  return {lines: new Set(tabs.map(x => Math.round(x.getBoundingClientRect().top))).size,
-          scrolls: list.scrollWidth > list.clientWidth, selected: sel.dataset.value,
-          inView: t.left >= l.left - 1 && t.right <= l.right + 1, scrollY: Math.round(scrollY),
+  const inside = x => { const r = x.getBoundingClientRect();
+    return r.left >= l.left - 1 && r.right <= l.right + 1
+      && r.top >= l.top - 1 && r.bottom <= l.bottom + 1; };
+  const tops = tabs.map(x => Math.round(x.getBoundingClientRect().top));
+  const shown = new Set(tabs.filter(inside).map(x => Math.round(x.getBoundingClientRect().top)));
+  return {lines: new Set(tops).size, shownLines: shown.size, shown: tabs.filter(inside).length,
+          onShownLines: tops.filter(x => shown.has(x)).length,
+          scrolls: list.scrollHeight > list.clientHeight, selected: sel.dataset.value,
+          inView: inside(sel), scrollY: Math.round(scrollY),
           status: (document.getElementById('slices-status') || {}).textContent,
           overflow: document.documentElement.scrollWidth - innerWidth};
 }"""
 
 
-def test_browser_the_expiry_strip_is_one_line_and_keeps_the_selected_expiry_in_view(syn_browser):
+def test_browser_the_expiry_strip_shows_two_lines_and_keeps_the_selected_expiry_in_view(syn_browser):
     """D3: a full Cboe book's ~45 smile tabs wrapped to four or five lines above the
-    chart. At 1024–1920 px the strip is one line for 17, 45 and 80 expiries and
-    scrolls sideways when it must; the selected expiry is in view at load, after a
-    step to the last or the first expiry without focusing its tab (the strip
+    chart; one line that scrolled sideways then showed 5-7 of them with no sign of
+    the rest. At 1024–1920 px the strip shows two full lines of tabs for 17, 45 and
+    80 expiries and scrolls when it has more; the selected expiry is in view at load,
+    after a step to the last or the first expiry without focusing its tab (the strip
     scrolls, not the page) and on a link to the last (exp= in the hash); the status
     line under it names the selected expiry as the server names the default."""
     sb = syn_browser
@@ -4627,7 +4711,8 @@ def test_browser_the_expiry_strip_is_one_line_and_keeps_the_selected_expiry_in_v
             page.locator("#chart-slices").scroll_into_view_if_needed()
             _wait_for_chart(page, "chart-slices")
             r0 = page.evaluate(_STRIP_JS, 0)
-            assert r0["lines"] == 1, (n, width, r0)
+            assert r0["shownLines"] == min(2, r0["lines"]), (n, width, r0)
+            assert r0["shown"] == r0["onShownLines"], (n, width, r0)
             assert r0["inView"], (n, width, r0)
             assert r0["status"] == want[r0["selected"]]["status"], (n, width, r0)
             assert r0["overflow"] <= 0, (n, width, r0)
@@ -4646,7 +4731,7 @@ def test_browser_the_expiry_strip_is_one_line_and_keeps_the_selected_expiry_in_v
     r = page.evaluate(_STRIP_JS, 0)
     assert r["selected"] == exps[-1], r
     assert r["inView"], r
-    assert r["status"].startswith(exps[-1] + " · "), r
+    assert r["status"].startswith(f"Expiry {len(exps)} of {len(exps)} · {exps[-1]} · "), r
     ctx.close()
 
 
@@ -4850,6 +4935,57 @@ def test_browser_a_surface_heatmap_reads_its_cells_details_from_the_session_file
         ctx.close()
 
 
+# a stand-in for Desk.data that counts its calls and resolves with `file` (after 50
+# calls it never resolves, so a page that keeps asking cannot hang the test)
+_HEAT_STUB_JS = """(file) => { window.__dataCalls = 0; window.__errs = [];
+  window.addEventListener('error', e => window.__errs.push(String(e.message)));
+  Desk.data = () => ++window.__dataCalls > 50 ? new Promise(() => {}) : Promise.resolve(file); }"""
+
+
+def test_browser_a_heatmap_whose_file_lacks_its_details_reads_the_cell_and_does_not_hang(syn_browser):
+    """D2 review: a heatmap cell's readout asked the data file for its table's entry
+    and, when the file had none (heat[id] undefined), asked again for ever: the tab
+    hung on the first hover. A file without the entry, or with fewer rows than the
+    grid, now leaves the readout at the cell's row, column and printed value, after
+    one request (the old code made 50 here, the stub's limit) and without an error.
+    freeze_site refuses such a file (the next test)."""
+    sb = syn_browser
+    for file in ({"heat": {}}, {}, {"heat": {"iv-heatmap": {"detail": "{0:2}", "cells": []}}}):
+        ctx, page = _syn_page(sb, 17, 1440)
+        page.locator("#iv-heatmap").scroll_into_view_if_needed()
+        page.evaluate(_HEAT_STUB_JS, file)
+        at = page.evaluate("""() => { const rows = [...document.getElementById('iv-heatmap').tBodies[0].rows];
+          for (const [ri, r] of rows.entries()) for (const c of [...r.cells].slice(1))
+            if (c.className !== 'empty') return [ri, c.cellIndex - 1]; }""")
+        page.evaluate(_HEAT_FOCUS_JS, at)
+        page.wait_for_timeout(300)
+        st = page.evaluate(_HEAT_FOCUS_JS, at)
+        calls, errs = page.evaluate("[window.__dataCalls, window.__errs]")
+        assert calls <= 2, (file, calls)          # the grid's, and the smile's beside it
+        assert errs == [], (file, errs)
+        assert st["readout"] == st["head"] + st["text"], (file, st)
+        ctx.close()
+
+
+def test_freeze_refuses_a_data_file_without_a_heatmaps_details(dash, freezer, tmp_path, monkeypatch):
+    """D2 review: a Surface heatmap (data-src) reads its cells' numbers from the
+    session data file's heat entry under its table id. Freeze checked the file's
+    hashes, not that the entry is there: a file without it published, and desk.js
+    then hung on the first hover. Freeze now fails closed and writes nothing."""
+    orig = dash.publish_json
+
+    def drop(kind, session, obj):
+        heat = {k: v for k, v in (obj.get("heat") or {}).items() if k != "iv-heatmap"}
+        return orig(kind, session, {**obj, "heat": heat} if "heat" in obj else obj)
+
+    monkeypatch.setattr(dash, "publish_json", drop)
+    out = tmp_path / "site"
+    assert freezer.freeze(str(out), dash) == 1
+    assert not out.exists() or not any(out.iterdir())
+    page = '<table class="heat" id="iv-heatmap" data-src="data/x-0123456789abcdef.json" data-integrity="a">'
+    assert freezer._heat_ids(page + '<p data-id="no">', "data/x-0123456789abcdef.json") == ["iv-heatmap"]
+
+
 def test_browser_a_smile_whose_session_file_fails_keeps_its_default_and_says_so(syn_browser):
     """D2: a page left open across a deploy names a data file the deploy removed, and
     a file:// preview cannot fetch one; a file whose bytes are not its integrity hash
@@ -4961,7 +5097,7 @@ def test_browser_an_expiry_switch_writes_six_nodes_in_its_click_and_draws_one_ex
         cap = st["plotW"] >= 8 * st["quotes"]
         caps.add(cap)
         assert st["bars"] == (7 if cap else 3) * st["quotes"], st
-        assert st["status"].startswith(st["exp"] + " · "), st
+        assert re.match(rf"Expiry \d+ of \d+ · {st['exp']} · ", st["status"]), st
         assert set(st["current"]) == {st["exp"]}, st
     assert caps == {True, False}           # both kinds of expiry were drawn
     ctx.close()
@@ -5014,6 +5150,76 @@ def test_browser_a_capped_grid_scrolls_its_own_rows_to_the_selected_expiry(syn_b
         assert all(x["top"] >= -1 and x["bottom"] >= -1 for x in st), (e, st)
     assert page.evaluate("scrollY") == y0
     ctx.close()
+
+
+# each shown capped grid's row of expiry e (below the sticky head and above the
+# bottom when top and bottom are >= -1), polled for up to 5 s (the grids scroll when idle)
+_ROW_IN_GRID_JS = """(e) => new Promise(done => { const t0 = Date.now(); (function poll() {
+  const st = [...document.querySelectorAll('.heat-wrap.capped')]
+    .filter(w => w.offsetParent && w.scrollHeight > w.clientHeight + 1)
+    .map(w => { const tr = w.querySelector(`tr[data-exp="${e}"]`), a = w.getBoundingClientRect();
+      const r = tr.getBoundingClientRect(), head = w.querySelector('thead').getBoundingClientRect();
+      return { id: w.querySelector('table').id, top: r.top - head.bottom, bottom: a.bottom - r.bottom }; });
+  if ((st.length && st.every(x => x.top >= -1 && x.bottom >= -1)) || Date.now() - t0 > 5000) return done(st);
+  setTimeout(poll, 100); })(); })"""
+
+
+def test_browser_a_residual_grid_shown_by_its_tab_scrolls_to_the_selected_expiry(syn_browser):
+    """D3 review: below 1181 px the residual grids are tabs, and a grid on a hidden tab
+    could not be scrolled to the expiry picked meanwhile (a hidden row measures 0):
+    shown by its tab, it sat at its top with the selected row out of view. A grid
+    shown by its tab now scrolls itself to that row once the page is idle."""
+    sb = syn_browser
+    ctx, page = _syn_page(sb, 45, 1024)
+    e = _syn_tabs(sb, 45)[-3]
+    page.evaluate("(e) => document.querySelector("
+                  "`[data-chart-filter='chart-slices'] [data-value='${e}']`).click()", e)
+    page.wait_for_timeout(1500)
+    tabs = page.evaluate("""() => [...document.querySelectorAll('#residuals [role=tab]')]
+      .filter(t => t.getAttribute('aria-selected') !== 'true').map(t => t.getAttribute('aria-controls'))""")
+    assert tabs
+    for ctl in tabs:
+        page.click(f'#residuals [role=tab][aria-controls="{ctl}"]')
+        st = page.evaluate(_ROW_IN_GRID_JS, e)
+        assert st, ctl
+        assert all(x["top"] >= -1 and x["bottom"] >= -1 for x in st), (ctl, st)
+    ctx.close()
+
+
+def test_browser_a_focused_heat_cell_stays_in_view(syn_browser):
+    """D3 review: ']' (the next expiry) scrolled every capped grid to the new row, the
+    one holding the focus too, so a focused cell left the screen; and a cell focused
+    with ↑ stopped under the sticky column heads (19 of its 26 px hidden). A grid that
+    holds the focus on another row now stays where it is, and a capped grid keeps a
+    focused cell below its heads (scroll-padding-top)."""
+    sb = syn_browser
+    for width in (1440, 1024):
+        ctx, page = _syn_page(sb, 45, width)
+        page.locator("#iv-heatmap").scroll_into_view_if_needed()
+        page.evaluate("""() => { const t = document.getElementById('iv-heatmap');
+          [...t.tBodies[0].rows[1].cells].slice(1).find(x => x.className !== 'empty').focus(); }""")
+        top0 = page.evaluate("document.getElementById('iv-heatmap').parentElement.scrollTop")
+        page.keyboard.press("]")
+        page.wait_for_timeout(1500)
+        st = page.evaluate("""() => { const c = document.activeElement, w = c.closest('.heat-wrap');
+          const a = w.getBoundingClientRect(), r = c.getBoundingClientRect();
+          const h = w.querySelector('thead').getBoundingClientRect();
+          return { tag: c.tagName, top: w.scrollTop, under: h.bottom - r.top,
+                   below: r.bottom - a.bottom }; }""")
+        assert st["tag"] == "TD", (width, st)
+        assert st["top"] == top0, (width, st)
+        assert st["under"] <= 1, (width, st)
+        assert st["below"] <= 1, (width, st)
+        # down the grid, then back up a row at a time: the focused cell clears the heads
+        for _ in range(12):
+            page.keyboard.press("ArrowDown")
+        for _ in range(8):
+            page.keyboard.press("ArrowUp")
+            st = page.evaluate("""() => { const c = document.activeElement, w = c.closest('.heat-wrap');
+              const h = w.querySelector('thead').getBoundingClientRect();
+              return h.bottom - c.getBoundingClientRect().top; }""")
+            assert st <= 1, (width, st)
+        ctx.close()
 
 
 def test_browser_layout_is_stable_and_fits_at_desk_and_phone_widths(site_browser):
@@ -7461,16 +7667,21 @@ def _cm_of(ds, s: dict) -> list[dict]:
     return ds.constant_maturity(ds.delta_grid(s["surface"], s["quotes"], s["vix"]))
 
 
-def test_surface_change_against_every_earlier_session_states_its_gap(dash, pages):
-    """P2.3: the headline's constant-maturity grid against each earlier stored
-    session (newest first, the newest selected), each table headed with the gap
-    in NYSE sessions (session_age) and its Δ cells the differences of the two
-    grids desk_surface computes from the artifacts."""
+def test_surface_change_against_the_compared_sessions_states_its_gap(dash, pages):
+    """P2.3: the headline's constant-maturity grid against each compared earlier
+    session (newest first, the newest selected; D2: the newest earlier one and the
+    newest at least each COMPARE_LAGS back), each table headed with the gap in NYSE
+    sessions (session_age) and its Δ cells the differences of the two grids
+    desk_surface computes from the artifacts."""
     ds = _desk_module()
     html = pages["/surface"]
     inputs = dash.artifacts.load_surface_desk_inputs(SHIPPED)
     head = _surface_file("surface.json").parent.name
-    earlier = sorted((s["session"] for s in inputs if s["session"] < head), reverse=True)
+    stored = sorted((s["session"] for s in inputs if s["session"] < head), reverse=True)
+    earlier = dash.compared_sessions(head, stored)
+    assert earlier[:1] == stored[:1]
+    assert set(earlier) <= set(stored)
+    assert len(earlier) <= len(dash.COMPARE_LAGS) + 1
     sec = re.search(r'id="surface-change".*?</section>', html, re.DOTALL).group(0)
     tabs = re.findall(r'role="tab" aria-selected="(true|false)" aria-controls="vs-([\d-]+)"', sec)
     assert [t for _, t in tabs] == earlier
@@ -9492,6 +9703,9 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
     page.wait_for_timeout(300)
     page.locator("#chart-by-expiry").scroll_into_view_if_needed()
     _wait_for_chart(page, "chart-by-expiry")
+    # a chart drawn off screen before the pick moves its line when it comes into view
+    # (an IntersectionObserver entry, delivered after a frame or two)
+    page.wait_for_timeout(500)
     st = page.evaluate("""() => ({
       sel: [...document.querySelectorAll('[data-chart-filter="chart-slices"] [aria-selected=true]')]
         .map(t => t.dataset.value),
@@ -9511,7 +9725,7 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
     assert sorted(c[0] for c in st["current"]) == sorted(st["tables"])     # one row per table
     assert all(c[1] == exp and c[2] == "true" for c in st["current"]), st["current"]
     assert st["lines"] == [label], st["lines"]
-    assert st["status"].startswith(exp + " · "), st["status"]
+    assert re.match(rf"Expiry \d+ of \d+ · {exp} · ", st["status"]), st["status"]
     assert exp not in st["readout"], st["readout"]
     # ']' steps to the next expiry, '[' back
     page.keyboard.press("]")
@@ -11131,24 +11345,28 @@ def test_the_audit_leaves_out_a_scorecard_model_the_producer_marks_unavailable(r
 def test_the_audit_fails_a_wrong_number_in_an_expiry_tab_or_the_status_line(recompute_audit, frozen_site,
                                                                             tmp_path):
     """D3: the audit reads every smile tab ('Nov 25 · 30d') and the status line under
-    the tabs from the residual table: one day more on a tab, or the forward moved by
-    a cent on the status line, in a copy of the frozen page is a mismatch."""
+    the tabs from the residual table: one day more on a tab, the forward moved by a
+    cent or the expiry's place among the tabs off by one on the status line, in a
+    copy of the frozen page is a mismatch."""
     site = tmp_path / "site"
     shutil.copytree(frozen_site, site)
     page = site / "surface.html"
     html = page.read_text(encoding="utf-8")
     m = re.search(r'aria-controls="slices-panel" data-value="(\d{4}-\d{2}-\d{2})"[^>]*>'
-                  r'[A-Z][a-z]{2} \d+ · (\d+)d', html)
+                  r'[A-Z][a-z]{2} \d+ · <i>(\d+)</i>', html)
     assert m
     html = html[:m.start(2)] + str(int(m.group(2)) + 1) + html[m.end(2):]
-    f = re.search(r'id="slices-status"[^>]*>[^<]* · F [\d,]+\.(\d\d) ', html)
+    f = re.search(r'id="slices-status"[^>]*>Expiry (\d+) of \d+ · [^<]* · F [\d,]+\.(\d\d) ', html)
     assert f
-    html = html[:f.start(1)] + f"{(int(f.group(1)) + 1) % 100:02d}" + html[f.end(1):]
+    html = (html[:f.start(1)] + str(int(f.group(1)) + 1) + html[f.end(1):f.start(2)]
+            + f"{(int(f.group(2)) + 1) % 100:02d}" + html[f.end(2):])
     page.write_text(html, encoding="utf-8")
     res = recompute_audit.run(site, SHIPPED)
     failed = {c.label for c in res["checks"] if not c.ok and c.page == "Surface"}
-    assert f"tab {m.group(1)}: day of the month, days [1]" in failed
-    assert "status line: days, F, quotes, median half-spread [1]" in failed
+    assert f"tab {m.group(1)}: day of the month, year, days [1]" in failed
+    assert f"tab {m.group(1)}: days (<i>) [0]" in failed
+    assert "status line: place among the tabs, days, F, quotes, median half-spread [0]" in failed
+    assert "status line: place among the tabs, days, F, quotes, median half-spread [3]" in failed
 
 
 def test_the_audit_reads_the_smile_quotes_from_the_session_data_file(recompute_audit, frozen_site, tmp_path):
@@ -11225,6 +11443,51 @@ def test_the_audit_reads_the_smile_quotes_from_the_session_data_file(recompute_a
     bad = failed("heat", one_heat)
     assert ("Surface", "mid IV readout number 3 (data file) = recompute, every cell") in bad
     assert not [x for x in bad if "data file" in x[1] and "readout" not in x[1]], bad
+
+
+def test_the_audit_checks_the_data_file_for_every_reader_and_typed_readout_numbers(recompute_audit,
+                                                                                  frozen_site, tmp_path):
+    """D2 review: the audit checked the session data file's schema and session for
+    the smile only, and passed a heatmap readout number written as a string or a
+    boolean (float() took it; desk.js prints a quote count as it is, so "37" or
+    true would show). In copies of the frozen site, the file re-hashed with the page
+    updated so only the content is wrong: another session's file fails its schema
+    and session check in every panel that reads it; a quote count written "37" and a
+    mid IV written as text each fail their readout check."""
+    import base64
+
+    html = (frozen_site / "surface.html").read_text(encoding="utf-8")
+    q = _raw_specs(html)["chart-slices"]["quotes"]
+    src, sri = q["src"], q["integrity"]
+    body = (frozen_site / src).read_bytes()
+
+    def failed(name, change) -> set[tuple[str, str]]:
+        site = tmp_path / name
+        shutil.copytree(frozen_site, site)
+        book = json.loads(body)
+        change(book)
+        new = json.dumps(book, separators=(",", ":"), sort_keys=True).encode()
+        new_src = src[:-21] + hashlib.sha256(new).hexdigest()[:16] + ".json"
+        (site / src).unlink()
+        (site / new_src).write_bytes(new)
+        new_sri = "sha384-" + base64.b64encode(hashlib.sha384(new).digest()).decode()
+        (site / "surface.html").write_text(html.replace(src, new_src).replace(sri, new_sri), encoding="utf-8")
+        checks = recompute_audit.run(site, SHIPPED)["checks"]
+        return {(c.panel, c.label.replace(new_src, "<file>")) for c in checks
+                if not c.ok and c.page == "Surface"}
+
+    bad = failed("session", lambda book: book.update(session="2000-01-03"))
+    panels = {p for p, label in bad if label == "data file <file>: schema 1, this session"}
+    assert {"#iv-heat", "#slices"} <= panels, bad
+    assert len(panels) >= 3, panels                       # the residual grid's panel too
+
+    def cell(book):
+        return next(v for r in book["heat"]["iv-heatmap"]["cells"] for v in r if v)
+
+    bad = failed("count", lambda book: cell(book).__setitem__(1, str(cell(book)[1])))
+    assert ("#iv-heat", "mid IV readout number 2 (data file) = recompute, every cell") in bad
+    bad = failed("text", lambda book: cell(book).__setitem__(0, str(cell(book)[0])))
+    assert ("#iv-heat", "mid IV readout number 1 (data file) = recompute, every cell") in bad
 
 
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):

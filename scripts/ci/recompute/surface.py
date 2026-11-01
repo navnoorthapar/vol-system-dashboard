@@ -234,6 +234,21 @@ def range_nums(r: tuple[int, float, float] | None) -> list[float]:
 
 
 # ── the session in view ───────────────────────────────────────────────────────
+# the earlier sessions the page compares (D2): the newest, and the newest at least this
+# many NYSE sessions before the headline, each once (the page's own rule, restated)
+COMPARE_LAGS = (5, 21, 63)
+
+
+def compared(head: str, earlier: Sequence[Any]) -> list[Any]:
+    """The compared sessions, newest first, from sessions newest first."""
+    out = list(earlier[:1])
+    for lag in COMPARE_LAGS:
+        pick = next((x for x in earlier if sessions_between(x.name, head) >= lag), None)
+        if pick is not None and pick not in out:
+            out.append(pick)
+    return sorted(out, key=lambda x: x.name, reverse=True)
+
+
 class Ctx:
     """The newest stored session, its recompute, and every other stored session."""
 
@@ -252,6 +267,7 @@ class Ctx:
         # the comparison with earlier sessions (and the charts that draw them) needs this
         # session's SVI-cal slices and at least one earlier session with a surface.json
         self.earlier = sorted((x for x in self.desk if x.name < s.name), key=lambda x: x.name, reverse=True)
+        self.compared = compared(s.name, self.earlier)
         self.compare = bool(self.listed) and bool(self.earlier)
         self.cm = M.cm_grid(s)
         self.by_cm = {r["label"]: r for r in self.cm}
@@ -701,10 +717,13 @@ def surface_change(a: Audit, c: Ctx) -> None:
     a.equal(P_CHG, "panel shown", a.one("section#surface-change") is not None, c.compare)
     if not c.compare:
         return
-    earlier = c.earlier
-    nums(a, P_CHG, "panel meta (earlier sessions)", meta(a, "surface-change"), [len(earlier)])
+    earlier = c.compared
+    nums(a, P_CHG, "panel meta (compared of the earlier sessions)", meta(a, "surface-change"),
+         [len(earlier), len(c.earlier)])
+    nums(a, P_CHG, "which sessions are compared", a.one("#surface-change-picks"),
+         [*COMPARE_LAGS, len(earlier), len(c.earlier), len(COMPARE_LAGS) + 1])
     tabs = a.soup.select('#surface-change [role="tab"]')
-    a.equal(P_CHG, "tabs: earlier sessions, newest first", [t.get("data-value") for t in tabs],
+    a.equal(P_CHG, "tabs: the compared sessions, newest first", [t.get("data-value") for t in tabs],
             [x.name for x in earlier])
     a.equal(P_CHG, "default tab: the most recent earlier session",
             [t.get("data-value") for t in tabs if t.get("aria-selected") == "true"], [earlier[0].name])
@@ -739,8 +758,10 @@ def surface_change(a: Audit, c: Ctx) -> None:
 
 
 def rr_term(a: Audit, c: Ctx) -> None:
-    """RR25 of every listed expiry of every stored session: the chart's table and series."""
-    want = [(x.name, r) for x in sorted(c.desk, key=lambda x: x.name) for r in M.listed_grid(x)]
+    """RR25 of every listed expiry of this session and the compared ones: the chart's
+    table and series."""
+    shown = sorted([c.s, *c.compared], key=lambda x: x.name)
+    want = [(x.name, r) for x in shown for r in M.listed_grid(x)]
     trs = rows(chart_table(a, "chart-rr-term"))
     if same_len(a, P_CHG, "RR25 table rows", trs, want):
         for tr, (sname, r) in zip(trs, want):
@@ -754,12 +775,16 @@ def rr_term(a: Audit, c: Ctx) -> None:
     name = f"SVI-cal RR25 {c.session}"
     approx(a, P_CHG, f"chart-rr-term series {name}", series(sp, name),
            [[r["T_days"], r["rr25"]] for r in c.listed])
-    names = (["Every stored session"] if len(c.desk) > 1 else []) + [
-        f"SVI-cal RR25 {x.name}" for x in sorted(c.desk, key=lambda x: x.name) if x.name != c.session]
+    names = (["Sessions compared"] if c.compared else []) + [
+        f"SVI-cal RR25 {x.name}" for x in shown if x.name != c.session]
     legend(a, P_CHG, "chart-rr-term", [*names, f"SVI-cal RR25 {c.session}"])
-    for x in c.desk:
-        if x.name != c.session:
-            name = f"SVI-cal RR25 {x.name}"
+    others = [x for x in shown if x.name != c.session]
+    each = [f"SVI-cal RR25 {x.name}" for x in others] + [f"RR25 {x.name} (grey)" for x in others]
+    a.equal(P_CHG, "chart-rr-term series: this session's, and two per session compared",
+            sorted(str(x.get("name")) for x in (sp or {}).get("series") or []),
+            sorted([f"SVI-cal RR25 {c.session}", *each]))
+    for x in others:
+        for name in (f"SVI-cal RR25 {x.name}", f"RR25 {x.name} (grey)"):
             approx(a, P_CHG, f"chart-rr-term series {name}", series(sp, name),
                    [[r["T_days"], r["rr25"]] for r in M.listed_grid(x)])
 
@@ -799,7 +824,7 @@ def atm_term(a: Audit, c: Ctx) -> None:
             cell(a, P_ATM, f"{e} parity r (surface.json)", td[5], M.num(t.get("r")), scale=100.0)
             cell(a, P_ATM, f"{e} parity q (surface.json)", td[6], M.num(t.get("q")), scale=100.0)
             cell(a, P_ATM, f"{e} quotes (residual table)", td[7], float(nq.get(e, 0)))
-    earlier = c.earlier if c.compare else []
+    earlier = c.compared if c.compare else []
     for x in earlier:
         lst = M.listed_grid(x)
         tbl = chart_group(a, "chart-atm-ts", x.name)
@@ -1126,7 +1151,7 @@ def heat_rows(a: Audit, panel: str, tbl: Tag | None, c: Ctx, q: pd.DataFrame, wh
     if not same_len(a, panel, f"{what} rows", trs, c.exps):
         return out
     src = tbl.get("data-src") if tbl is not None else None
-    book = a.data_file(panel, src, tbl.get("data-integrity") if tbl is not None else None) or {}
+    book = a.data_file(panel, src, tbl.get("data-integrity") if tbl is not None else None, c.session) or {}
     a.equal(panel, f"{what} data file: this session", tbl.get("data-session") if tbl is not None else None,
             c.session)
     heat = (book.get("heat") or {}).get(tbl.get("id") if tbl is not None else "") or {}
@@ -1160,8 +1185,11 @@ def heat_rows(a: Audit, panel: str, tbl: Tag | None, c: Ctx, q: pd.DataFrame, wh
                 bad.setdefault("cell's numbers", []).append(f"{e} {M.bucket_label(b, True)}")
                 continue
             for j, (x, w, dec) in enumerate(zip(fv, want, decs)):
-                if not spec_ok(x, w, FULL_SIG, dec):
-                    bad.setdefault(f"number {j + 1}", []).append(f"{e} {M.bucket_label(b, True)}: {x} vs {w}")
+                # desk.js prints a number with no decimals ({1}: a quote count) as it is
+                kind = int if dec is None else (int, float)
+                if isinstance(x, bool) or not isinstance(x, kind) or not spec_ok(x, w, FULL_SIG, dec):
+                    at = f"{e} {M.bucket_label(b, True)}"
+                    bad.setdefault(f"number {j + 1}", []).append(f"{at}: {x!r} vs {w}")
     for name in ["cell's numbers", *(f"number {j + 1}" for j in range(len(decs)))]:
         a.equal(panel, f"{what} readout {name} (data file) = recompute, every cell",
                 bad.get(name, [])[:3], [])
@@ -1209,7 +1237,7 @@ def surface_3d(a: Audit, c: Ctx, vals: list[float]) -> None:
         return
     a.equal(P_IV, "3D view: points in the session data file, not the page",
             ["points" in sp, sp.get("session")], [False, c.session])
-    book = a.data_file(P_IV, sp.get("src"), sp.get("integrity")) or {}
+    book = a.data_file(P_IV, sp.get("src"), sp.get("integrity"), c.session) or {}
     got = [p if isinstance(p, list) and len(p) == 3 else [None] * 3
            for p in (book.get("surface3d") or {}).get("points") or []]
     if same_len(a, P_IV, "3D view points", got, pts):
@@ -1297,11 +1325,17 @@ def slices_panel(a: Audit, c: Ctx) -> None:
     a.equal(P_SL, "selected tab: the expiry nearest 30 days",
             [t.get("data-value") for t in tabs if t.get("aria-selected") == "true"], [default])
     settle = settlements(c.mkt)
-    for t, (e, T) in zip(tabs, c.exps.items()):
+    # D3 review: the first tab of each year past the session's carries it ("Jan 15 ’27"),
+    # and the days sit in an <i> (desk.css prints 'd' and names it 'days')
+    years = [c.session[:4], *(e[:4] for e in c.exps)]
+    for i, (t, (e, T)) in enumerate(zip(tabs, c.exps.items())):
         st = settle.get(e)
-        a.equal(P_SL, f"tab {e}: wording", re.sub(r"\d+", "#", text_of(t)),
-                f"{MONTH_ABBR[int(e[5:7]) - 1]} # · #d" + (f" · {st}" if st else ""))
-        days_nums(a, P_SL, f"tab {e}: day of the month, days", t, [float(int(e[8:10])), T])
+        yr = years[i + 1] != years[i]
+        word = f"{MONTH_ABBR[int(e[5:7]) - 1]} #{' ’#' if yr else ''} · #" + (f" · {st}" if st else "")
+        a.equal(P_SL, f"tab {e}: wording", re.sub(r"\d+", "#", text_of(t)), word)
+        nums(a, P_SL, f"tab {e}: day of the month, year, days", t,
+             [float(int(e[8:10])), *([float(int(e[2:4]))] if yr else []), T])
+        nums(a, P_SL, f"tab {e}: days (<i>)", t.find("i"), [T])
         a.equal(P_SL, f"tab {e}: settlement (OCC root)", t.get("data-settle"), st)
     a.equal(P_SL, "tabs opening a month (.mo)",
             [t.get("data-value") for t in tabs if "mo" in (t.get("class") or [])],
@@ -1322,10 +1356,12 @@ def slices_panel(a: Audit, c: Ctx) -> None:
     if default is not None:
         st = settle.get(default)
         a.equal(P_SL, "status line: wording", masked(text_of(status)),
-                f"D · {pd.Timestamp(default).day_name()[:3]}" + (f" · {st}" if st else "")
+                f"Expiry # of # · D · {pd.Timestamp(default).day_name()[:3]}" + (f" · {st}" if st else "")
                 + " · # days · F # · # quotes · median half-spread # vol pts")
-        nums(a, P_SL, "status line: days, F, quotes, median half-spread", status,
-             [c.exps[default], float(fwd[default]), float(n_q[default]), float(hs[default])], [default])
+        place = [float(list(c.exps).index(default) + 1), float(len(c.exps))]
+        nums(a, P_SL, "status line: place among the tabs, days, F, quotes, median half-spread", status,
+             [*place, c.exps[default], float(fwd[default]), float(n_q[default]), float(hs[default])],
+             [default])
     gt = a.one("div#chart-slices-data div.chart-groups > table")
     texts(a, P_SL, "bucket table model columns", heads(gt)[5:], [M.label(m) for m in c.overlay])
     a.equal(P_SL, "bucket table: a row group per expiry",
@@ -1387,9 +1423,7 @@ def packed_quotes(a: Audit, c: Ctx, default: str | None) -> None:
     q = sp.get("quotes") or {}
     groups = q.get("groups") or {}
     if q.get("template"):
-        book = a.data_file(P_SL, q.get("src"), q.get("integrity")) or {}
-        a.equal(P_SL, "data file: schema 1, this session", [book.get("schema"), book.get("session")],
-                [1, c.session])
+        book = a.data_file(P_SL, q.get("src"), q.get("integrity"), c.session) or {}
         a.equal(P_SL, "spec: session", q.get("session"), c.session)
         a.equal(P_SL, "spec: expiry order = the residual table's", q.get("order"), list(c.exps))
         bq = book.get("quotes") or {}
