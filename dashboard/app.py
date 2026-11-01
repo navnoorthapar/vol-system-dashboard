@@ -909,7 +909,9 @@ def _run_record_cause(session: str, records: list[dict]) -> str | None:
 def unfitted_causes(sessions: Iterable[str], records: list[dict]) -> str:
     """Why sessions have no Heston fit, from the job's run records as the stale
     banner reads them (_run_record_cause): for each session, the newest run that
-    tried to fit it and stored nothing, a rejection first, grouped by what
+    tried to fit it and stored nothing (a run whose own session it is first: a later
+    run that found a stale database also names the older session), a rejection first,
+    grouped by what
     happened and the reason recorded: 'the gate rejected the fit of 2026-11-02 —
     kappa pinned at bound (kappa=0.10); the job did not fit 2026-10-30 — no SPX
     option chain returned'. A session no run record names is left out; '' when none is
@@ -921,6 +923,7 @@ def unfitted_causes(sessions: Iterable[str], records: list[dict]) -> str:
                  and r["calibration"].get("status") in ("rejected", "skipped", "failed")]
         if not tried:
             continue
+        tried = [r for r in tried if str(r.get("expected_session") or s) == s] or tried
         c = ([r for r in tried if r["calibration"]["status"] == "rejected"] or tried)[-1]["calibration"]
         why = str(c.get("reason") or "no reason recorded").rstrip(".")
         groups.setdefault((str(c["status"]), why), []).append(s)

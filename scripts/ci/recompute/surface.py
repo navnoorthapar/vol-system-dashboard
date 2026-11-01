@@ -2143,8 +2143,9 @@ HIST_UNFIT = "Where the job’s run records say why Heston has none: "
 def unfitted_causes(store: Store, sessions: Sequence[str]) -> str:
     """Why the history's sessions without a Heston figure have no fit, rebuilt from the
     job's run records (data_store/runs/run_*.json, schema run_ledger/1, by run time):
-    per session the newest run that tried to fit it and stored nothing, a rejection
-    first; sessions grouped by what happened and the reason recorded, in session order
+    per session the newest run that tried to fit it and stored nothing, among the runs
+    whose own (expected) session it is when there are any, a rejection first; sessions
+    grouped by what happened and the reason recorded, in session order
     of each group's first; a session no record names is left out."""
     recs = []
     for path in sorted((store.root / "runs").glob("run_*.json")):
@@ -2157,9 +2158,11 @@ def unfitted_causes(store: Store, sessions: Sequence[str]) -> str:
     recs.sort(key=lambda r: str(r["run_utc"]))
     groups: dict[tuple[str, str], list[str]] = {}
     for s in sorted(set(sessions)):
-        on = [r["calibration"] for r in recs if isinstance(r.get("calibration"), dict)
-              and str(r["calibration"].get("session")) == s
-              and r["calibration"].get("status") in ("rejected", "skipped", "failed")]
+        runs = [r for r in recs if isinstance(r.get("calibration"), dict)
+                and str(r["calibration"].get("session")) == s
+                and r["calibration"].get("status") in ("rejected", "skipped", "failed")]
+        runs = [r for r in runs if str(r.get("expected_session") or s) == s] or runs
+        on = [r["calibration"] for r in runs]
         if on:
             cal = ([x for x in on if x["status"] == "rejected"] or on)[-1]
             groups.setdefault((cal["status"], str(cal.get("reason") or "no reason recorded").rstrip(".")),

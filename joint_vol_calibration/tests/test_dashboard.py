@@ -8350,9 +8350,19 @@ def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
 
     def no_later_fit(c: Path) -> bool:
         return not (c.name.startswith("joint_cal_") and c.stem[len("joint_cal_"):] >= newest)
+
+    def no_later_run(c: Path) -> bool:
+        # a real run record of the newest session (or later) would say something else
+        # happened to it than the rejection this view stands for
+        try:
+            rec = json.loads(c.read_text())
+        except (OSError, ValueError):
+            return True
+        s = str((rec.get("calibration") or {}).get("session") or "") if isinstance(rec, dict) else ""
+        return not s or s < newest
     for sub, keep in (("calibrations", no_later_fit),
                       ("surface", lambda c: c.name not in (newest, "index.json")),
-                      ("runs", lambda c: True)):
+                      ("runs", no_later_run)):
         (data / sub).mkdir()
         for child in (SHIPPED / sub).iterdir() if (SHIPPED / sub).is_dir() else []:
             if keep(child):
@@ -8466,8 +8476,14 @@ def test_the_surface_history_gives_the_run_records_reason_for_a_session_without_
     note = re.search(r'id="surface-history".*?<p class="note">(.*?)</p>', no_fit["/surface"], re.DOTALL)
     text = _visible_text("<body>" + note.group(1))
     assert "scorecard says why" not in text
-    assert (f"A dash in a model’s column: the model is not scored on that session. Where the job’s run "
-            f"records say why Heston has none: the gate rejected the fit of {newest} — {why}.") in text, text
+    lead = ("A dash in a model’s column: the model is not scored on that session. Where the job’s run "
+            "records say why Heston has none: ")
+    assert lead in text, text
+    # older sessions without a fit (every Friday's, from its Saturday record) may be
+    # named before it; the newest session's group is the rejection its record holds
+    said = text[text.index(lead) + len(lead):]
+    assert re.search(rf"(?:^|; )the gate rejected the fit of (?:\d{{4}}-\d\d-\d\d, )*{newest} — "
+                     rf"{re.escape(why)}(?:;|\.)", said), said
     def run(s, status, why):
         return {"calibration": {"session": s, "status": status, "reason": why}}
     assert dash.unfitted_causes(["2026-10-30", "2026-11-02", "2026-11-06"], [
@@ -8478,6 +8494,12 @@ def test_the_surface_history_gives_the_run_records_reason_for_a_session_without_
     ]) == ("the job did not fit 2026-10-30, 2026-11-06 — no SPX option chain returned; "
            "the gate rejected the fit of 2026-11-02 — kappa pinned at bound")
     assert dash.unfitted_causes(["2026-10-30"], []) == ""
+    # a later run that found the database a session behind names the older session too;
+    # the session's own run says why it has no fit
+    assert dash.unfitted_causes(["2026-10-30"], [
+        {"expected_session": "2026-10-30", **run("2026-10-30", "skipped", "no SPX option chain returned")},
+        {"expected_session": "2026-11-02", **run("2026-10-30", "skipped", "DB's latest session is stale")},
+    ]) == "the job did not fit 2026-10-30 — no SPX option chain returned"
 
 
 def test_the_inventory_says_what_a_scorecard_without_a_fit_holds(dash, no_fit):
@@ -8641,6 +8663,50 @@ def cboe_surface(dash, tmp_path_factory):
             assert r.status_code == 200, route
             out[route] = r.get_data(as_text=True)
     return out
+
+
+def test_calibration_says_same_chain_when_the_surface_is_built_on_the_fits_chain(dash, tmp_path):
+    """The other side of naming the fit's chain: when the fit's session's surface was
+    built on the chain the fit was made on (every committed session before tier 0.7's
+    rebuilds, and any session whose Cboe book fails the quote-state gates), there is no
+    note naming another book beside the smiles, and the out-of-sample note says the
+    half-spreads are 'on the same chain', linking the Surface scorecard when that
+    session is the one Surface shows, else its row of the Surface history. A check of
+    the fix made same_chain always false and the page then said the 2026-10-29 surface
+    was 'not the Yahoo Finance download the fit was made on' with every test passing."""
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
+    if not (SHIPPED / "surface" / fit / "surface.json").exists():
+        pytest.skip(f"no surface is stored for the headline fit's session {fit}")
+    own = dash.fit_chain_record(cal, fit)
+    assert own
+    assert (own.get("inputs") or {}).get("chain"), own
+    data = tmp_path / "data_store"
+    data.mkdir()
+    for child in SHIPPED.iterdir():
+        if child.name != "surface":
+            (data / child.name).symlink_to(child)
+    (data / "surface").mkdir()
+    for child in (SHIPPED / "surface").iterdir():
+        if child.name != fit:
+            (data / "surface" / child.name).symlink_to(child)
+    d = data / "surface" / fit
+    shutil.copytree(SHIPPED / "surface" / fit, d)
+    sj = json.loads((d / "surface.json").read_text())
+    sj["inputs"] = {**(sj.get("inputs") or {}), "chain": own["inputs"]["chain"]}      # the fit's own file
+    (d / "surface.json").write_text(json.dumps(sj))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        assert dash.same_chain(own, sj)
+        newest = dash.artifacts.surface_sessions(data)[-1]
+        html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    assert 'id="smile-book"' not in html
+    oos = _visible_text("<body>" + re.search(r'id="oos".*?<p class="note">(.*?)</p>', html,
+                                             re.DOTALL).group(1))
+    assert "In half-spreads on the same chain, see" in oos, oos
+    assert "not the chain fitted here" not in oos
+    where = "the Surface scorecard" if newest == fit else f"the {fit} row of the Surface history"
+    assert where in oos, oos
 
 
 def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(dash, cboe_surface):

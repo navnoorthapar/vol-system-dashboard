@@ -944,6 +944,15 @@ class TestRecomputeAudit:
             "the job did not fit 2026-10-30, 2026-11-06 — no SPX option chain returned; "
             "the gate rejected the fit of 2026-11-02 — kappa pinned at bound (kappa=0.10)")
         assert S.unfitted_causes(store, ["2026-11-09"]) == ""
+        # a later run that found the database stale names the older session too: the
+        # session's own run gives the reason
+        for i, (exp, why) in enumerate((("2026-11-13", "no SPX option chain returned"),
+                                        ("2026-11-16", "DB's latest session is stale"))):
+            (runs / f"run_s{i}.json").write_text(json.dumps({
+                "schema": "run_ledger/1", "run_utc": f"2026-11-2{i}T00:00:00+00:00", "expected_session": exp,
+                "calibration": {"session": "2026-11-13", "status": "skipped", "reason": why}}))
+        assert S.unfitted_causes(rc.data.Store(tmp_path), ["2026-11-13"]) == (
+            "the job did not fit 2026-11-13 — no SPX option chain returned")
         assert S.HIST_UNFIT == "Where the job’s run records say why Heston has none: "
 
     def test_its_overview_cites_the_fit_and_names_a_newer_surface_session(self, monkeypatch):
