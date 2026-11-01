@@ -867,6 +867,45 @@ class TestRecomputeAudit:
         assert failed([], quote_time="2026-10-29T21:52:00Z") == []
         assert failed([note("2026-10-29 17:52", "1.6")], quote_time="2026-10-29T21:52:00Z")[0] == shown
 
+    def test_it_checks_every_book_of_the_newest_session_on_the_overview(self, monkeypatch, tmp_path):
+        """FUND_GRADE_PLAN 0.8: a weekday session can hold its closing book (the close
+        slot's) and its overnight book (the book slot's). The audit read only the
+        newest book per underlying, and only the public tree's records; it now
+        requires every book of each underlying's newest session, oldest quote first,
+        each named by its recorded state, counting the manifests of books held in
+        the private store too."""
+        import importlib
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        ov = importlib.import_module("recompute.overview")
+        root = tmp_path / "data_store"
+        for sub in ("cboe", "cboe_manifest"):
+            (root / "options" / sub).mkdir(parents=True)
+        s = "2026-11-02"                                  # synthetic records: any weekday session
+        recs = {("cboe", "spx_2026-10-30_084019Z"): ("2026-10-30", "2026-10-30T23:49:50Z", "closing", 9),
+                ("cboe", f"spx_{s}_000705Z"): (s, "2026-11-02T23:52:05Z", "closing", 7),
+                ("cboe_manifest", f"spx_{s}_073204Z"): (s, "2026-11-03T07:16:06Z", "gth", 8)}
+        for (sub, stem), (sess, qt, state, n) in recs.items():
+            (root / "options" / sub / f"{stem}.json").write_text(json.dumps(
+                {"underlying": "SPX", "session": sess, "quote_time": qt, "book_state": state,
+                 "rows": n, "two_sided_rows": n - 1, "expiries": 2}))
+
+        def failed(cell):
+            a = rc.core.Audit("t", BeautifulSoup(f"<table><tr><td>{cell}</td></tr></table>", "lxml"))
+            ov.check_pipeline_books(a, rc.data.Store(root), a.soup.select_one("td"))
+            return [c.label for c in a.checks if not c.ok]
+
+        closing = "7 lines (6 two-sided, 2 expiries), quotes 2026-11-02 23:52:05 UTC (closing book)"
+        overnight = "8 lines (7 two-sided, 2 expiries), quotes 2026-11-03 07:16:06 UTC (overnight book)"
+        assert failed(f"SPX {s}: {closing} and {overnight}") == []
+        assert failed(f"SPX {s}: {overnight}") == [            # the closing book left out
+            "Cboe option books (counts from the stored quotes)",
+            "Cboe option books (counts from the stored quotes): dates",
+            f"SPX {s}: every book of the session named", "SPX book 1: named by its recorded state (closing)"]
+        assert "SPX book 2: named by its recorded state (gth)" in failed(
+            f"SPX {s}: {closing} and {overnight.replace('(overnight book)', '(closing book)')}")
+
     def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
         """Tier 0.5: the audit rebuilds the replication's calculation time from
         surface.json's record of the chain by its own calendar: a Cboe book at its

@@ -3180,17 +3180,35 @@ def test_overview_keeps_research_prototypes_off_the_first_screen(dash, pages):
     assert "none feeds a number on this page" in idx
 
 
+def _pipeline_books_text(text: str) -> str:
+    """The Overview pipeline panel's "Cboe option books" cell, from the page's text."""
+    m = re.search(r"Cboe option books (.*?) Accepted joint fits", text)
+    assert m, "no Cboe option books row"
+    return m.group(1)
+
+
 def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
     """Cboe book captures, accepted fits, artifacts and the forward ledger as
-    the stored records state them."""
+    the stored records state them. The books row names every book of each
+    underlying's newest session (FUND_GRADE_PLAN 0.8: a weekday session can
+    have a closing and an overnight book), each with its own counts."""
     pl = dash.pipeline_state(dash.artifacts.load_diagnostics_summary(dash.DATA))
     text = _visible_text(pages["/"])
     caps = [f for sub in ("cboe", "cboe_manifest") if (SHIPPED / "options" / sub).is_dir()
             for f in sorted((SHIPPED / "options" / sub).glob("*.json"))]
-    for rec in (json.loads(f.read_text()) for f in caps):
-        latest = next(c for c in pl["captures"] if c["underlying"] == rec["underlying"])
-        if latest["file"].startswith(f"{rec['underlying'].lower()}_{rec['session']}"):
-            assert f"{rec['underlying']} {rec['session']}: {rec['rows']:,} lines" in text
+    recs: dict = {}
+    for f in caps:
+        rec = json.loads(f.read_text())
+        recs.setdefault(rec["underlying"], []).append({**rec, "file": f.name})
+    row = _pipeline_books_text(text)
+    for und, mine in recs.items():
+        newest = max(str(r["session"]) for r in mine)
+        shown = sorted((r for r in mine if r["session"] == newest), key=lambda r: str(r["quote_time"]))
+        page = next(c for c in pl["captures"] if c["underlying"] == und)
+        assert [b["file"] for b in page["books"]] == [r["file"] for r in shown]
+        seg = row[row.index(f"{und} {newest}: "):]
+        for r in shown:
+            assert f"{r['rows']:,} lines ({r['two_sided_rows']:,} two-sided" in seg
     assert f"{pl['fits']} (model_version 2), newest {pl['fits_newest']}" in text
     assert f"{len(pl['surface_sessions'])} sessions" in text
     if pl["forward"]["state"] != "ok":
@@ -3219,6 +3237,41 @@ def test_pipeline_panel_reads_books_held_in_the_private_store(dash, tmp_path):
     (opts / "cboe_manifest" / "spx_2026-10-28_023000Z.json").write_text("{not json")
     with pytest.raises(ValueError, match=r"options/cboe_manifest/spx_2026-10-28_023000Z\.json"):
         dash.latest_cboe_captures(tmp_path)
+
+
+def test_overview_names_both_books_of_a_session_with_a_closing_and_an_overnight_book(
+        dash, tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.8: on a weekday the close slot stores the session's
+    closing book and the book slot its overnight book after it. The pipeline
+    panel named only the newest book per underlying, so the closing book the
+    session's surface is built from went unmentioned, and the presentation gate,
+    which checked every record of the session against the page, failed on such
+    a session and blocked the deploy. It names both, oldest quote first, each
+    with its counts and its book."""
+    opts = tmp_path / "options" / "cboe"
+    opts.mkdir(parents=True)
+    s = "2026-11-02"                                   # synthetic records: any weekday session
+    recs = {"spx_2026-10-30_084019Z": ("SPX", "2026-10-30", "2026-10-30T23:49:50Z", "closing", 27760, 27269),
+            f"spx_{s}_000705Z": ("SPX", s, "2026-11-02T23:52:05Z", "closing", 27753, 27262),
+            f"spx_{s}_073204Z": ("SPX", s, "2026-11-03T07:16:06Z", "gth", 28734, 27614),
+            f"vix_{s}_000706Z": ("VIX", s, "2026-11-02T23:52:06Z", "closing", 1519, 1394),
+            f"vix_{s}_073206Z": ("VIX", s, "2026-11-03T07:16:04Z", "gth", 1520, 1378)}
+    for stem, (und, sess, qt, state, rows, two) in recs.items():
+        (opts / f"{stem}.json").write_text(json.dumps(
+            {"underlying": und, "session": sess, "quote_time": qt, "book_state": state, "rows": rows,
+             "two_sided_rows": two, "expiries": 45}))
+    got = {c["underlying"]: c for c in dash.latest_cboe_captures(tmp_path)}
+    assert [b["file"] for b in got["SPX"]["books"]] == [f"spx_{s}_000705Z.json", f"spx_{s}_073204Z.json"]
+    assert got["SPX"]["file"] == f"spx_{s}_073204Z.json"            # the newest is still the newest
+
+    orig = dash.latest_cboe_captures
+    monkeypatch.setattr(dash, "latest_cboe_captures", lambda data_dir=None: orig(tmp_path))
+    row = _pipeline_books_text(_visible_text(dash.app.test_client().get("/").get_data(as_text=True)))
+    assert row == (f"SPX {s}: 27,753 lines (27,262 two-sided, 45 expiries), quotes 2026-11-02 23:52:05 UTC "
+                   "(closing book) and 28,734 lines (27,614 two-sided, 45 expiries), quotes 2026-11-03 "
+                   f"07:16:06 UTC (overnight book); VIX {s}: 1,519 lines (1,394 two-sided, 45 expiries), "
+                   "quotes 2026-11-02 23:52:06 UTC (closing book) and 1,520 lines (1,378 two-sided, 45 "
+                   "expiries), quotes 2026-11-03 07:16:04 UTC (overnight book)")
 
 
 def test_overview_pipeline_panel_prints_the_deploy_streak(dash, tmp_path, monkeypatch):

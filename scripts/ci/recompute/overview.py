@@ -1280,39 +1280,61 @@ def check_constraints(a: Audit, f: Facts, sec: Tag, box: dict[str, tuple[float, 
 
 
 # ── pipeline ─────────────────────────────────────────────────────────────────
+def check_pipeline_books(a: Audit, store: Store, books: Tag | None) -> None:
+    """The pipeline panel's "Cboe option books" cell: every book of each
+    underlying's newest session (a weekday session can hold its closing and its
+    overnight book, FUND_GRADE_PLAN 0.8), oldest quote first, its counts
+    recomputed from its stored quotes (a manifest's book is held privately: its
+    record's counts), each named by its recorded state."""
+    # every book record: beside a raw book committed here, or the manifest of one
+    # held in the private data repository
+    by_und: dict[str, list[dict[str, Any]]] = {}
+    for sub in ("cboe", "cboe_manifest"):
+        for jp in sorted((store.root / "options" / sub).glob("*.json")):
+            rec = store.json(f"options/{sub}/{jp.name}")
+            und = str(rec.get("underlying") or jp.name.split("_")[0]).upper()
+            by_und.setdefault(und, []).append({**rec, "path": jp})
+    newest: dict[str, list[dict[str, Any]]] = {}
+    for und, recs in by_und.items():
+        recs.sort(key=lambda r: (str(r.get("session")), str(r.get("quote_time"))))
+        newest[und] = [r for r in recs if str(r.get("session")) == str(recs[-1].get("session"))]
+    parts: Parts = []
+    for und in sorted(newest):
+        parts.append(newest[und][0]["session"])
+        for rec in newest[und]:
+            book = rec["path"].with_suffix(".parquet")
+            if rec["path"].parent.name == "cboe" and book.exists():
+                q = pd.read_parquet(book, columns=["expiry", "bid", "ask"])
+                two_sided = (q["bid"] > 0) & (q["ask"] >= q["bid"])
+                n, two, exp = len(q), int(two_sided.sum()), int(q["expiry"].nunique())
+            else:
+                n, two, exp = rec["rows"], rec["two_sided_rows"], rec["expiries"]
+            parts += [float(n), float(two), float(exp),
+                      str(rec.get("quote_time") or "").replace("T", " ").replace("Z", " UTC")]
+    said(a, P_PIPE, "Cboe option books (counts from the stored quotes)", books, parts,
+         "rows; two-sided = bid > 0 and ask ≥ bid; expiries")
+    flag = {"gth": "(overnight book)", "closing": "(closing book)"}
+    segs = text_of(books).split("; ") if books is not None else []
+    a.equal(P_PIPE, "Cboe option books: one entry per underlying", len(segs), len(newest))
+    for und, seg in zip(sorted(newest), segs):
+        named = seg.split(" and ")
+        a.equal(P_PIPE, f"{und} {newest[und][0]['session']}: every book of the session named",
+                len(named), len(newest[und]))
+        for i, (rec, part) in enumerate(zip(newest[und], named)):
+            got = next((f for f in flag.values() if part.endswith(f)), None)
+            a.equal(P_PIPE, f"{und} book {i + 1}: named by its recorded state ({rec.get('book_state')})",
+                    got, flag.get(str(rec.get("book_state"))))
+
+
 def check_pipeline(a: Audit, store: Store, f: Facts) -> None:
-    """What the repository holds: the newest Cboe book per underlying (counts
-    recomputed from its stored quotes), accepted fits, surface reports, diagnostics,
+    """What the repository holds: every Cboe book of each underlying's newest
+    session (check_pipeline_books), accepted fits, surface reports, diagnostics,
     the forward ledger and the backtest window."""
     tbl = a.need("table#pipeline", P_PIPE)
     if tbl is None:
         return
     rows = {text_of(tr.th): tr.td for tr in tbl.select("tbody tr") if tr.th is not None}
-    newest: dict[str, dict[str, Any]] = {}
-    for jp in sorted((store.root / "options" / "cboe").glob("*.json")):
-        rec = store.json(f"options/cboe/{jp.name}")
-        und = str(rec.get("underlying") or jp.name.split("_")[0]).upper()
-        key = (str(rec.get("session")), str(rec.get("quote_time")))
-        if und not in newest or key > (str(newest[und].get("session")), str(newest[und].get("quote_time"))):
-            newest[und] = {**rec, "path": jp}
-    parts: Parts = []
-    for und in sorted(newest):
-        rec = newest[und]
-        book = rec["path"].with_suffix(".parquet")
-        if book.exists():
-            q = pd.read_parquet(book, columns=["expiry", "bid", "ask"])
-            two_sided = (q["bid"] > 0) & (q["ask"] >= q["bid"])
-            n, two, exp = len(q), int(two_sided.sum()), int(q["expiry"].nunique())
-        else:
-            n, two, exp = rec["rows"], rec["two_sided_rows"], rec["expiries"]
-        parts += [rec["session"], float(n), float(two), float(exp),
-                  str(rec.get("quote_time") or "").replace("T", " ").replace("Z", " UTC")]
-    books = rows.get("Cboe option books")
-    said(a, P_PIPE, "Cboe option books (counts from the stored quotes)", books, parts,
-         "rows; two-sided = bid > 0 and ask ≥ bid; expiries")
-    for und, seg in zip(sorted(newest), text_of(books).split("; ")):
-        a.equal(P_PIPE, f"{und} book: overnight flag (book_state gth)", seg.endswith("(overnight book)"),
-                newest[und].get("book_state") == "gth")
+    check_pipeline_books(a, store, rows.get("Cboe option books"))
     said(a, P_PIPE, "accepted joint fits", rows.get("Accepted joint fits"),
          [float(len(f["gated"])), f"model_version {om.GATE['model_version']}",
           *([f["head"]["session"]] if f["head"] else [])])

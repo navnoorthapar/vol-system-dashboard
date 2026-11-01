@@ -5166,9 +5166,15 @@ def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
     """The newest stored Cboe book per underlying: the records beside the raw books
     committed here (data_store/options/cboe/*.json) and the manifests of books
     held in the private data repository (data_store/options/cboe_manifest/*.json,
-    cboe_downloader.write_manifest: the same fields, no quotes)."""
+    cboe_downloader.write_manifest: the same fields, no quotes).
+
+    Each carries "books": every stored book of that underlying's newest session,
+    oldest quote first. A weekday session can have two (FUND_GRADE_PLAN 0.8): the
+    closing book the close slot stores and the overnight book the book slot
+    captures after it; the Overview names both, since the session's surface is
+    built from the first and the newest quote is the second's."""
     base = Path(data_dir or DATA) / "options"
-    newest: dict[str, dict] = {}
+    recs: dict[str, list[dict]] = {}
     files = [f for sub in ("cboe", "cboe_manifest") if (base / sub).is_dir()
              for f in sorted((base / sub).glob("*.json"))]
     for f in files:
@@ -5177,10 +5183,14 @@ def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
         except (OSError, ValueError) as exc:
             raise ValueError(f"options/{f.parent.name}/{f.name}: unreadable record ({exc})") from exc
         und = str(rec.get("underlying") or f.name.split("_")[0]).upper()
-        key = (str(rec.get("session")), str(rec.get("quote_time")))
-        if und not in newest or key > (str(newest[und].get("session")), str(newest[und].get("quote_time"))):
-            newest[und] = {**rec, "file": f.name}
-    return [newest[u] for u in sorted(newest)]
+        recs.setdefault(und, []).append({**rec, "file": f.name})
+    out = []
+    for und in sorted(recs):
+        mine = sorted(recs[und], key=lambda r: (str(r.get("session")), str(r.get("quote_time"))))
+        newest = mine[-1]
+        same = [r for r in mine if str(r.get("session")) == str(newest.get("session"))]
+        out.append({**newest, "books": same})
+    return out
 
 
 def deploy_streak(path: Path | None = None) -> dict | None:
