@@ -58,6 +58,14 @@ def _surface_file(name: str) -> Path:
     return root / sessions[-1] / name
 
 
+def _scored(sc: dict) -> list[str]:
+    """The models a scorecard.json scored, in its order. A row it marks ``available:
+    false`` has no metrics: Heston on a session with no stored fit (a skipped or
+    rejected calibration, every Friday so far), whose surface is built from its book
+    all the same; the page leaves that model out and says why."""
+    return [m["model"] for m in sc["models"] if m.get("available") is not False]
+
+
 def _load(name: str, rel: str):
     spec = importlib.util.spec_from_file_location(name, ROOT / rel)
     assert spec is not None
@@ -3772,20 +3780,22 @@ def test_one_colour_per_model_on_every_surface_chart(dash, pages):
     html = pages["/surface"]
     sl, be = _spec(html, "chart-slices"), _spec(html, "chart-by-expiry")
     by_name = {s["name"]: s["color"] for s in be["series"]}
-    models = json.loads(_surface_file("scorecard.json").read_text())["models"]
-    keys = [m["model"] for m in models]
-    assert len({dash.model_colour(k) for k in keys}) == len(keys)            # distinct
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    assert len({dash.model_colour(m["model"]) for m in sc["models"]}) == len(sc["models"])   # distinct
+    keys = _scored(sc)            # a model the session's scorecard did not score has no series
     for k in keys:
         label = dash.model_label(k)
         assert by_name[label] == dash.model_colour(k), k
         slice_cols = {s["color"] for s in sl["series"] if s.get("legendKey") == label}
         assert slice_cols == {dash.model_colour(k)}, (k, slice_cols)
     legend = [it["name"] for it in sl["legend_items"]]
-    assert {dash.model_label(k) for k in keys} <= set(legend)
-    assert {"Bid–ask", "Mid", "Heston fit anchors"} <= set(legend)
+    assert {dash.model_label(m["model"]) for m in sc["models"]} & set(legend) == {
+        dash.model_label(k) for k in keys}
+    assert {"Bid–ask", "Mid"} <= set(legend)
+    assert ("Heston fit anchors" in legend) == ("heston_v2" in keys)         # anchors of a scored fit
     assert len(legend) == len(set(legend))                                   # one button per key
     shown = {it["name"] for it in sl["legend_items"] if not it["hidden"]}
-    assert {dash.model_label("heston_v2"), dash.model_label("svi_cal")} <= shown
+    assert {dash.model_label(k) for k in ("heston_v2", "svi_cal") if k in keys} <= shown
     assert sl["marks"]["x"][0]["value"] == 0                                  # the forward
     # the same model keeps its colour on the calibration page
     cal = pages["/calibration"]
@@ -3856,8 +3866,11 @@ def test_smile_slice_has_a_per_expiry_table_of_its_data(dash, pages):
     for e, _h, span, head in groups:
         assert head == f"{e} ({days[e]} days)", head
         assert int(span) == region.group(1).count("<th ")
-    for col in ("Bid", "Mid", "Ask", "Heston", "SVI-cal", "SVI", "eSSVI"):
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    for col in ("Bid", "Mid", "Ask", *(dash.model_short(k) for k in _scored(sc))):
         assert f">{col}</th>" in region.group(1), col
+    for k in {m["model"] for m in sc["models"]} - set(_scored(sc)):
+        assert f">{dash.model_short(k)}</th>" not in region.group(1), k
     assert ('[role="tabpanel"][hidden], .chart-data div[data-group][hidden] { display: block !important; }'
             in html)
     assert ".chart-data tbody[data-group][hidden] { display: table-row-group !important; }" in html
@@ -3893,10 +3906,11 @@ def test_scorecard_and_by_expiry_chart_say_which_quotes_they_score(dash, pages):
     and the history column names the repair's moves."""
     html = pages["/surface"]
     sc = json.loads(_surface_file("scorecard.json").read_text())
-    ns = {m["metrics"]["out_of_sample"]["n"] for m in sc["models"]}
+    ns = {m["metrics"]["out_of_sample"]["n"] for m in sc["models"] if m["model"] in _scored(sc)}
     title = re.search(r'<h2 class="panel-title" id="scorecard-t">(.*?)</h2>', html).group(1)
     assert ("same quotes" in title) is (len(ns) == 1)
     be = _spec(html, "chart-by-expiry")
+    assert sorted(s["name"] for s in be["series"]) == sorted(dash.model_label(k) for k in _scored(sc))
     res = pd.read_parquet(_surface_file("residuals.parquet"))
     for s in be["series"]:
         key = next(k for k in res["model"].unique() if dash.model_label(k) == s["name"])
@@ -4044,12 +4058,22 @@ def test_waterfall_end_bar_is_named_for_the_record_it_holds(dash, pages):
     assert f"the published C22 run ended at {dash._usd(float(c23[0]['pnl']), signed=True)}" in note
 
 
-def test_surface_badge_lists_the_models(pages):
-    """UI-10: the badge read 'models:' and nothing else."""
-    badge = _visible_text("<body>" + re.search(r'<div class="page-badge">(.*?)</div>', pages["/surface"],
-                                                re.DOTALL).group(1))
-    for m in ("eSSVI", "SVI", "SVI-cal", "Heston"):
-        assert re.search(rf"models:.*\b{re.escape(m)}\b", badge), (m, badge)
+def test_surface_badge_lists_the_models(dash, pages):
+    """UI-10: the badge read 'models:' and nothing else. It lists the models the
+    session's scorecard scored, and names one it did not score (Heston on a session
+    with no stored fit) with a link to the scorecard, whose note says why."""
+    block = re.search(r'<div class="page-badge">(.*?)</div>', pages["/surface"], re.DOTALL).group(1)
+    badge = _visible_text("<body>" + block)
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    listed = re.search(r"models: ([^·]*)", badge).group(1).strip()
+    assert listed.split(", ") == [dash.model_short(k) for k in pd.read_parquet(
+        _surface_file("residuals.parquet"), columns=["model"])["model"].unique()]
+    assert sorted(listed.split(", ")) == sorted(dash.model_short(k) for k in _scored(sc))
+    gone = [m for m in sc["models"] if m.get("available") is False]
+    for m in gone:
+        assert f'<a href="#scorecard">{dash.model_short(m["model"])} not scored on this session</a>' in block
+        assert dash.prose(m["reason"]) in _visible_text(pages["/surface"]), m["model"]
+    assert ("not scored on this session" in badge) == bool(gone)
 
 
 def test_surface_key_result_shows_its_range_caveat(dash, pages):
@@ -8137,7 +8161,8 @@ def test_surface_model_tiles_carry_their_range_over_every_stored_session(dash, p
     oos = dash.artifacts.surface_oos_by_session(SHIPPED)
     tiles = _kpi_blocks(html, "surface-scores")
     model_tiles = {k: v for k, v in tiles.items() if k.endswith("· median |z|")}
-    assert len(model_tiles) >= 4
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    assert sorted(model_tiles) == sorted(f"{dash.model_short(k)} · median |z|" for k in _scored(sc))
     score_rows = dash.load_surface()["score_rows"]
     for label, tile in model_tiles.items():
         key = next(r["key"] for r in score_rows if r["short"] + " · median |z|" == label)
@@ -8226,14 +8251,17 @@ def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_
 def test_surface_history_heads_name_their_population(dash, pages):
     heads = _table_heads(pages["/surface"], "surface-history-table")
     models = [h for h in heads if "|z|" in h]
-    assert len(models) >= 4
+    oos = dash.artifacts.surface_oos_by_session(SHIPPED)
+    # every model a stored session scores keeps its column (a newest session without a
+    # Heston fit dropped Heston's column from every earlier session)
+    want = {x["model"] for x in oos}
+    assert sorted(models) == sorted(f"{dash.model_short(m)} |z|, out of sample" for m in want)
     assert all(h.endswith("|z|, out of sample") for h in models)
     assert "Scored quotes" in heads
     assert "Quotes" not in heads
     cap = re.search(r'id="surface-history-table"><caption>(.*?)</caption>', pages["/surface"], re.DOTALL)
     assert "out-of-sample quotes" in _html_unescape(cap.group(1))
     assert "all scored quotes" not in _html_unescape(cap.group(1))
-    oos = dash.artifacts.surface_oos_by_session(SHIPPED)
     rows = _table_rows(pages["/surface"], "surface-history-table")
     history_models = dash.load_surface()["history_models"]
     for r in rows:
@@ -8243,6 +8271,125 @@ def test_surface_history_heads_name_their_population(dash, pages):
                 v = next((x["median_abs_hs"] for x in oos
                           if x["session"] == r[0] and x["model"] == key), None)
                 assert cell == dash._fmt(v, ".2f"), (r[0], h)
+
+
+# ── a newest surface session without a Heston fit ─────────────────────────────
+
+def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
+    """The committed record as the bot leaves it after a session whose Heston fit was
+    skipped or rejected: every Friday so far (the Saturday book slot finds Yahoo's book
+    empty), and any session the gate rejects. Its surface is built from its book all
+    the same (tier 0.7 item 4), so the newest surface session has no stored fit: its
+    scorecard lists Heston as not scored, with the producer's reason and note, and its
+    residual table and index row hold no Heston rows; the headline fit is an earlier
+    session's. Made from the newest committed surface session by leaving out its fit
+    and its Heston rows. Returns (data dir, that session)."""
+    from types import SimpleNamespace
+    from typing import Any
+
+    from joint_vol_calibration.surface import report, scorecard
+
+    data = tmp_path / "data_store"
+    data.mkdir()
+    newest = _surface_file("scorecard.json").parent.name
+    for child in SHIPPED.iterdir():
+        if child.name not in ("calibrations", "surface"):
+            (data / child.name).symlink_to(child)
+    for sub, keep in (("calibrations", lambda c: c.name != f"joint_cal_{newest}.pkl"),
+                      ("surface", lambda c: c.name not in (newest, "index.json"))):
+        (data / sub).mkdir()
+        for child in (SHIPPED / sub).iterdir():
+            if keep(child):
+                (data / sub / child.name).symlink_to(child)
+    d = data / "surface" / newest
+    shutil.copytree(SHIPPED / "surface" / newest, d)
+    sc = json.loads((d / "scorecard.json").read_text())
+    gone = {m["model"] for m in sc["models"] if str(m["model"]).startswith("heston")}
+    ctx: Any = SimpleNamespace(sq=SimpleNamespace(session=newest), calibrations_dir=data / "calibrations")
+    why = scorecard.heston_v2_unavailable_reason(ctx)
+    note = report._heston_note(sc["models"])
+    sc["models"] = [{"model": m["model"], "available": False, "reason": why} if m["model"] in gone else m
+                    for m in sc["models"]]
+    sc["notes"] = [n.replace(note, report._heston_note(sc["models"])) for n in sc["notes"]]
+    for key in ("ranking_by_oos_median_abs_hs", "ranking_by_common_oos_median_abs_hs"):
+        sc[key] = [r for r in sc.get(key) or [] if r.get("model") not in gone]
+    sc["common_out_of_sample"]["models"] = [m for m in sc["common_out_of_sample"]["models"] if m not in gone]
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    res = pd.read_parquet(d / "residuals.parquet")
+    res[~res["model"].isin(gone)].reset_index(drop=True).to_parquet(d / "residuals.parquet", index=False)
+    idx = json.loads((SHIPPED / "surface" / "index.json").read_text())
+    for r in idx["sessions"]:
+        if r["session"] == newest:
+            r["models"] = {k: v for k, v in (r.get("models") or {}).items() if k not in gone}
+    (data / "surface" / "index.json").write_text(json.dumps(idx))
+    return data, newest
+
+
+@pytest.fixture(scope="module")
+def no_fit(dash, tmp_path_factory):
+    """The Overview, Surface and Calibration pages rendered from _no_fit_store, with
+    what they cite: the no-fit session, the headline fit's session and its data dir."""
+    data, newest = _no_fit_store(tmp_path_factory.mktemp("no_fit"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        path, cal = dash.load_headline_calibration()
+        out = {"data": data, "session": newest, "fit": dash._calibration_session(cal, path)}
+        client = dash.app.test_client()
+        for route in ("/", "/surface", "/calibration"):
+            r = client.get(route)
+            assert r.status_code == 200, route
+            out[route] = r.get_data(as_text=True)
+    return out
+
+
+def test_a_surface_session_without_a_fit_names_the_model_it_did_not_score(dash, no_fit):
+    """Tier 0.7 item 4 builds a session's surface whatever its Heston fit did, so after
+    a Friday (the Saturday slot finds Yahoo's book empty and skips the fit) or a
+    rejected fit the newest surface session has no Heston row. On a copy of the record
+    with 2026-10-30 built that way, the Surface badge listed three models and said
+    nothing of Heston. It now lists the scored models and names Heston as not scored,
+    linked to the scorecard, whose note gives the producer's reason; Heston has no tile."""
+    data, newest = no_fit["data"], no_fit["session"]
+    sc = json.loads((data / "surface" / newest / "scorecard.json").read_text())
+    scored, gone = _scored(sc), [m for m in sc["models"] if m.get("available") is False]
+    assert [m["model"] for m in gone] == ["heston_v2"]
+    html = no_fit["/surface"]
+    block = re.search(r'<div class="page-badge">(.*?)</div>', html, re.DOTALL).group(1)
+    badge = _visible_text("<body>" + block)
+    assert f"Session {newest}" in badge
+    assert re.search(r"models: ([^·]*)", badge).group(1).strip() == ", ".join(
+        dash.model_short(k) for k in pd.read_parquet(data / "surface" / newest / "residuals.parquet",
+                                                     columns=["model"])["model"].unique())
+    assert '<a href="#scorecard">Heston not scored on this session</a>' in block
+    assert dash.prose(gone[0]["reason"]) in _visible_text(html)
+    tiles = _kpi_blocks(html, "surface-scores")
+    assert sorted(k for k in tiles if k.endswith("· median |z|")) == sorted(
+        f"{dash.model_short(k)} · median |z|" for k in scored)
+
+
+def test_a_surface_session_without_a_fit_keeps_heston_in_the_history(dash, no_fit):
+    """The Surface history table took its model columns from the page session's
+    models, so a newest session without a Heston fit dropped Heston's column from
+    every earlier session as well. It keeps a column for every model a stored session
+    scores: a dash on the session without the fit, each earlier session's own figure,
+    and a note saying what the dash means."""
+    data, newest = no_fit["data"], no_fit["session"]
+    html = no_fit["/surface"]
+    heads = _table_heads(html, "surface-history-table")
+    assert "Heston |z|, out of sample" in heads
+    col = heads.index("Heston |z|, out of sample")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        oos = {(r["session"], r["model"]): r["median_abs_hs"]
+               for r in dash.artifacts.surface_oos_by_session(data)}
+    rows = {r[0]: r for r in _table_rows(html, "surface-history-table")}
+    assert rows[newest][col] == "—"
+    earlier = [s_ for s_ in rows if s_ != newest]
+    assert earlier
+    for s_ in earlier:
+        assert rows[s_][col] == dash._fmt(oos.get((s_, "heston_v2")), ".2f"), s_
+    note = re.search(r'id="surface-history".*?<p class="note">(.*?)</p>', html, re.DOTALL).group(1)
+    assert "A dash in a model’s column: the model is not scored on that session" in _html_unescape(note)
 
 
 # ── P2.7: no half-empty grid rows, no blank panel bottoms ────────────────────

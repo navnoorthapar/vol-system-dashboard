@@ -314,16 +314,32 @@ class Ctx:
 P_HEAD = "page head"
 
 
+def unscored(c: Ctx) -> list[str]:
+    """The models the session's scorecard lists as not available and its residual table
+    lacks (Heston on a session with no stored fit, whose surface is built from its book)."""
+    return [str(m["model"]) for m in (c.sc or {}).get("models") or []
+            if m.get("available") is False and str(m.get("model")) not in c.s.models]
+
+
 def page_head(a: Audit, c: Ctx) -> None:
-    """Session, expiry and quote counts, models; the chain badge against the stored
-    chain and every stored session's expiry count."""
+    """Session, expiry and quote counts, models, then one item per model the scorecard
+    did not score ('Heston not scored on this session', linked to the scorecard and its
+    note); the chain badge against the stored chain and every stored session's expiry
+    count."""
     items = a.soup.select(".page-head > .page-badge:not(#chain-badge) > span.nowrap")
-    if not same_len(a, P_HEAD, "badge items", items, range(4)):
+    gone = unscored(c)
+    if not same_len(a, P_HEAD, "badge items", items, range(4 + len(gone))):
         return
     a.date(P_HEAD, "session", items[0], c.session)
     a.num(P_HEAD, "expiries (distinct expiries of the residual table)", items[1], float(len(c.exps)))
     a.num(P_HEAD, "quotes (one per quote of the residual table)", items[2], float(len(c.mkt)))
     a.text(P_HEAD, "models", items[3], "models: " + ", ".join(M.label(m) for m in c.s.models))
+    for el, m in zip(items[4:], gone):
+        a.text(P_HEAD, f"{M.label(m)}: not scored (scorecard.json available: false)", el,
+               f"{M.label(m)} not scored on this session")
+        link = el.select_one("a")
+        a.equal(P_HEAD, f"{M.label(m)} not scored: links to the scorecard and its note",
+                link.get("href") if link is not None else None, "#scorecard")
     chain_badge(a, c)
 
 
@@ -2055,14 +2071,18 @@ def history(a: Audit, c: Ctx) -> None:
     nums(a, P_HIST, "panel meta", meta(a, "surface-history"), [len(idx)])
     beta = M.beta_by_session(c.store)
     tbl = a.one("#surface-history-table")
+    # a column for every model a stored session scores: this session's, then the rest
+    # by name (a session without a Heston fit keeps the earlier sessions' Heston column)
+    hist = history_models(c)
     want_hd = (["Session", "Scored quotes", "Expiries"]
-               + [f"{M.label(m)} |z|, out of sample" for m in c.s.models]
+               + [f"{M.label(m)} |z|, out of sample" for m in hist]
                + ["Repair moves outside spread", "VIX rep. − close", "VIX-term ATM / VIX"]
                + (["β estimator ATM 30d / VIX"] if beta else []))
     texts(a, P_HIST, "columns", heads(tbl), want_hd)
     trs = rows(tbl)
     if not same_len(a, P_HIST, "rows", trs, idx):
         return
+    gaps = False
     for tr, r in zip(trs, list(reversed(idx))):
         name = r["session"]
         x = by.get(name)
@@ -2074,14 +2094,17 @@ def history(a: Audit, c: Ctx) -> None:
              float(len(x.mkt)) if x is not None else M.num(r.get("n_quotes")))
         cell(a, P_HIST, f"{name} expiries (its residual table)", td[2],
              float(len(M.expiries(x))) if x is not None and x.sj is not None else None)
-        for i, m in enumerate(c.s.models):
-            o = (((c.sc_model(m, x) or {}).get("metrics") or {}).get("out_of_sample") or {}) if x else {}
+        for i, m in enumerate(hist):
+            row = (c.sc_model(m, x) or {}) if x else {}
+            scored = row.get("available") is not False
+            o = ((row.get("metrics") or {}).get("out_of_sample") or {}) if scored else {}
             v = M.num(o.get("median_abs_hs"))
             cell(a, P_HIST, f"{name} {M.label(m)} OOS median |z| (its scorecard.json)", td[3 + i], v)
+            gaps |= v is None
             if x is not None and x.sc and v is not None:
                 a.num(P_HIST, f"{name} {M.label(m)} OOS median |z| (its residual table)", td[3 + i],
                       oos_stats(c, m, x)["median_abs_hs"])
-        j = 3 + len(c.s.models)
+        j = 3 + len(hist)
         n_out = float(x.mkt["arb_flag"].astype(bool).sum()) if x is not None and "arb_flag" in x.res else None
         cell(a, P_HIST, f"{name} repair moves outside spread (its residual arb_flag)", td[j],
              n_out if n_out is not None else M.num(r.get("arbitrage_quotes_outside_spread")))
@@ -2099,7 +2122,20 @@ def history(a: Audit, c: Ctx) -> None:
             be = beta.get(name)
             cell(a, P_HIST, f"{name} β estimator on the DB chain (— when its implied spot is off the close)",
                  td[j + 3], be["ratio"] if be else None)
-    nums(a, P_HIST, "note (sessions)", a.one("#surface-history p.note"), [len(idx)])
+    note = a.one("#surface-history p.note")
+    nums(a, P_HIST, "note (sessions)", note, [len(idx)])
+    a.equal(P_HIST, "note: what a dash in a model's column means (shown when a cell is one)",
+            HIST_DASH in text_of(note) if note is not None else None, gaps)
+
+
+HIST_DASH = "A dash in a model’s column: the model is not scored on that session"
+
+
+def history_models(c: Ctx) -> list[str]:
+    """The history table's model columns: this session's models in its residual table's
+    order, then every other model a stored session's residual table holds, by name."""
+    own = list(c.s.models)
+    return own + sorted({m for x in c.all for m in x.models} - set(own))
 
 
 # ── the page ──────────────────────────────────────────────────────────────────

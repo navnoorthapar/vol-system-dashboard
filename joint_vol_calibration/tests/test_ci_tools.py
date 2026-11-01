@@ -809,6 +809,57 @@ class TestRecomputeAudit:
         assert failed("SVI-cal · median |z|") == []
         assert failed("Heston · median |z|") == ["Heston · median |z|: no tile (not scored on this session)"]
 
+    def test_it_checks_the_badge_names_a_model_the_scorecard_did_not_score(self, monkeypatch):
+        """The Surface badge listed the scored models and said nothing of Heston on a
+        session without a fit; it now adds 'Heston not scored on this session', linked
+        to the scorecard. The audit expected exactly four badge items; it now expects
+        one more per model the scorecard marks not available, with that text and link."""
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        monkeypatch.setattr(S, "chain_badge", lambda a, c: None)
+        sc = {"models": [{"model": "svi"}, {"model": "heston_v2", "available": False, "reason": "no fit"}]}
+        ctx = types.SimpleNamespace(sc=sc, s=types.SimpleNamespace(models=["svi"]), session="2026-10-30",
+                                    exps=["2026-11-20"], mkt=[0, 1, 2])
+
+        def failed(extra):
+            html = ('<div class="page-head"><div class="page-badge">'
+                    '<span class="nowrap">Session 2026-10-30</span><span class="nowrap">1 expiries</span>'
+                    '<span class="nowrap">3 quotes</span>'
+                    f'<span class="nowrap">models: SVI</span>{extra}</div></div>')
+            a = rc.core.Audit("t", BeautifulSoup(html, "lxml"))
+            S.page_head(a, ctx)
+            return [c.label for c in a.checks if not c.ok]
+
+        good = '<span class="nowrap"><a href="#scorecard">Heston not scored on this session</a></span>'
+        assert failed(good) == []
+        assert failed("") == ["badge items: count"]
+        assert failed(good.replace("#scorecard", "#scores")) == [
+            "Heston not scored: links to the scorecard and its note"]
+        assert failed(good.replace("not scored", "unscored")) == [
+            "Heston: not scored (scorecard.json available: false)"]
+
+    def test_its_history_keeps_a_column_for_every_model_a_session_scores(self, monkeypatch):
+        """A newest session without a Heston fit dropped Heston's column from the whole
+        Surface history table, and the audit, taking its columns from the same session,
+        agreed. Its columns are now the page session's models, then every other model a
+        stored session's residual table holds, by name."""
+        import importlib
+        import types
+
+        _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        ns = types.SimpleNamespace
+        own = ns(models=["essvi", "svi", "svi_cal"])
+        older = [ns(models=["essvi", "svi", "svi_cal", "heston_v2"]), ns(models=["svi", "zeta"])]
+        ctx = ns(s=own, all=[*older, own])
+        assert S.history_models(ctx) == ["essvi", "svi", "svi_cal", "heston_v2", "zeta"]
+        assert S.history_models(ns(s=own, all=[own])) == ["essvi", "svi", "svi_cal"]
+        assert "the model is not scored on that session" in S.HIST_DASH
+
     def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
         """Tier 0.5: the audit rebuilds the replication's calculation time from
         surface.json's record of the chain by its own calendar: a Cboe book at its

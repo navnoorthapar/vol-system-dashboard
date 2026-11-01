@@ -5478,6 +5478,23 @@ def heston_model_key(models: Iterable[str]) -> str | None:
     return next((m for m in models if str(m).lower().startswith("heston")), None)
 
 
+def history_model_keys(session_models: Iterable[str], stored_models: Iterable[str]) -> list[str]:
+    """The Surface history table's model columns: the page session's models in
+    their order, then every other model a stored session scores, by name."""
+    own = list(dict.fromkeys(session_models))
+    return own + sorted(set(stored_models) - set(own))
+
+
+def unscored_models(scorecard: dict | None) -> list[dict]:
+    """The models a session's scorecard.json lists but could not score (its
+    ``available: false`` rows: Heston on a session with no stored fit, whose
+    surface is still built from the session's book), with the scorecard's reason."""
+    return [{"key": str(m["model"]), "short": model_short(str(m["model"])),
+             "reason": str(m.get("reason") or "")}
+            for m in ((scorecard or {}).get("models") or [])
+            if isinstance(m, dict) and m.get("model") and m.get("available") is False]
+
+
 # ── the smile's expiry strip and the selected expiry's status line ─────────────
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -6359,6 +6376,9 @@ def surface_extras(d: dict, surf: dict) -> None:
     models = surf["models"]
     # the page badge listed none
     d["models"] = [{"key": m, "label": model_label(m), "short": model_short(m)} for m in models]
+    # a model the scorecard lists but could not score on this session (Heston
+    # without a stored fit): the badge says so instead of leaving it out silently
+    d["unscored"] = [u for u in unscored_models(surf.get("scorecard")) if u["key"] not in models]
     # scores: the producer's scorecard when present, else computed on the residual table
     if surf.get("scorecard_rows"):
         d["score_rows"] = [{"key": r["model"], "label": model_label(r["model"]),
@@ -6785,8 +6805,14 @@ def surface_extras(d: dict, surf: dict) -> None:
     # every session the surface report has covered (index.json)
     idx = surf.get("index") or []
     if idx:
-        mk = list(models)
+        # a column for every model scored on any stored session: this session's
+        # models, then the others by name. A session without a Heston fit still
+        # has a surface; taking only its models dropped Heston's column from
+        # every earlier session as well (the cell of a session where a model is
+        # not scored is a dash, and the note says why)
+        mk = history_model_keys(models, (r["model"] for r in oos_all))
         d["history_models"] = [{"key": m, "label": model_short(m)} for m in mk]
+        d["history_gaps"] = any(oos_by.get((r["session"], m)) is None for r in idx for m in mk)
         d["surface_history"] = [{"session": r["session"], "n": r.get("n_quotes"),
                                  "arb_out": r.get("arbitrage_quotes_outside_spread"),
                                  "vix_rep": _num(r.get("vix_replicated")),
