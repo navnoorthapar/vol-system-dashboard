@@ -977,6 +977,36 @@ class TestRecomputeAudit:
         assert "SPX book 2: named by its recorded state (gth)" in failed(
             f"SPX {s}: {closing} and {overnight.replace('(overnight book)', '(closing book)')}")
 
+    def test_it_leaves_a_model_the_scorecard_did_not_score_off_the_page(self, monkeypatch):
+        """A session's surface is built whatever its Heston fit did (CITSEC-05); with no
+        fit stored, scorecard.json lists heston_v2 as not available and the page gives
+        it no tile, row or description (the scorecard's note says why). The audit
+        expected all four models, so a session with no fit (every Friday session the
+        Saturday book slot cannot fit: Yahoo's book is empty then) failed five checks
+        and the presentation gate. Found on a copy of the record with 2026-10-30 built
+        from its closing book (FUND_GRADE_PLAN 0.8)."""
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        sc = {"models": [{"model": "svi"}, {"model": "heston_v2", "available": False, "reason": "no fit"}],
+              "ranking_by_oos_median_abs_hs": [{"model": "svi"}]}
+        assert S.Ctx._score_order(types.SimpleNamespace(sc=sc, s=types.SimpleNamespace(models=["svi"]))) == [
+            "svi"]
+
+        def failed(tile):
+            html = (f'<div id="surface-scores"><div class="kpi"><span class="kpi-label">{tile}</span>'
+                    "</div></div>")
+            ctx = types.SimpleNamespace(sc=sc, score_models=[], vx={})
+            a = rc.core.Audit("t", BeautifulSoup(html, "lxml"))
+            S.score_tiles(a, ctx)
+            return [c.label for c in a.checks if not c.ok]
+
+        assert failed("SVI-cal · median |z|") == []
+        assert failed("Heston · median |z|") == ["Heston · median |z|: no tile (not scored on this session)"]
+
     def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
         """Tier 0.5: the audit rebuilds the replication's calculation time from
         surface.json's record of the chain by its own calendar: a Cboe book at its

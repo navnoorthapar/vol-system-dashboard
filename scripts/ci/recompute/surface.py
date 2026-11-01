@@ -279,9 +279,13 @@ class Ctx:
         self.fam = store.vix_family()
 
     def _score_order(self) -> list[str]:
+        """The scored models in the page's order. A model the scorecard lists as not
+        available (a session with no stored Heston fit, CITSEC-05: its surface is built
+        whatever the fit did) has no tile, row or description; the scorecard's note says
+        why, and is checked with the other notes."""
         if not self.sc:
             return list(self.s.models)
-        order = [str(m["model"]) for m in self.sc["models"]]
+        order = [str(m["model"]) for m in self.sc["models"] if m.get("available") is not False]
         rank = [r.get("model") for r in self.sc.get("ranking_by_oos_median_abs_hs") or []]
         pos = {m: i for i, m in enumerate(rank)}
         return sorted(order, key=lambda m: pos.get(m, len(pos) + order.index(m)))
@@ -468,6 +472,10 @@ def score_tiles(a: Audit, c: Ctx) -> None:
     """Each model's out-of-sample median |z| tile: the scorecard's figures, the same
     figures recomputed from the residual table, and the range over every session."""
     tiles = kpis(a, "#surface-scores")
+    for row in (c.sc or {}).get("models") or []:
+        if row.get("available") is False:
+            name = f"{M.label(str(row.get('model')))} · median |z|"
+            a.equal(P_SCORES, f"{name}: no tile (not scored on this session)", tiles.get(norm(name)), None)
     for m in c.score_models:
         name = f"{M.label(m)} · median |z|"
         t = tiles.get(norm(name))
