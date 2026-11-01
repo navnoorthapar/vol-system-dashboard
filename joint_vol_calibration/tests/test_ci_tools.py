@@ -882,6 +882,51 @@ class TestRecomputeAudit:
         assert sh["newer"] is None
         assert ov.NEWER.startswith("the headline fit’s session (Surface shows the newer")
 
+    def test_it_checks_the_overviews_stale_fit_banner_and_its_cause(self, monkeypatch, tmp_path):
+        """A Friday without a fit followed by a skipped one left the headline fit 2 NYSE
+        sessions old; the Overview then shows a stale banner the audit never checked, its
+        5 numbers fell outside every verified element and the coverage bar failed the
+        presentation gate (the no-fit simulation on 2026-11-02). The audit now checks
+        each banner: shown exactly from 2 sessions, its age, level and dates, and for the
+        fit the cause the page reads from the run records."""
+        import importlib
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        ov = importlib.import_module("recompute.overview")
+        (tmp_path / "runs").mkdir()
+        for utc, sess in (("20261031T023000Z", "2026-10-30"), ("20261103T023000Z", "2026-11-02")):
+            (tmp_path / "runs" / f"run_{utc}_book.json").write_text(json.dumps(
+                {"schema": "run_ledger/1", "run_utc": utc, "slot": "book",
+                 "calibration": {"session": sess, "status": "skipped",
+                                 "reason": "no SPX option chain returned"}}))
+        store = rc.data.Store(tmp_path)
+        f = {"ref_page": "2026-11-02", "spx_date": "2026-11-02", "label_date": "2026-11-02",
+             "head": {"session": "2026-10-29"}, "arc": []}
+        cause = ("The book run did not fit 2026-11-02: no SPX option chain returned (2 runs after 2026-10-29 "
+                 "tried a fit: 2 skipped); the 2026-10-29 fit is shown.")
+        assert ov.stale_cause(store, f, "2026-10-29") == cause
+
+        def failed(body, age="2", title="Heston calibration: 2 NYSE sessions old"):
+            html = (f'<main><div class="banner banner-stale-warn" data-stale="calibration" data-age="{age}">'
+                    f'<div class="banner-title">{title}</div>'
+                    f'<div class="banner-body">{body}</div></div></main>')
+            a = rc.core.Audit("t", BeautifulSoup(html, "lxml"))
+            ov.check_stale_banners(a, store, f, {"date": "2026-11-02"})
+            return [c.label for c in a.checks if not c.ok]
+
+        lead = "Heston calibration as of 2026-10-29; the newest session the site has data for is 2026-11-02."
+        assert failed(f"{lead} {cause}") == []
+        assert failed(lead) == ["Heston calibration: body, with why the fit is older"]
+        assert failed(f"{lead} {cause}", age="1") == ["Heston calibration: data-age"]
+        assert failed(f"{lead} {cause}", title="Heston calibration: 3 NYSE sessions old") == [
+            "Heston calibration: title"]
+        fresh = {**f, "head": {"session": "2026-10-30"}}
+        a = rc.core.Audit("t", BeautifulSoup('<div data-stale="calibration"></div>', "lxml"))
+        ov.check_stale_banners(a, store, fresh, {"date": "2026-11-02"})
+        assert [c.label for c in a.checks if not c.ok] == [
+            "Heston calibration: banner (1 NYSE sessions old): shown"]
+
     def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
         """Tier 0.5: the audit rebuilds the replication's calculation time from
         surface.json's record of the chain by its own calendar: a Cboe book at its

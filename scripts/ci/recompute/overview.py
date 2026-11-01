@@ -35,6 +35,7 @@ from .data import Store, chain_words, sessions_between
 P_BADGE, P_FIND, P_KEY = "page badge", "findings", "key results"
 P_REG, P_TS, P_PDV = "regime", "term structure", "implied vs forecast"
 P_VX, P_RATIO, P_FIT, P_PIPE = "VX curve", "VIX/VIX3M", "headline fit", "pipeline"
+P_STALE = "staleness banners"
 SURFACE_MODEL = "svi_cal"
 TS_OVERLAYS = ((1, "1 session earlier"), (5, "5 sessions earlier"), (21, "21 sessions earlier"))
 SHORT_END_DAYS = 30.0        # 'the short end': listed expiries at most 30 calendar days out
@@ -408,6 +409,106 @@ def fit_box(f: Facts) -> dict[str, tuple[float, float]]:
     cal = f["head"]["cal"] if f["head"] else {}
     b = (((cal.get("methods") or {}).get("optimizer") or {}).get("bounds")) or om.GATE["box"]
     return {k: (float(v[0]), float(v[1])) for k, v in dict(b).items()}
+
+
+# ── staleness banners ────────────────────────────────────────────────────────
+STALE_TAIL = {"pdv": "The spread below pairs VIX and the forecast on that date only.",
+              "market": "The market database lags the other inputs on this page."}
+
+
+def check_stale_banners(a: Audit, store: Store, f: Facts, pdv: Facts) -> None:
+    """The banners above the page (base.html), one per dated input at least 2 NYSE
+    sessions behind the newest session the site has data for (red from 5): its age,
+    level, dates and, for the headline fit, why it is older (stale_cause). A Friday
+    without a fit followed by a skipped or rejected one makes the fit 2 sessions old,
+    and an unchecked banner left the Overview under the audit's coverage bar."""
+    ref = f["ref_page"]
+    head = f["head"]["session"] if f["head"] else None
+    for comp, label, date in (("market", "Last close (SPX)", f["spx_date"]),
+                              ("regime", "Rule regime label", f["label_date"]),
+                              ("calibration", "Heston calibration", head),
+                              ("pdv", "PDV forecast", pdv["date"])):
+        age = sessions_between(date, ref) if date and ref else None
+        level = om.stale_level(age)
+        el = a.one(f'div[data-stale="{comp}"]')
+        if not present(a, P_STALE, f"{label}: banner ({age} NYSE sessions old)", el,
+                       level in ("warn", "error")) or el is None or age is None:
+            continue
+        a.equal(P_STALE, f"{label}: data-age", el.get("data-age"), str(age))
+        a.equal(P_STALE, f"{label}: level (warn from 2 sessions, error from 5)", el.get("class"),
+                ["banner", f"banner-stale-{level}"])
+        a.text(P_STALE, f"{label}: title", el.select_one(".banner-title"),
+               f"{label}: {om.plural(age, 'NYSE session')} old")
+        body = el.select_one(".banner-body")
+        lead = f"{label} as of {date}; the newest session the site has data for is {ref}."
+        if comp != "calibration":
+            a.text(P_STALE, f"{label}: body", body, " ".join([lead, *([STALE_TAIL[comp]] if comp in STALE_TAIL
+                                                                      else [])]))
+            continue
+        cause = stale_cause(store, f, str(date))
+        if isinstance(cause, str):
+            a.text(P_STALE, f"{label}: body, with why the fit is older", body, f"{lead} {cause}")
+        else:                       # a stored later fit the gate refuses: its reason is the gate's words
+            pre, post, fails = cause
+            a.text(P_STALE, f"{label}: body (dates)", body, f"{lead} {pre}", contains=True)
+            a.equal(P_STALE, f"{label}: body ends with the fit shown", text_of(body).endswith(norm(post)),
+                    True)
+            a.equal(P_STALE, f"{label}: the stored later fit fails the gate (recomputed)", fails, True)
+
+
+def stale_cause(store: Store, f: Facts, session: str) -> str | tuple[str, str, bool]:
+    """Why the headline fit is older than the newest session, by the page's rule rebuilt
+    from the calibration archive, the run records and the stored chains: a stored later
+    fit (legacy, or failing the gate: then (text before the gate's reason, the text after
+    it, whether the gate refuses it), as the gate's own words are not rebuilt); else the
+    newest run that tried a later session and stored no fit (data_store/runs, its stored
+    reason as given), with how many such runs; else a stored later SPX chain with no
+    fit; else that the store cannot say."""
+    newer = sorted((r for r in f["arc"] if r["session"] and r["session"] > session),
+                   key=lambda r: r["session"])
+    if newer:
+        last = newer[-1]
+        more = f" ({len(newer)} stored fits after {session}, none accepted)" if len(newer) > 1 else ""
+        if last["legacy"]:
+            return (f"The {last['session']} fit is stored but is a pre-C22 (legacy) result, never "
+                    f"ranked{more}; the {session} fit is shown.")
+        return (f"The {last['session']} fit is stored but failed the quality gate: ",
+                f"{more}; the {session} fit is shown.", not last["ok"])
+    recs = []
+    for path in sorted((store.root / "runs").glob("run_*.json")):
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("schema") == "run_ledger/1" and rec.get("run_utc"):
+            recs.append(rec)
+    recs.sort(key=lambda r: str(r["run_utc"]))
+    tried = [r for r in recs if isinstance(r.get("calibration"), dict) and r["calibration"].get("session")
+             and str(r["calibration"]["session"]) > session
+             and r["calibration"].get("status") in ("rejected", "skipped", "failed")]
+    if tried:
+        newest = max(str(r["calibration"]["session"]) for r in tried)
+        on = [r for r in tried if str(r["calibration"]["session"]) == newest]
+        r = ([x for x in on if x["calibration"]["status"] == "rejected"] or on)[-1]
+        c, slot = r["calibration"], r.get("slot") or "run"
+        reason = str(c.get("reason") or "no reason recorded").rstrip(".")
+        what = {"rejected": f"The gate rejected {newest} ({slot}): {reason}",
+                "skipped": f"The {slot} run did not fit {newest}: {reason}"}.get(
+                    c["status"], f"The {newest} fit failed ({slot}): {reason}")
+        if len(tried) > 1:
+            n = {k: sum(1 for x in tried if x["calibration"]["status"] == k)
+                 for k in ("failed", "rejected", "skipped")}
+            what += (f" ({len(tried)} runs after {session} tried a fit: "
+                     + ", ".join(f"{v} {k}" for k, v in n.items() if v) + ")")
+        return f"{what}; the {session} fit is shown."
+    chains = sorted(p.stem[4:] for p in (store.root / "options").glob("spx_*.parquet")
+                    if DATE.fullmatch(p.stem[4:]))
+    later = [c for c in chains if c > session]
+    if later:
+        return f"An SPX closing chain for {later[-1]} is stored but no fit of it; the {session} fit is shown."
+    return (f"No SPX closing chain or fit after {session} is stored. The daily job stores both only for a "
+            "fit that passes the quality gate, so whether a later session was fitted and rejected, or not "
+            "fitted, is in the job's run log, not in the store.")
 
 
 # ── findings at a glance ─────────────────────────────────────────────────────
@@ -1351,6 +1452,7 @@ def run(a: Audit, store: Store) -> None:
     f = facts(store)
     pdv = pdv_facts(f, store)
     check_badge(a, f, pdv)
+    check_stale_banners(a, store, f, pdv)
     check_findings(a, store, f)
     check_key_results(a, store, f)
     check_regime(a, store, f)
