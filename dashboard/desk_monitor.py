@@ -1,11 +1,14 @@
 """
 desk_monitor.py — Model Risk as an exceptions view (pure functions; no Flask, no I/O).
 
-The Model Risk page lists its checks worst first (BREACH, WATCH, OK, INFO, then
-not applicable; within a status, in inventory order), with a summary strip of
-counts. Each check with numeric limits (g, a) — OK ≤ g, watch ≤ a, breach
-above, app.MONITOR_LIMITS — gets a bullet: three bands on a linear scale from 0
-to max(1.5·a, value) and a tick at the value. A check that can be recomputed on
+The Model Risk page lists its checks worst first (BREACH, WATCH, OK, INFO, BY
+DESIGN, then not applicable; within a status, in inventory order), with a summary
+strip of counts. BY DESIGN is a check over its limit for a reason that does not
+change from session to session (app.by_design), listed after the live statuses so
+a BREACH always marks something that changed or failed (CIO-14). Each check with
+numeric limits (g, a) — OK ≤ g, watch ≤ a, breach above, app.MONITOR_LIMITS — gets
+a bullet: three bands on a linear scale from 0 to max(1.5·a, value) and a tick at
+the value. A check that can be recomputed on
 every stored session (the gated fits, the surface reports, the β chains) gets
 its history: one dot per session, coloured by TODAY's limits applied
 retroactively, its range and where today ranks. The sessions are the ones the
@@ -18,9 +21,10 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-SEVERITY = ("breach", "watch", "ok", "info", "na")
+SEVERITY = ("breach", "watch", "ok", "info", "design", "na")
 MINUS = "\u2212"
-STATUS_WORDS = {"breach": "breach", "watch": "watch", "ok": "OK", "info": "info", "na": "N/A"}
+STATUS_WORDS = {"breach": "breach", "watch": "watch", "ok": "OK", "info": "info", "design": "by design",
+                "na": "N/A"}
 BULLET_W, BULLET_H = 120, 10
 
 

@@ -30,6 +30,49 @@ The owner has four options. They can be combined.
 - C23 does make Cboe's official files the stored source of the VIX index family, correcting the Yahoo prints (see the correction log). The risk is the same class as before. Before C23, every session row of `vix_daily` already equalled Cboe's VIX file to 0.005 (275 rows were tagged 'cboe'), and the term structure held Yahoo's republication of the same Cboe indices. Under option 1 or 2 these partitions move private with everything else.
 - The cross-source check (`database.compare_sources`, `pipeline.refresh_vix_index_family`) uses Cboe's files to check and correct Yahoo's prints. That is the use Cboe's clause on verifying or correcting other data names.
 
+## The private store for raw Cboe books (owner decision, 2026-10-28)
+
+**Owner decision (2026-10-28):** the raw Cboe option books (`data_store/options/cboe/*`) stop being committed to this
+public repository. They go to a separate **private** data repository the owner creates; the public repository keeps,
+for each book, a manifest with its hashes and counts and never its quotes. The books committed before the move stay
+in the public history: rewriting it (option 4 above) remains the owner's separate call.
+
+The daily workflow implements it as soon as two repository secrets exist, and keeps today's behaviour, with a
+`::warning::` on every run saying the raw books are still committed publicly, until then.
+
+**Setup (once):**
+
+1. Create a **private** GitHub repository for the books, for example `<owner>/vol-system-cboe-books`, with an initial
+   commit (a README is enough). Nothing else goes in it; the bot writes `options/cboe/<stem>.parquet` and
+   `<stem>.json` there.
+2. Create a **fine-grained personal access token** with *Repository access: Only select repositories* → that private
+   repository only, and *Repository permissions → Contents: Read and write* (nothing else; Metadata: read-only is
+   added automatically). Give it an expiry and a calendar reminder to rotate it.
+3. In this repository, *Settings → Secrets and variables → Actions → New repository secret*:
+   - `CBOE_DATA_REPO` = `owner/name` of the private repository;
+   - `CBOE_DATA_TOKEN` = the token.
+
+**What then happens on every run** (`.github/workflows/daily_refresh.yml`, `scripts/ci/cboe_private.py`):
+
+- Before the refresh, the private repository is cloned (depth 1) into `$RUNNER_TEMP/cboe-data`; `cloud_refresh.py`
+  gets its `options/cboe/` as `CBOE_BOOKS_DIR`. Every reader of raw books goes through one resolver,
+  `cboe_downloader.find_books` (the private checkout first, then `data_store/options/cboe/`), so the forward
+  ledger's marks of open positions find a book an earlier slot moved, and `book_captured` (which also counts a
+  manifest) keeps the retry slot from capturing a stored book again. A later backfill or `make reproduce` step that
+  reads a book must use the same resolver; `.github/workflows/reproduce.yml` clones the store the same way.
+- After the refresh, this run's new books are copied into the checkout, committed and pushed (retried, rebased on a
+  rejection). Only after the push is each book checked byte-identical to its private copy (SHA-256), given its
+  public manifest `data_store/options/cboe_manifest/<stem>.json` (`cboe_downloader.write_manifest`: session, quote
+  time, book state, row and expiry counts, the SHA-256 of the raw response and of both files, the private path; no
+  quote) and removed from the public tree. The capture commit takes the manifests
+  (`scripts/ci/check_captures.py` checks each).
+- The public captures artifact, the capture check (`--no-raw-cboe`) and the data commit all leave
+  `data_store/options/cboe` out while the store is configured, so a book the private repository did not take never
+  reaches a public commit or artifact. It gets no manifest either, so a later slot inside the live book captures the
+  session again; the run fails and says so.
+- The token reaches git only as a per-command HTTP header; it is never written to a `.git/config` that later steps,
+  which run third-party Python code, could read.
+
 ## What the repository commits
 
 | Path | Content | Source | Status |
@@ -37,7 +80,8 @@ The owner has four options. They can be combined.
 | `data_store/options/spx_*.parquet` | 5 SPX chains (2026-03-24, 03-27, 05-29, 06-18, 10-16): 68,006 quotes | Yahoo (yfinance) | Raw quotes. **High risk** |
 | `data_store/options/vix_*.parquet` | 4 VIX chains (2026-03-24 to 06-18): 1,896 quotes | Yahoo (yfinance) | Raw quotes. **High risk** |
 | `data_store/options/cboe/` (C23) | Cboe delayed-quotes SPX and VIX chains, every line, one capture per book session (from 2026-10-20), with a JSON record per capture (fetch and quote time, book state, SHA-256 of the raw response) | Cboe (delayed quotes) | Raw quotes. **High risk** |
-| `data_store/forward/` (C23) | The forward ledger: one hash-chained JSON per captured session (signals, listed straddles at the captured bid/ask, marks); no entry yet | Derived from the session's Cboe SPX capture (the Yahoo chain as fallback) | Derived (holds individual bid/ask prints of the straddles it trades) |
+| `data_store/options/cboe_manifest/` | Once the private store is configured (above): one manifest per raw book held there (hashes, counts, timestamps, private path), no quotes | Derived from the private books | Metadata |
+| `data_store/forward/` (C23) | The forward ledger: one hash-chained JSON per captured session (signals, listed straddles at the captured bid/ask, marks); first entry 2026-10-26 | Derived from the session's Cboe SPX capture (the Yahoo chain as fallback) | Derived (holds individual bid/ask prints of the straddles it trades) |
 | `data_store/vol_system.db` | The rebuildable cache. Holds the chains above, VX futures (30,963 rows, 2013-01-02 to 2026-10-09), VX final settlements (201), and every market table | Cboe, Yahoo | Raw. **High risk** |
 | `data_store/market/vix_term_structure/`, `vix_daily/` | Daily closes of VIX9D/VIX/VIX3M/VIX6M/VVIX and VIX OHLC, 2010 to present | Cboe official files (C23); 2 rows Yahoo-only | Index levels. Medium-high risk |
 | `data_store/benchmarks/` (C23) | Cboe strategy-index daily levels: PUT, WPUT, BXM, BFLY, CNDR, VXTH, SET (2017-01-03 to 2026-10-19, one CSV each) and `manifest.json` | Cboe index files | Index levels. Medium-high risk; not yet covered by the owner's decision (above) |
@@ -76,7 +120,7 @@ The owner has four options. They can be combined.
   - `https://cdn.cboe.com/data/us/futures/market_statistics/historical_data/VX/VX_<expiry>.csv`
   - `https://www.cboe.com/us/futures/market_statistics/settlement/csv?dt=<date>`
 - **Terms:** as above.
-- **Committed:** yes, in `vol_system.db` (30,963 daily rows and 201 settlements).
+- **Committed:** yes, in `vol_system.db` (30,963 daily rows through 2026-10-09 and 201 settlements). From FUND_GRADE_PLAN 1.12 the daily job also stores each session's monthly settlements from the settlement file (`scripts/cloud_refresh.py` `refresh_vx_futures`) and commits the table as yearly partitions under `data_store/market/vix_futures_daily/` (its whole history on the first run).
 - **Risk:** medium-high.
 
 ### Cboe: delayed option quotes
@@ -84,7 +128,7 @@ The owner has four options. They can be combined.
 - **Used for:** the full SPX and VIX chains with greeks, one request each (`_SPX.json`, `_VIX.json`). `cboe_downloader.capture_option_chain` (C23) returns a capture with timestamps and a hash.
 - **Endpoint:** `https://cdn.cboe.com/api/global/delayed_quotes/options/_<SYMBOL>.json`.
 - **Terms:** as above.
-- **Committed:** from C23, one capture of each book per session under `data_store/options/cboe/` (owner decision above). The calibrator and the database still read only the Yahoo chains; the captures are the record for the forward test, a VIX-options leg and a real-price study.
+- **Committed:** from C23, one capture of each book per session under `data_store/options/cboe/` (owner decision above). The Heston calibrator and the database still read only the Yahoo chains. The session's surface report (surface, scorecard, VIX replication, static-arbitrage screen) and the forward ledger read the newest SPX capture of the session that passes the quote-state gates (quoted at or after the 16:00 ET close; at least 80% of near-ATM lines two-sided), with T from its quote time; otherwise they fall back to the Yahoo chain and `surface.json` `inputs.source_reason` says why (`surface/quotes.select_session_chain`).
 - **Risk:** high (committed).
 - **Note:** the payload's `timestamp` is when Cboe generated the file, not when the quotes were live. On 2026-10-20 a fetch at 12:29:03Z returned timestamp 12:28:16Z and Last-Modified 12:28:19Z. The quotes are about 15 minutes older than the timestamp: a payload stamped 16:04:29Z held a latest option trade and an underlying last trade at 11:49:27 ET (15:49:27Z). `parse_cboe_options_payload` therefore stores quote_time = timestamp − 15 minutes.
 

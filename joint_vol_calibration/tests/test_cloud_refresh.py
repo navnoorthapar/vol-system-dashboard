@@ -127,6 +127,8 @@ def env(tmp_path, monkeypatch):
         columns=["date", "series", "value", "source"]))
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.delenv("REFRESH_SLOT", raising=False)          # no run record unless a test asks
+    monkeypatch.delenv("CBOE_BOOKS_DIR", raising=False)        # no private book store unless a test asks
     # The post-fit steps have their own tests below; here an accepted fit records
     # a ledger from fixed signals (the synthetic DB is too short for the real
     # ones) and the derived artifacts are a no-op.
@@ -137,7 +139,42 @@ def env(tmp_path, monkeypatch):
     def no_capture(und, now=None, **kw):
         raise OSError("no network in tests")
     monkeypatch.setattr(cboe, "capture_option_chain", no_capture)
+    # Cboe's CFE settlement file of any session (_vx_settlement_csv); the VX
+    # per-contract files are unreachable: no network
+    monkeypatch.setattr(cboe, "download_vx_settlements", lambda trade_date: cboe.parse_vx_settlement_csv(
+        _vx_settlement_csv(trade_date), trade_date))
+    monkeypatch.setattr(cboe, "download_vix_futures_daily_history",
+                        lambda start=None, end=None, expiries=None: pd.DataFrame())
     return cr
+
+
+_MONTH_CODES = "FGHJKMNQUVXZ"
+
+
+def _vx_settlement_csv(session: str) -> str:
+    """A CFE settlement file for ``session`` in Cboe's format: the nine monthly VX
+    contracts from the session's month on, in contango, at 4 dp and moving from
+    session to session, plus a weekly and a VXM mini line the job leaves out."""
+    y, m = int(session[:4]), int(session[5:7])
+    exps = [e for e in (dbm.vx_monthly_expiry(y + (m - 1 + k) // 12, (m - 1 + k) % 12 + 1) for k in range(11))
+            if e >= session][:9]
+    shift = 0.0137 * (date.fromisoformat(session).toordinal() % 29)
+    lines = ["Product,Symbol,Expiration Date,Price"]
+    for i, e in enumerate(exps):
+        lines.append(f"VX,VX/{_MONTH_CODES[int(e[5:7]) - 1]}{e[3]},{e},{17.5 + 0.45 * i + shift:.4f}")
+    lines.append(f"VX,VX40/X6,{exps[0]},{30.0:.4f}")                 # a weekly: not stored
+    lines.append(f"VXM,VXM/X6,{exps[1]},{17.0:.4f}")                 # the mini: not VX
+    return "\n".join(lines) + "\n"
+
+
+def _vx_monthlies(session: str) -> list[tuple[str, float]]:
+    """(expiry, settle) of the monthly contracts in _vx_settlement_csv(session), from its text."""
+    out = []
+    for ln in _vx_settlement_csv(session).splitlines()[1:]:
+        prod, sym, exp, px = ln.split(",")
+        if prod == "VX" and sym.startswith("VX/"):
+            out.append((exp, float(px)))
+    return out
 
 
 # every sleeve flat except S4 short: the ledger opens one straddle
@@ -305,16 +342,21 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     assert res["r_reference"] == pytest.approx(0.0400, abs=1e-12)
     assert res["r_reference_source"].startswith("^IRX") and "cc" in res["r_reference_source"]
     assert res["chain_diagnostics"]["r_ref"] == res["r_reference"]     # one rate, cleaning and fit
-    # Wed 21:30 ET: the live book is the Cboe GTH session trading for Thursday,
-    # so T runs from the quote time (not the 16:00 close), and the stored
-    # snapshot records that time for a refit.
-    assert cal["chain"]["quote_time"] == "2026-09-24T01:30:00Z"
-    assert cal["chain"]["t_origin"] == "2026-09-23T21:30:00-04:00"
-    assert res["methods"]["T_origin"] == "2026-09-23T21:30:00-04:00"
-    assert "Global Trading Hours" in res["methods"]["T"]
-    assert "residual timing mismatch" in res["methods"]["vix_leg_timing"]
-    assert res["anchors_by_expiry"][0]["T_days"] < (date.fromisoformat(
-        res["anchors_by_expiry"][0]["expiry"]) - date.fromisoformat(SESSION)).days
+    # Wed 21:30 ET, inside the GTH window, but Yahoo records no quote time
+    # (QUANT-01): the run used to stamp its own clock as the quote time and
+    # measure T from it. The download instant is fetched_at, T runs from the
+    # 16:00 close, and the stored snapshot records no quote time.
+    fetched = cal["chain"]["fetched_at"]
+    assert NOW <= datetime.fromisoformat(fetched) < NOW + timedelta(minutes=10)
+    assert cal["chain"]["quote_time"] is None
+    assert cal["chain"]["source"] == "yfinance"
+    assert cal["chain"]["t_origin"] == "2026-09-23T16:00:00-04:00"
+    assert res["methods"]["T_origin"] == "2026-09-23T16:00:00-04:00"
+    assert f"records no quote time; downloaded {fetched}" in res["methods"]["T"]
+    assert "Global Trading Hours" not in res["methods"]["T"]
+    assert "residual timing mismatch" not in res["methods"]["vix_leg_timing"]
+    assert res["anchors_by_expiry"][0]["T_days"] == pytest.approx((date.fromisoformat(
+        res["anchors_by_expiry"][0]["expiry"]) - date.fromisoformat(SESSION)).days, abs=1e-9)
     # Stored: the observed two-sided quotes (incl. the one too wide for the
     # cleaner), never a one-sided line.
     n, n_two_sided = _spx_snapshot_rows(SESSION)
@@ -330,7 +372,9 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     chain_file = dbm.options_snapshot_path(SESSION, "SPX")
     assert chain_file.exists() and str(chain_file) in st["persisted"]
     assert len(pd.read_parquet(chain_file)) == n
-    assert set(pd.read_parquet(chain_file)["quote_time"]) == {"2026-09-24T01:30:00Z"}
+    stored = pd.read_parquet(chain_file)
+    assert stored["quote_time"].isna().all()                   # never the download instant
+    assert res["chain_diagnostics"]["fetched_at"] == fetched   # which the fit records
     # The committed chain reproduces the committed fit's inputs: a calibrator
     # built from the stored snapshot (fresh DB loaded from the parquet) has the
     # same carry, anchors and out-of-sample surface as the live run.
@@ -367,8 +411,11 @@ def test_an_accepted_session_is_recorded_in_the_forward_ledger(env):
     ledger = fl.load_ledger(path)
     fl.validate_ledger(ledger)
     assert ledger["previous"] is None
-    assert ledger["inputs"]["quote_after_close"] is True       # the GTH book, after the 16:00 close
-    assert ledger["inputs"]["quote_time"] == "2026-09-24T01:30:00Z"
+    # Yahoo records no quote time (QUANT-01): none is claimed; the book was
+    # downloaded after the 16:00 close (a pre-close download is refused)
+    assert ledger["inputs"]["quote_after_close"] is None
+    assert ledger["inputs"]["quote_time"] is None
+    assert ledger["inputs"]["book"]["fetched_at"] == st["calibration"]["chain"]["fetched_at"]
     assert [p["sleeve"] for p in ledger["positions"]] == ["s4"]
     assert led["actions"] == ["s4 open"]
     # the ledger's chain hash is the committed snapshot's
@@ -457,6 +504,53 @@ def test_the_ledger_trades_on_the_full_cboe_capture_whatever_the_fit_does(env, m
     assert pos["contract"]["expiry"] in set(capture["expiry"])
 
 
+def test_books_held_in_the_private_store_are_found_and_not_captured_again(env, monkeypatch, tmp_path):
+    """CITSEC-06: with the private data repository configured, the workflow moves
+    each raw book there (scripts/ci/cboe_private.py) and the public tree keeps a
+    manifest. A later slot of the same session must neither capture the book
+    again (a manifest, or the book in the private checkout, counts) nor lose it:
+    the forward ledger marks on the book from the private checkout
+    (CBOE_BOOKS_DIR, cboe_downloader.find_books)."""
+    calls = []
+
+    def fake(und, now=None, **kw):
+        calls.append(und)
+        return _full_spx_capture() if und == "SPX" else _capture(und)
+    monkeypatch.setattr(cboe, "capture_option_chain", fake)
+    _fit_fails(monkeypatch)
+    _accepted_pickle(env, "2026-09-22")
+    _code, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    assert st["forward_ledger"]["status"] == "recorded"
+    first = fl.load_ledger(st["forward_ledger"]["path"])
+    # what the workflow does next when configured: books to the private checkout, a manifest here
+    pub = env.DATA / "options" / "cboe"
+    priv = tmp_path / "private" / cboe.PRIVATE_BOOKS_SUBDIR
+    priv.mkdir(parents=True)
+    for pq_path in sorted(pub.glob("*.parquet")):
+        cboe.write_manifest(pq_path, cboe.manifest_dir(env.DATA), "owner/books")
+        for f in (pq_path, pq_path.with_suffix(".json")):
+            f.rename(priv / f.name)
+    assert not list(pub.glob("*"))
+    pathlib.Path(st["forward_ledger"]["path"]).unlink()            # its commit failed
+    monkeypatch.setenv("CBOE_BOOKS_DIR", str(priv))
+    _code, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    assert calls == ["SPX", "VIX"]                                 # nothing fetched again
+    assert st["capture"]["status"] == "exists"
+    assert st["capture"]["captures"]["SPX"]["file"].startswith(str(priv))
+    assert not list(pub.glob("*.parquet"))                         # nothing raw written publicly
+    led = st["forward_ledger"]
+    assert (led["status"], led["book"]) == ("recorded", "cboe")
+    again = fl.load_ledger(led["path"])
+    assert again["inputs"]["book"] == first["inputs"]["book"]      # the same book, read privately
+    assert again["inputs"]["chain_sha256"] == first["inputs"]["chain_sha256"]
+    # without the private checkout the manifest alone still says the book is stored
+    monkeypatch.delenv("CBOE_BOOKS_DIR")
+    _code, st = _run(env, "capture")
+    assert st["capture"]["status"] == "exists"
+    assert st["capture"]["captures"]["VIX"]["file"].endswith(".json")
+    assert calls == ["SPX", "VIX"]
+
+
 def test_every_later_book_slot_can_mark_what_the_ledger_opened():
     """The defect behind STATS-1, on the real expiry rule: a 30-day straddle
     opened on a session's book is outside the next sessions' calibration
@@ -525,6 +619,22 @@ def test_a_book_quoted_before_the_close_is_not_the_ledgers(env, monkeypatch):
     assert led["status"] == "recorded"
     assert led["book"] == "yahoo"                          # the next candidate
     assert any("before the 2026-09-23 close" in r for r in led["refused_books"])
+
+
+def test_a_yahoo_book_downloaded_before_the_close_is_not_the_ledgers(env):
+    """Yahoo records no quote time (QUANT-01), so the ledger can no longer
+    read one off the Yahoo book; a book downloaded before the 16:00 ET close
+    still cannot hold the closing quotes and is refused on its fetched_at."""
+    from joint_vol_calibration.data import option_chain as oc
+
+    code, _ = _run(env, "market")
+    assert code == 0
+    raw, meta = oc.fetch_spx_chain(SESSION, ticker_factory=_DailyBookTicker)
+    early = {"source": "yahoo", "raw": raw, "symbol": meta["symbol"], "quote_time": None,
+             "fetched_at": "2026-09-23T19:45:00Z"}                      # 15:45 ET
+    led = env.record_forward_ledger(SESSION, early, ticker_factory=_DailyBookTicker)
+    assert led["status"] == "no_live_book"
+    assert "downloaded at 2026-09-23T19:45:00Z, before the 2026-09-23 close" in led["reason"]
 
 
 def _capture(und, session=SESSION, rows=4):
@@ -768,6 +878,111 @@ def test_a_failed_artifact_is_rebuilt_by_the_next_run(env, monkeypatch):
     assert calls == [SESSION, SESSION]
     code, st = _run(env, "market,labels")                      # the close slot never backfills
     assert "artifact_backfill" not in st
+
+
+def _committed_surface(env, sess, version=None, vix_version=None):
+    """data_store/surface/<sess>/ as a committed session holds it (surface.json
+    and vix_replication.json stamped ``version``; None: no report_version, as
+    every artifact written before the field), its chain, its diagnostics and
+    its index row."""
+    from joint_vol_calibration.data import database as dbm
+    d = env.DATA / "surface" / sess
+    d.mkdir(parents=True, exist_ok=True)
+    for name, v in (("surface.json", version), ("vix_replication.json", vix_version or version)):
+        doc = {"schema_version": 1, "session": sess}
+        if v is not None:
+            doc["report_version"] = v
+        (d / name).write_text(json.dumps(doc))
+    chain = dbm.options_snapshot_path(sess, "SPX")
+    chain.parent.mkdir(parents=True, exist_ok=True)
+    chain.write_bytes(b"chain")
+    diag = env.DATA / "calibrations" / "diagnostics" / f"{sess}.json"
+    diag.parent.mkdir(parents=True, exist_ok=True)
+    diag.write_text("{}")
+    idx = env.DATA / "surface" / "index.json"
+    rows = json.loads(idx.read_text())["sessions"] if idx.exists() else []
+    idx.write_text(json.dumps({"sessions": [*[r for r in rows if r["session"] != sess],
+                                            {"session": sess}]}))
+
+
+def test_a_surface_written_under_an_older_method_is_rebuilt(env, monkeypatch):
+    """0.7 changed what a session's surface report says (its book, its T
+    origin, its provenance). artifact_gaps rebuilt only MISSING surfaces, so
+    a method change reached new sessions only. A committed surface.json or
+    vix_replication.json stored under an older report_version (none: the
+    artifacts before the field) is now a 'surface' gap, which the backfill
+    rebuilds MAX_BACKFILL_SESSIONS a run; a current one is not."""
+    from joint_vol_calibration.surface import report
+    cur = report.REPORT_VERSION
+    old, mixed, fresh = "2026-09-17", "2026-09-18", "2026-09-21"
+    monkeypatch.setattr(env, "accepted_sessions",
+                        lambda: {s: f"joint_cal_{s}.pkl" for s in (old, mixed, fresh)})
+    _committed_surface(env, old)                                # predates report_version
+    _committed_surface(env, mixed, cur, vix_version=cur - 1)    # one file left behind
+    _committed_surface(env, fresh, cur)
+    assert env.artifact_gaps(None) == {mixed: ["surface"], old: ["surface"]}
+    (env.DATA / "surface" / old / "surface.json").write_text("{not json")
+    assert env.artifact_gaps(None)[old] == ["surface"]          # unreadable: rebuilt too
+    assert report.stored_report_version({}) == 1
+    assert report.stored_report_version({"report_version": cur}) == cur
+    _committed_surface(env, old, cur)
+    _committed_surface(env, mixed, cur)
+    assert env.artifact_gaps(None) == {}
+    _committed_surface(env, fresh, cur + 1)                     # written by newer code: left alone
+    assert env.artifact_gaps(None) == {}
+
+
+def test_a_captured_session_without_an_accepted_fit_gets_its_surface(env, monkeypatch):
+    """CITSEC-05: the surface was built only after an accepted Heston fit, so a
+    session with a full Cboe book and a rejected (or no) fit had none. Now a
+    session whose stored Cboe capture passes the quote-state gates
+    (surface.quotes.cboe_book_refusal) is a 'surface' gap without a fit (no
+    diagnostics: they need one); a session whose captures all fail the gates
+    is not, and a current surface is left alone."""
+    from joint_vol_calibration.surface import quotes as sqm
+    from joint_vol_calibration.surface import report
+    live, empty, done = "2026-09-17", "2026-09-18", "2026-09-21"
+    cdir = env.DATA / "options" / "cboe"
+    cdir.mkdir(parents=True)
+    for s_ in (live, empty, done):
+        (cdir / f"spx_{s_}_013000Z.parquet").write_bytes(b"capture")
+        (cdir / f"vix_{s_}_013001Z.parquet").write_bytes(b"capture")
+    monkeypatch.setattr(env, "accepted_sessions", dict)
+    asked = []
+
+    def refusal(s_):
+        asked.append(s_)
+        return "not a live book (12% of near-ATM lines two-sided)" if s_ == empty else None
+    monkeypatch.setattr(sqm, "cboe_book_refusal", refusal)
+    _committed_surface(env, done, report.REPORT_VERSION)
+    assert sqm.captured_sessions() == [done, empty, live]
+    assert env.artifact_gaps(None) == {live: ["surface"]}
+    assert sorted(asked) == [live, empty]                      # a current surface is not re-checked
+    _committed_surface(env, done)                              # ... a stale one is
+    assert env.artifact_gaps(None) == {done: ["surface"], live: ["surface"]}
+    # what the backfill then builds for it: the surface alone
+    seen = []
+    monkeypatch.setattr(env, "refresh_session_artifacts",
+                        lambda s_, h, parts=None, **kw: seen.append((s_, parts)) or
+                        {p: {"ok": True} for p in parts})
+    env.backfill_session_artifacts(None)
+    assert seen == [(done, ("surface",)), (live, ("surface",))]
+
+
+def test_a_capture_whose_check_raises_is_no_gap_and_no_crash(env, monkeypatch):
+    """artifact_gaps runs on every calibrate run: a capture whose quote-state
+    check raises (an unforeseen read error) must not crash the backfill (which
+    fails the run) on every run after it; the session is logged and skipped."""
+    from joint_vol_calibration.surface import quotes as sqm
+    cdir = env.DATA / "options" / "cboe"
+    cdir.mkdir(parents=True)
+    (cdir / "spx_2026-09-17_013000Z.parquet").write_bytes(b"capture")
+    monkeypatch.setattr(env, "accepted_sessions", dict)
+
+    def boom(s_):
+        raise KeyError("strike")
+    monkeypatch.setattr(sqm, "cboe_book_refusal", boom)
+    assert env.artifact_gaps(None) == {}
 
 
 def test_greeks_of_another_fit_are_rebuilt_from_the_headline(env, monkeypatch):
@@ -1144,6 +1359,89 @@ def test_close_slot_reports_the_headline(env, monkeypatch, tmp_path):
     assert "headline_calibration=2026-09-22" in output.read_text()
 
 
+def test_each_workflow_run_writes_its_record(env, monkeypatch):
+    """FUND_GRADE_PLAN 0.9 / VALIDATOR-15: what the bot attempted and why the gate
+    said no lived only in the gitignored status JSON and in Actions logs that
+    expire. A workflow run (REFRESH_SLOT) writes data_store/runs/run_<run_utc>_<slot>.json
+    for the capture commit; every field is the run's own (compared with its
+    status JSON, nothing pinned), and it is on disk before the freeze so the site
+    this run renders reads it."""
+    monkeypatch.setenv("REFRESH_SLOT", "book")
+    monkeypatch.setenv("GITHUB_SHA", "f" * 40)
+    monkeypatch.setenv("GITHUB_RUN_ID", "4242")
+    at_freeze = []
+
+    def freeze(*a, **k):
+        at_freeze.extend(json.loads(p.read_text()) for p in (env.DATA / "runs").glob("run_*.json"))
+        return _FreezeOK()
+    monkeypatch.setattr(env.subprocess, "run", freeze)
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,calibrate,freeze", ticker=_EmptyBookTicker)
+    files = sorted((env.DATA / "runs").glob("run_*.json"))
+    assert [f.name for f in files] == [env.run_record_name(st["run_utc"], "book")]
+    rec = json.loads(files[0].read_text())
+    assert (rec["schema"], rec["slot"], rec["complete"]) == ("run_ledger/1", "book", True)
+    for key in ("run_utc", "steps", "session", "expected_session", "exit_code", "publishable",
+                "publish_blockers", "errors", "warnings"):
+        assert rec[key] == st[key], key
+    cal = st["calibration"]
+    assert rec["calibration"]["status"] == cal["status"] != "accepted"
+    assert rec["calibration"]["reason"] == cal["reason"].splitlines()[0]
+    assert rec["calibration"]["session"] == cal["session"]
+    assert "near_atm_two_sided_share" in rec["calibration"]["chain"]
+    assert all(cal["chain"][k] == v for k, v in rec["calibration"]["chain"].items())
+    assert rec["forward_ledger"]["status"] == st["forward_ledger"]["status"]
+    assert rec["exit_code"] == code
+    assert rec["headline_calibration"]["session"] == st["headline_calibration"]["date"]
+    assert (rec["github"]["sha"], rec["github"]["run_id"]) == ("f" * 40, "4242")
+    assert {"restore", "market", "calibrate", "forward_ledger", "freeze", "total"} <= set(rec["timings_s"])
+    assert all(v >= 0 for v in rec["timings_s"].values())
+    assert st["run_record"].endswith(files[0].name)
+    # before the freeze: the same run, not yet complete
+    assert len(at_freeze) == 1
+    assert (at_freeze[0]["complete"], at_freeze[0]["exit_code"]) == (False, None)
+    assert at_freeze[0]["calibration"]["status"] == cal["status"]
+
+
+def test_a_run_without_a_known_slot_writes_no_record(env, monkeypatch):
+    """A local run (no REFRESH_SLOT) leaves the store as it was; an unknown slot
+    name is a warning, not a file name."""
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,calibrate", ticker=_EmptyBookTicker)
+    assert code == 0
+    assert "run_record" not in st
+    assert not (env.DATA / "runs").exists()
+    monkeypatch.setenv("REFRESH_SLOT", "../book")
+    code, st = _run(env, "market,calibrate", ticker=_EmptyBookTicker)
+    assert not (env.DATA / "runs").exists()
+    assert any("REFRESH_SLOT" in w for w in st["warnings"])
+
+
+def test_a_run_record_that_cannot_be_written_costs_nothing_else(env, monkeypatch):
+    monkeypatch.setenv("REFRESH_SLOT", "book")
+    _accepted_pickle(env, "2026-09-22")
+
+    def broken(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(env, "write_run_record", broken)
+    code, st = _run(env, "market,calibrate", ticker=_EmptyBookTicker)
+    assert code == 0
+    assert any("could not write the run record: OSError: disk full" in w for w in st["warnings"])
+
+
+def test_the_run_record_is_json_whatever_the_status_holds(env, tmp_path):
+    """numpy scalars from the chain diagnostics serialise as numbers."""
+    status = {"run_utc": "2026-10-28T02:31:05+00:00", "steps": ["calibrate"], "errors": [], "warnings": [],
+              "calibration": {"status": "rejected", "reason": "a\nb", "session": "2026-10-27",
+                              "chain": {"n_raw": np.int64(7), "near_atm_two_sided_share": np.float64(0.5)}}}
+    p = env.write_run_record(status, "book", directory=tmp_path)
+    assert p.name == "run_20261028T023105Z_book.json"
+    rec = json.loads(p.read_text())
+    assert rec["calibration"]["chain"] == {"n_raw": 7, "near_atm_two_sided_share": 0.5}
+    assert rec["calibration"]["reason"] == "a"
+    assert (rec["capture"], rec["forward_ledger"]) == (None, None)
+
+
 def test_freeze_failure_is_a_hard_failure(env, monkeypatch):
     class _R:
         returncode, stdout, stderr = 2, "", "boom"
@@ -1264,6 +1562,102 @@ def test_merge_main_data_rederives_mains_sessions_over_the_branchs_record(env, t
     assert (vix["close"], vix["source"]) == (17.76, "cboe")
     assert set(got.loc[got["date"] == "2026-09-24", "ticker"]) == set(extra["ticker"])
     assert "2026-09-07" not in set(got["date"])
+
+
+def _vx_rows(session: str) -> list[tuple[str, float]]:
+    con = sqlite3.connect(str(dbm.DB_PATH))
+    try:
+        return con.execute("SELECT expiry_date, settle FROM vix_futures_daily WHERE date = ? "
+                           "ORDER BY expiry_date", (session,)).fetchall()
+    finally:
+        con.close()
+
+
+def test_close_slot_stores_the_sessions_vx_settlements_in_the_record(env, monkeypatch):
+    """FUND_GRADE_PLAN 1.12 / CITSEC-11: no step of the bot refreshed
+    vix_futures_daily, so the Overview's VX curve was of 2026-10-09 on a page of
+    2026-10-27. The close slot (market,labels) now stores the session's monthly VX
+    settlements (the weekly and the VXM mini left out) and, from an empty
+    partition directory, exports them to data_store/market/vix_futures_daily/,
+    so the record holds them; the next run restores them from there."""
+    monkeypatch.setattr(env, "extend_regime_labels", lambda as_of: 1)   # the env stores no labels
+    vx_dir = dbm.MARKET_DIR / "vix_futures_daily"
+    assert not vx_dir.exists()
+    code, st = _run(env, "market,labels")
+    assert code == 0
+    vx = st["market"]["vx_futures"]
+    want = _vx_monthlies(SESSION)
+    assert (vx["ok"], vx["stored"], vx["last"], vx["missing"]) == (True, [SESSION], SESSION, [])
+    assert vx["rows"] == len(want) == st["market"]["rows"]["vix_futures_daily"]
+    assert _vx_rows(SESSION) == want
+    part = vx_dir / f"vix_futures_daily_{SESSION[:4]}.parquet"
+    assert str(part) in st["persisted"]
+    rec = pd.read_parquet(part)
+    assert sorted(zip(rec["expiry_date"], rec["settle"])) == want
+    assert set(rec["date"]) == {SESSION}
+    assert (rec["is_weekly"] == 0).all()
+    assert not st["warnings"] or not any("VX" in w for w in st["warnings"])
+    # a clean clone: the next run restores the session's settlements from the record
+    dbm.DB_PATH.unlink()
+    dbm._SCHEMA_READY.clear()
+    dbm.init_database()
+    code, st = _run(env, "market")
+    assert code == 0
+    assert st["restored"]["market"]["vix_futures_daily"] == len(want)
+    assert st["market"]["vx_futures"]["sessions"] == []          # nothing left to fetch
+    assert _vx_rows(SESSION) == want
+
+
+def test_vx_refresh_fills_the_gap_from_the_newest_stored_session(env, monkeypatch):
+    """The job fetches every NYSE session after the newest one the table holds
+    (one settlement file each), not only today's: a slot that failed is made up
+    by the next one."""
+    stale = "2026-09-17"
+    dbm.insert_vix_futures_daily(cboe.parse_vx_settlement_csv(_vx_settlement_csv(stale), stale))
+    asked = []
+    real = cboe.download_vx_settlements
+    monkeypatch.setattr(cboe, "download_vx_settlements", lambda d: asked.append(d) or real(d))
+    code, st = _run(env, "market")
+    assert code == 0
+    gap = ["2026-09-18", "2026-09-21", "2026-09-22", SESSION]
+    assert asked == gap
+    assert st["market"]["vx_futures"]["stored"] == gap
+    for d in gap:
+        assert _vx_rows(d) == _vx_monthlies(d)
+
+
+@pytest.mark.parametrize("failure", ["raises", "not_posted", "stale_copy"])
+def test_a_failed_vx_download_never_fails_the_close_slot(env, monkeypatch, failure):
+    """A VX download that fails, a file Cboe has not posted, or a repeat of the
+    previous session's prices stores nothing for the session, is reported as a
+    warning, and the close slot's other steps (SPX, labels, the partitions) run
+    and pass as before; the next slot retries."""
+    prev = "2026-09-22"
+    dbm.insert_vix_futures_daily(cboe.parse_vx_settlement_csv(_vx_settlement_csv(prev), prev))
+
+    def broken(trade_date):
+        if failure == "raises":
+            raise OSError("Cboe is down")
+        if failure == "not_posted":
+            return cboe.parse_vx_settlement_csv("Product,Symbol,Expiration Date,Price\n", trade_date)
+        return cboe.parse_vx_settlement_csv(_vx_settlement_csv(prev), trade_date)   # yesterday's prices
+    monkeypatch.setattr(cboe, "download_vx_settlements", broken)
+    monkeypatch.setattr(env, "extend_regime_labels", lambda as_of: 1)   # the env stores no labels
+    code, st = _run(env, "market,labels")
+    assert code == 0
+    assert st["labels_added"] == 1
+    assert not st["publish_blockers"]
+    assert not st["errors"]
+    vx = st["market"]["vx_futures"]
+    assert (vx["ok"], vx["stored"], vx["missing"], vx["last"]) == (False, [], [SESSION], prev)
+    assert _vx_rows(SESSION) == []
+    warn = [w for w in st["warnings"] if "VX futures table ends " + prev in w]
+    assert len(warn) == 1
+    assert SESSION in warn[0]
+    assert "the next slot retries" in warn[0]
+    if failure == "stale_copy":
+        assert "every price equals the previous session's" in warn[0]
+    assert (dbm.MARKET_DIR / "spx_ohlcv" / "spx_ohlcv_2026.parquet").exists()
 
 
 def test_no_persist_flag_leaves_capture_dirs_alone(env):

@@ -53,21 +53,79 @@ def test_surface_index_lists_exactly_the_session_directories():
         assert sorted(p.name for p in (SURFACE / s).iterdir()) == list(SURFACE_FILES), s
 
 
+def surface_input_problems(inp: dict, session: str, root) -> list:
+    """What is wrong with a surface.json ``inputs`` block (empty: nothing):
+    it names the committed book it was built from, under ``root``, with that
+    file's sha256. The book is the session's Cboe capture
+    (data_store/options/cboe/spx_<session>_<HHMMSS>Z.parquet, whose sidecar
+    holds its quote time, book state, download instant and payload hash) or,
+    as the fallback, its Yahoo chain data_store/options/spx_<session>.parquet."""
+    import re
+
+    out = []
+    chain = root / str(inp.get("chain"))
+    if inp.get("source") == "cboe":
+        want = rf"data_store/options/cboe/spx_{session}_\d{{6}}Z\.parquet"
+        if not re.fullmatch(want, str(inp.get("chain"))):
+            out.append(f"a Cboe-sourced surface names {inp.get('chain')!r}, not a Cboe capture of {session}")
+        side = chain.with_suffix(".json")
+        if side.exists():
+            sc = json.loads(side.read_text())
+            for key, want in (("quote_time", sc.get("quote_time")), ("raw_sha256", sc.get("sha256")),
+                              ("book_state", sc.get("book_state")), ("fetched_at", sc.get("fetched_at"))):
+                if inp.get(key) != want:
+                    out.append(f"inputs.{key} {inp.get(key)!r} is not the capture's {want!r}")
+        else:
+            out.append(f"no sidecar {side.name} next to the capture")
+    else:
+        if inp.get("chain") != f"data_store/options/spx_{session}.parquet":
+            out.append(f"a {inp.get('source')}-sourced surface names {inp.get('chain')!r}")
+    if not chain.exists():
+        out.append(f"{inp.get('chain')} is not committed")
+    elif inp.get("chain_sha256") != _sha256(chain):
+        out.append(f"inputs.chain_sha256 is not the sha256 of {inp.get('chain')}")
+    return out
+
+
 @pytest.mark.parametrize("session", _sessions(SURFACE, "20*") or ["none"])
 def test_surface_artifacts_are_built_from_the_committed_chain(session):
     if session == "none":
         pytest.skip("no surface artifacts")
     doc = json.loads((SURFACE / session / "surface.json").read_text())
-    inp = doc["inputs"]
-    chain = ROOT_DIR / inp["chain"]
-    assert inp["chain"] == f"data_store/options/spx_{session}.parquet"
-    assert chain.exists()
-    assert inp["chain_sha256"] == _sha256(chain)
+    assert surface_input_problems(doc["inputs"], session, ROOT_DIR) == []
     card = json.loads((SURFACE / session / "scorecard.json").read_text())
     vix = json.loads((SURFACE / session / "vix_replication.json").read_text())
     assert doc["session"] == card["session"] == vix["session"] == session
     idx = {r["session"]: r for r in json.loads((SURFACE / "index.json").read_text())["sessions"]}
     assert idx[session]["n_quotes"] == card["n_quotes"]
+
+
+def test_a_surface_built_from_a_cboe_capture_passes_the_artifact_gate(tmp_path):
+    """0.7: the bot builds a session's surface from its Cboe capture when that
+    passes the quote-state gates (surface.quotes.select_session_chain). The
+    gate accepts it when it names the capture, its sha256 and its sidecar's
+    quote time, book state, download instant and payload hash, and refuses a
+    capture of another session or a hash that is not the file's."""
+    s = "2026-01-05"
+    cap = tmp_path / "data_store" / "options" / "cboe" / f"spx_{s}_013000Z.parquet"
+    cap.parent.mkdir(parents=True)
+    cap.write_bytes(b"capture")
+    side = {"quote_time": "2026-01-06T01:15:00Z", "sha256": "ab" * 32, "book_state": "gth",
+            "fetched_at": "2026-01-06T01:30:00Z"}
+    cap.with_suffix(".json").write_text(json.dumps(side))
+    inp = {"source": "cboe", "chain": f"data_store/options/cboe/{cap.name}",
+           "chain_sha256": _sha256(cap), "quote_time": side["quote_time"],
+           "raw_sha256": side["sha256"], "book_state": "gth", "fetched_at": side["fetched_at"]}
+    assert surface_input_problems(inp, s, tmp_path) == []
+    assert surface_input_problems(inp, "2026-01-06", tmp_path)            # another session's book
+    assert surface_input_problems({**inp, "chain_sha256": "0" * 64}, s, tmp_path)
+    assert surface_input_problems({**inp, "quote_time": None}, s, tmp_path)
+    yahoo = tmp_path / "data_store" / "options" / f"spx_{s}.parquet"
+    yahoo.write_bytes(b"chain")
+    yin = {"source": "yfinance", "chain": f"data_store/options/spx_{s}.parquet",
+           "chain_sha256": _sha256(yahoo)}
+    assert surface_input_problems(yin, s, tmp_path) == []
+    assert surface_input_problems({**yin, "chain": inp["chain"]}, s, tmp_path)
 
 
 def _diag_files():

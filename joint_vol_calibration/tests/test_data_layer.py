@@ -16,6 +16,7 @@ import pickle
 import shutil
 import sqlite3
 from datetime import UTC, datetime
+from datetime import time as dtime
 from pathlib import Path
 
 import numpy as np
@@ -153,6 +154,23 @@ class TestSessionCalendar:
             "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
             "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"]
 
+    def test_early_closes_are_the_exchanges(self):
+        """Tier 0.5 review: an NYSE early close (13:00 ET; SPX options and the VIX
+        index to 13:15) was an ordinary session here, so a closing Cboe book of
+        2026-11-27 would have been timed at 16:15 ET, three hours after its
+        quotes were left. The rule reproduces the exchange's published early
+        closes 2018-2026, and the data cutoff of those sessions is 13:15 ET."""
+        published = {
+            "2018-07-03", "2018-11-23", "2018-12-24", "2019-07-03", "2019-11-29", "2019-12-24",
+            "2020-11-27", "2020-12-24", "2021-11-26", "2022-11-25", "2023-07-03", "2023-11-24",
+            "2024-07-03", "2024-11-29", "2024-12-24", "2025-07-03", "2025-11-28", "2025-12-24",
+            "2026-11-27", "2026-12-24"}
+        days = pd.date_range("2018-01-01", "2026-12-31")
+        assert {d.strftime("%Y-%m-%d") for d in days if db.is_early_close(d)} == published
+        assert db.close_data_cutoff("2026-11-27") == db.EARLY_CLOSE_DATA_CUTOFF == dtime(13, 15)
+        for ordinary in ("2026-11-25", "2026-11-26", "2026-07-02", "2026-12-31"):
+            assert db.close_data_cutoff(ordinary) == db.CLOSE_DATA_CUTOFF == dtime(16, 15)
+
     @pytest.mark.parametrize(("now", "last_closed", "quote"), [
         ("2026-05-31T15:00:00Z", "2026-05-29", "2026-05-29"),   # Sunday
         ("2026-06-20T10:00:00Z", "2026-06-18", "2026-06-18"),   # Saturday after Juneteenth
@@ -179,7 +197,9 @@ class TestSessionCalendar:
         assert pm["time_to_expiry"] == pytest.approx(7 / 365)            # Fri close -> Fri close
         assert am["time_to_expiry"] == pytest.approx((7 * 1440 - 390) / 525_600)
         assert set(df["underlying_price"]) == {7811.54}
-        assert set(df["quote_time"]) == {"2026-10-10T14:00:00Z"}
+        # Yahoo records no quote time: the download instant is fetched_at (QUANT-01)
+        assert df["quote_time"].isna().all()
+        assert set(df["fetched_at"]) == {"2026-10-10T14:00:00Z"}
 
     def test_migration_redates_weekend_snapshots(self, legacy_db):
         db.init_database()
@@ -820,6 +840,47 @@ class TestPersistence:
         assert db.export_market_partitions() == []
         assert path.read_bytes() == blob
 
+    def test_vx_futures_are_in_the_record_from_an_empty_partition_dir(self, tmp_db, tmp_path, monkeypatch):
+        """FUND_GRADE_PLAN 1.12: vix_futures_daily lived in the SQLite cache only,
+        which the bot never commits. It is now a market table: exported by default
+        to market/vix_futures_daily/<year> from an empty directory (the bot's first
+        run), a per-contract row's OHLC/OI and a settlement-file row's NULLs both
+        surviving, merged with what a file already holds, and restored into a
+        fresh database by the default import."""
+        assert not (tmp_path / "market").exists()
+        hist = cb.parse_vx_contract_csv((FIX / "cboe_VX_2026-10-21.csv").read_text(), "2026-10-21")
+        hist = hist[hist["date"] >= "2026-09-01"]
+        settle = cb.parse_vx_settlement_csv((FIX / "cboe_vx_settlement_2026-10-09.csv").read_text(),
+                                            "2026-10-09")
+        settle = settle[settle["is_weekly"] == 0]
+        db.insert_vix_futures_daily(hist)
+        db.insert_vix_futures_daily(settle)
+        written = db.export_market_partitions()
+        assert [p.relative_to(tmp_path / "market").as_posix() for p in written] == [
+            "vix_futures_daily/vix_futures_daily_2026.parquet"]
+        rec = db.read_market_partitions("vix_futures_daily")
+        assert len(rec) == len(set(zip(hist["date"], hist["expiry_date"])) | set(zip(settle["date"],
+                                                                                  settle["expiry_date"])))
+        oct9 = rec[(rec["date"] == "2026-10-09") & (rec["expiry_date"] == "2026-10-21")].iloc[0]
+        assert oct9["settle"] == pytest.approx(17.1186)
+        assert oct9["symbol"] == "VX/V6"                                        # both sources merged
+        assert oct9["open_interest"] > 0
+        nov = rec[(rec["date"] == "2026-10-09") & (rec["expiry_date"] == "2026-11-18")].iloc[0]
+        assert pd.isna(nov["open"])                                             # settlement file only
+        assert pd.isna(nov["volume"])
+        assert db.export_market_partitions() == []                              # nothing changed
+        # the record keeps a row the database no longer holds (a later, shorter download)
+        self._fresh_db(monkeypatch, tmp_path / "next_run.db")
+        db.insert_vix_futures_daily(settle.assign(date="2026-10-12", settle=settle["settle"] + 0.1))
+        db.export_market_partitions(since="2026-10-01")
+        assert set(db.read_market_partitions("vix_futures_daily")["date"]) >= {"2026-10-09", "2026-10-12"}
+        self._fresh_db(monkeypatch, tmp_path / "clean_clone.db")
+        n = db.import_market_partitions()["vix_futures_daily"]
+        assert n == len(db.read_market_partitions("vix_futures_daily"))
+        curve = db.get_vix_futures_curve("2026-10-09")
+        assert curve["settle"].tolist() == pytest.approx(
+            settle.loc[settle["expiry_date"] > "2026-10-09", "settle"].tolist())
+
     def test_option_chain_export_import(self, tmp_db, tmp_path, monkeypatch):
         rows = TestOptionSnapshots.ROWS + [("2026-10-16", 7800.0, "C", "SPXW", 61.7, 62.0)]
         db.insert_options_snapshot(chain("2026-10-09", rows, source="cboe", underlying_price=7811.54,
@@ -1156,7 +1217,8 @@ class TestC23ReferenceTables:
         db.insert_rates_daily(pd.DataFrame({"date": ["2026-10-16"], "series": ["SOFR"], "value": [0.0388],
                                             "source": ["fred"]}))
         assert db.export_market_partitions() == []
-        assert db.MARKET_TABLES == ("spx_ohlcv", "vix_daily", "vix_term_structure", "tbill_rates")
+        assert db.MARKET_TABLES == ("spx_ohlcv", "vix_daily", "vix_term_structure", "tbill_rates",
+                                    "vix_futures_daily")
         written = db.export_market_partitions(tables=db.REFERENCE_TABLES)
         assert sorted(p.name for p in written) == ["cboe_index_daily_2026.parquet",
                                                    "rates_daily_2026.parquet"]

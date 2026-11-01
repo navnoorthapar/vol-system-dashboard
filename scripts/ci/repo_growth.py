@@ -3,6 +3,7 @@
 repo_growth.py: how much the daily bot adds to the repository (`git` objects).
 
     python scripts/ci/repo_growth.py --range BASE..HEAD [--budget-mb 5] [--summary FILE]
+    python scripts/ci/repo_growth.py --range BASE..HEAD --gate --budget-mb 2 [--allow-growth]
     python scripts/ci/repo_growth.py --session 2026-10-16 [--capture-session 2026-10-20]
 
 Every accepted session commits new, mostly already-compressed files (the Cboe
@@ -18,6 +19,12 @@ repository only grows; nothing measured it.
          against what BASE has, as a push sends them), grouped by kind. With
          --budget-mb, a pack above the budget is reported as a GitHub
          ::warning:: (the daily workflow's last step), never a failure.
+--gate:  the pull-request gate (tests.yml, job growth; FUND_GRADE_PLAN 0.11):
+         exit 1, with an ::error:: per cause, when the pull request adds any file
+         under data_store/ (the daily bot owns it; files added since the merge
+         base of BASE and HEAD, renames counted as additions) or when its pack
+         is above --budget-mb. --allow-growth (the PR label allow-growth) lifts
+         the budget, never the data_store/ rule.
 --session: the files a committed accepted session added and the per-slot
          rewrites, measured on the checkout (raw and zlib level-6 bytes; parquet
          and pickles are already compressed), so the growth per accepted
@@ -37,6 +44,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # (kind, regex on the repo-relative path); the first match wins
 KINDS = [
     ("cboe books", r"^data_store/options/cboe/"),
+    ("cboe manifests", r"^data_store/options/cboe_manifest/"),
     ("SPX chain", r"^data_store/options/[a-z]+_\d{4}-\d{2}-\d{2}\.parquet$"),
     ("fit", r"^data_store/calibrations/joint_cal_"),
     ("diagnostics", r"^data_store/calibrations/diagnostics/"),
@@ -44,6 +52,8 @@ KINDS = [
     ("surface json", r"^data_store/surface/"),
     ("Greeks / scenario", r"^data_store/greeks/"),
     ("forward ledger", r"^data_store/forward/"),
+    ("run records", r"^data_store/runs/"),
+    ("VX futures partitions", r"^data_store/market/vix_futures_daily/"),
     ("market partitions", r"^data_store/market/"),
     ("labels", r"^data_store/signals/"),
     ("other", r""),
@@ -94,6 +104,29 @@ def range_growth(rng: str, cwd: Path = ROOT) -> dict:
     return {"range": rng, "commits": len(git("rev-list", rng, cwd=cwd).split()),
             "blobs": {k: {"files": n, "bytes": b} for k, (n, b) in sorted(by_kind.items())},
             "blob_bytes": sum(b for _, b in by_kind.values()), "pack_bytes": len(pack)}
+
+
+DATA_PREFIX = "data_store/"
+
+
+def added_paths(rng: str, prefix: str = DATA_PREFIX, cwd: Path = ROOT) -> list[str]:
+    """Files under ``prefix`` that HEAD adds relative to the merge base of BASE
+    and HEAD (what a pull request from HEAD into BASE adds; a rename into the
+    prefix is an addition)."""
+    base, head = rng.split("..", 1)
+    mb = git("merge-base", base, head, cwd=cwd).decode().strip()
+    out = git("diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", mb, head, "--", prefix, cwd=cwd)
+    return sorted(p for p in out.decode().split("\0") if p)
+
+
+def gate_errors(g: dict, added: list[str], budget_mb: float | None, allow_growth: bool = False) -> list[str]:
+    """The pull-request gate's failures, as ::error:: lines."""
+    errs = [f"::error title=Repository growth::{p}: a pull request may not add files under {DATA_PREFIX} "
+            "(the daily bot owns it; see docs/roadmap/HANDOFF.md, Rules)" for p in added]
+    if budget_mb is not None and g["pack_bytes"] > budget_mb * 1e6 and not allow_growth:
+        errs.append(f"::error title=Repository growth::this pull request adds {_mb(g['pack_bytes'])} packed "
+                    f"(budget {budget_mb:g} MB); label it allow-growth if that is intended")
+    return errs
 
 
 def file_sizes(paths, root: Path = ROOT) -> dict:
@@ -151,11 +184,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--summary", type=Path, default=None, help="append the Markdown table here")
     ap.add_argument("--session", help="measure a committed accepted session's files")
     ap.add_argument("--capture-session", default=None)
+    ap.add_argument("--gate", action="store_true",
+                    help="with --range: fail on an added data_store/ file or a pack above --budget-mb")
+    ap.add_argument("--allow-growth", action="store_true", help="with --gate: lift the budget")
+    ap.add_argument("--repo", type=Path, default=ROOT, help="the repository (default: this checkout)")
     args = ap.parse_args(argv)
     if bool(args.range) == bool(args.session):
         ap.error("give one of --range or --session")
+    if args.gate and not args.range:
+        ap.error("--gate needs --range")
+    errors: list[str] = []
     if args.range:
-        lines = report_range(range_growth(args.range), args.budget_mb)
+        g = range_growth(args.range, cwd=args.repo)
+        lines = report_range(g, None if args.gate else args.budget_mb)
+        if args.gate:
+            added = added_paths(args.range, cwd=args.repo)
+            errors = gate_errors(g, added, args.budget_mb, args.allow_growth)
+            lines.append(f"| files added under {DATA_PREFIX} | {len(added)} |")
     else:
         g = session_growth(args.session, args.capture_session)
         new = sum(v["bytes"] for v in g["new"].values())
@@ -170,12 +215,12 @@ def main(argv: list[str] | None = None) -> int:
         rew_z = sum(v["zlib_bytes"] for v in g["rewrites"].values())
         lines += [f"| **new per accepted session** | {new:,} | {new_z:,} |",
                   f"| **rewritten per slot** | {rew:,} | {rew_z:,} |"]
-    text = "\n".join(lines)
+    text = "\n".join(lines + errors)
     print(text)
     if args.summary:
         with open(args.summary, "a") as fh:
             fh.write("\n".join(ln for ln in lines if not ln.startswith("::")) + "\n")
-    return 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

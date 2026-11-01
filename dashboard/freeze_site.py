@@ -22,6 +22,13 @@ It FAILS CLOSED: nothing is written and the script exits 1 if any page
   * loads a script, stylesheet or font from another origin;
   * carries an inline executable <script> (the pages declare a CSP of
     script-src 'self'; only type="application/json" data blocks are inline);
+  * references a session data file (data/<kind>-<session>-<sha256[:16]>.json,
+    app.publish_json: the Surface smile's every expiry, its heatmaps' cell
+    details) that /data/<name> does not serve, whose bytes' sha384 is not the
+    integrity value the page gives it, or whose name is not its sha256, or that
+    lacks the cell details of a heatmap reading it (its "heat" entry under the
+    table's id: without it desk.js has no numbers to show); only the referenced
+    files are written;
 or if a vendored file under dashboard/static/vendor no longer matches the SRI
 hash the pages carry (app.VENDORED). scripts/cloud_refresh.py then stops before
 the deploy step, so the previous good build stays live.
@@ -40,6 +47,7 @@ import base64
 import contextlib
 import hashlib
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -170,7 +178,98 @@ def page_policy_problems(html: str) -> list[str]:
 def sri_sha384(path: str) -> str:
     """Subresource-integrity value ('sha384-<base64>') of a file."""
     with open(path, "rb") as fh:
-        return "sha384-" + base64.b64encode(hashlib.sha384(fh.read()).digest()).decode()
+        return sri_of(fh.read())
+
+
+def sri_of(body: bytes) -> str:
+    return "sha384-" + base64.b64encode(hashlib.sha384(body).digest()).decode()
+
+
+_JSON_BLOCK = re.compile(r'<script type="application/json"[^>]*>(.*?)</script>', re.DOTALL)
+_DATA_PATH = re.compile(r"\bdata/[\w.-]+\.json\b")
+# an element that reads a data file names it and its integrity value (a heatmap table)
+_DATA_ATTR = re.compile(r'<[^<>]*\bdata-src="(data/[^"]*)"[^<>]*>')
+_INTEGRITY_ATTR = re.compile(r'\bdata-integrity="([^"]*)"')
+_DATA_NAME = re.compile(r"data/[\w.-]+-([0-9a-f]{16})\.json")
+_ID_ATTR = re.compile(r'(?<![\w-])id="([^"]*)"')
+
+
+def data_refs(html: str) -> tuple[dict[str, str], list[str]]:
+    """The session data files a page references, {path: integrity}: each object of
+    its JSON blocks with a src under data/ and an integrity value, and each element
+    with a data-src under data/ and a data-integrity; and the problems (a data/ path
+    named anywhere else, or with two integrity values)."""
+    refs: dict[str, str] = {}
+    problems: list[str] = []
+
+    def ref(src: Any, sri: Any) -> None:
+        if (isinstance(src, str) and src.startswith("data/") and isinstance(sri, str)
+                and refs.setdefault(src, sri) != sri):
+            problems.append(f"data file {src} has two integrity values")
+
+    def walk(x: Any) -> None:
+        if isinstance(x, dict):
+            ref(x.get("src"), x.get("integrity"))
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    for block in _JSON_BLOCK.findall(html):
+        try:
+            walk(json.loads(block))
+        except ValueError:
+            problems.append("a JSON data block does not parse")
+    for m in _DATA_ATTR.finditer(html):
+        sri = _INTEGRITY_ATTR.search(m.group(0))
+        ref(m.group(1), sri.group(1) if sri else None)
+    problems += [f"names data file {p} without its integrity value"
+                 for p in sorted(set(_DATA_PATH.findall(html)) - set(refs))]
+    return refs, problems
+
+
+def _heat_ids(html: str, src: str) -> list[str]:
+    """The ids of the elements (the heatmap tables) that read their cells from src."""
+    return [i.group(1) for m in _DATA_ATTR.finditer(html) if m.group(1) == src
+            for i in [_ID_ATTR.search(m.group(0))] if i]
+
+
+def _heat_of(body: bytes) -> dict:
+    """A data file's "heat" entry ({} when it has none or does not parse)."""
+    try:
+        heat = json.loads(body).get("heat")
+    except (ValueError, AttributeError):
+        return {}
+    return heat if isinstance(heat, dict) else {}
+
+
+def collect_data(mod: Any, pages: dict) -> tuple[dict[str, bytes], list[str]]:
+    """Every data file the rendered pages reference, fetched from /data/<name> as
+    the pages do and checked against its integrity value and its name."""
+    client = mod.app.test_client()
+    files: dict[str, bytes] = {}
+    problems: list[str] = []
+    for route, page in pages.items():
+        refs, probs = data_refs(page["html"])
+        problems += [f"{route}: {p}" for p in probs]
+        for src, sri in sorted(refs.items()):
+            resp = client.get("/" + src)
+            if resp.status_code != 200:
+                problems.append(f"{route}: data file {src}: HTTP {resp.status_code}")
+                continue
+            body = resp.get_data()
+            if sri_of(body) != sri:
+                problems.append(f"{route}: data file {src} does not match its integrity value")
+            m = _DATA_NAME.fullmatch(src)
+            if not m or hashlib.sha256(body).hexdigest()[:16] != m.group(1):
+                problems.append(f"{route}: data file {src} is not named by its sha256")
+            heat = _heat_of(body)
+            problems += [f"{route}: data file {src} has no cell details for #{t}"
+                         for t in _heat_ids(page["html"], src)
+                         if not isinstance(heat.get(t), dict) or not isinstance(heat[t].get("detail"), str)
+                         or not isinstance(heat[t].get("cells"), list)]
+            files[src] = body
+    return files, problems
 
 
 def _static_path(ref: str) -> str:
@@ -213,11 +312,17 @@ def sitemap_xml(mod: Any, pages: dict) -> str:
             f"{''.join(rows)}</urlset>\n")
 
 
-def write_site(out: str, mod: Any, pages: dict) -> None:
+def write_site(out: str, mod: Any, pages: dict, data: dict[str, bytes] | None = None) -> None:
     os.makedirs(out, exist_ok=True)
     for page in pages.values():
         with open(os.path.join(out, page["file"]), "w") as f:
             f.write(page["html"])
+    # the referenced session data files and nothing else (an earlier build's go)
+    shutil.rmtree(os.path.join(out, "data"), ignore_errors=True)
+    for src, body in (data or {}).items():
+        os.makedirs(os.path.dirname(os.path.join(out, src)), exist_ok=True)
+        with open(os.path.join(out, src), "wb") as fb:
+            fb.write(body)
     for old, new in getattr(mod, "LEGACY_REDIRECTS", {}).items():
         with open(os.path.join(out, old), "w") as f:
             f.write(redirect_html(new, mod.SITE_URL + new))
@@ -258,6 +363,8 @@ def freeze(out: str, mod: Any = None, record: bool = True) -> int:
                   f"{restored})")
         pages, problems, warnings = render_pages(mod)
     problems += check_static(mod, pages)
+    data, data_problems = collect_data(mod, pages)
+    problems += data_problems
     for w in warnings:
         print(f"::warning title=Stale dashboard input::{w}")
     if problems:
@@ -265,9 +372,9 @@ def freeze(out: str, mod: Any = None, record: bool = True) -> int:
             print(f"::error title=Dashboard not published::{p}")
         print(f"NOT WRITTEN: {len(problems)} problem(s); nothing was written to {out}")
         return 1
-    write_site(out, mod, pages)
+    write_site(out, mod, pages, data)
     print(f"WROTE {len(pages)} pages + {len(getattr(mod, 'LEGACY_REDIRECTS', {}))} redirects + static/, "
-          f"CNAME, .nojekyll, robots.txt, sitemap.xml, 404.html -> {out}")
+          f"{len(data)} data file(s), CNAME, .nojekyll, robots.txt, sitemap.xml, 404.html -> {out}")
     return 0
 
 

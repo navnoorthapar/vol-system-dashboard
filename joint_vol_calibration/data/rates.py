@@ -592,17 +592,52 @@ _curve_cache: dict = {}
 _index_cache: dict = {}
 
 
-def get_zero_curve(as_of: str, *, max_age_days: int = 7, same_day: bool = True, root=None) -> ZeroCurve:
-    """build_zero_curve over the stored quotes (load_rate_quotes), cached per argument set."""
+def _stored_index(root=None) -> tuple:
+    """(quotes, QuoteIndex) of the stored quotes (load_rate_quotes), the index cached."""
     quotes = load_rate_quotes(root)
     idx = _index_cache.get(id(quotes))
     if idx is None:
         _index_cache.clear()
         idx = _index_cache[id(quotes)] = index_quotes(quotes)
+    return quotes, idx
+
+
+def get_zero_curve(as_of: str, *, max_age_days: int = 7, same_day: bool = True, root=None) -> ZeroCurve:
+    """build_zero_curve over the stored quotes (load_rate_quotes), cached per argument set."""
+    quotes, idx = _stored_index(root)
     key = (as_of, max_age_days, same_day, id(quotes))
     if key not in _curve_cache:
         _curve_cache[key] = build_zero_curve(idx, as_of, max_age_days=max_age_days, same_day=same_day)
     return _curve_cache[key]
+
+
+def par_yields(as_of: str, *, same_day: bool = True, max_age_days: int = 7, root=None) -> tuple:
+    """The stored Treasury par yield curve (the CMT yields) as of ``as_of``:
+    (quote date, {series: yield}) of the newest date <= as_of (< as_of with
+    same_day=False) that has a par quote, every UST_PAR_* value of that date
+    as published (decimal bond-equivalent yields; a tenor the date does not
+    carry is absent). The quotes are not converted: the VIX replication
+    (surface.vix.cmt_rates) applies Cboe's own interpolation to them.
+
+    Raises LookupError when there is no such date and database.StaleDataError
+    when it is more than ``max_age_days`` calendar days before as_of."""
+    db._validate_date(as_of)
+    _, idx = _stored_index(root)
+    k = int(np.searchsorted(idx.dates, as_of, side="right" if same_day else "left"))
+    for j in range(k - 1, -1, -1):
+        day = idx.by_date[str(idx.dates[j])]
+        par = {str(s): float(v) for s, v in day.items()
+               if str(s).startswith("UST_PAR_") and np.isfinite(v)}
+        if par:
+            break
+    else:
+        raise LookupError(f"no Treasury par yield {'on or ' if same_day else ''}before {as_of}")
+    quote_date = str(idx.dates[j])
+    age = (pd.Timestamp(as_of) - pd.Timestamp(quote_date)).days
+    if age > max_age_days:
+        raise db.StaleDataError(f"newest Treasury par curve before {as_of} is {quote_date} "
+                                f"({age} days old; allowed {max_age_days})")
+    return quote_date, dict(sorted(par.items()))
 
 
 def discount_factor(as_of: str, T, **kw):

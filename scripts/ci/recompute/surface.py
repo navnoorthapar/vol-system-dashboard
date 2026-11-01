@@ -13,6 +13,7 @@ holds the same number, against that too.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import math
 import re
@@ -26,7 +27,7 @@ from bs4 import Tag
 
 from . import surface_math as M
 from .chrome import labels as regime_labels
-from .core import DATE, Audit, Check, norm, numbers_in, rounds_to, text_of
+from .core import DATE, NUM, Audit, Check, norm, numbers_in, rounds_to, text_of
 from .data import Store, chain_words, sessions_between
 
 STALE_WARN = 2                      # the page's amber banner from this age (NYSE sessions) on
@@ -186,6 +187,12 @@ def chart_group(a: Audit, cid: str, group: str) -> Tag | None:
     return a.one(f'div#{cid}-data div.chart-data-group[data-group="{group}"] > table')
 
 
+def group_rows(a: Audit, cid: str, group: str) -> tuple[Tag | None, Tag | None]:
+    """A one-table group (the smile's expiries, D2): its row-group header and its tbody."""
+    tb = a.one(f'div#{cid}-data div.chart-groups > table > tbody[data-group="{group}"]')
+    return (tb.select_one(':scope > tr > th[scope="rowgroup"]') if tb is not None else None), tb
+
+
 def spec(a: Audit, sid: str) -> dict | None:
     el = a.one(f"script#{sid}")
     return json.loads(el.get_text()) if el is not None else None
@@ -227,6 +234,21 @@ def range_nums(r: tuple[int, float, float] | None) -> list[float]:
 
 
 # ── the session in view ───────────────────────────────────────────────────────
+# the earlier sessions the page compares (D2): the newest, and the newest at least this
+# many NYSE sessions before the headline, each once (the page's own rule, restated)
+COMPARE_LAGS = (5, 21, 63)
+
+
+def compared(head: str, earlier: Sequence[Any]) -> list[Any]:
+    """The compared sessions, newest first, from sessions newest first."""
+    out = list(earlier[:1])
+    for lag in COMPARE_LAGS:
+        pick = next((x for x in earlier if sessions_between(x.name, head) >= lag), None)
+        if pick is not None and pick not in out:
+            out.append(pick)
+    return sorted(out, key=lambda x: x.name, reverse=True)
+
+
 class Ctx:
     """The newest stored session, its recompute, and every other stored session."""
 
@@ -245,6 +267,7 @@ class Ctx:
         # the comparison with earlier sessions (and the charts that draw them) needs this
         # session's SVI-cal slices and at least one earlier session with a surface.json
         self.earlier = sorted((x for x in self.desk if x.name < s.name), key=lambda x: x.name, reverse=True)
+        self.compared = compared(s.name, self.earlier)
         self.compare = bool(self.listed) and bool(self.earlier)
         self.cm = M.cm_grid(s)
         self.by_cm = {r["label"]: r for r in self.cm}
@@ -256,9 +279,13 @@ class Ctx:
         self.fam = store.vix_family()
 
     def _score_order(self) -> list[str]:
+        """The scored models in the page's order. A model the scorecard lists as not
+        available (a session with no stored Heston fit, CITSEC-05: its surface is built
+        whatever the fit did) has no tile, row or description; the scorecard's note says
+        why, and is checked with the other notes."""
         if not self.sc:
             return list(self.s.models)
-        order = [str(m["model"]) for m in self.sc["models"]]
+        order = [str(m["model"]) for m in self.sc["models"] if m.get("available") is not False]
         rank = [r.get("model") for r in self.sc.get("ranking_by_oos_median_abs_hs") or []]
         pos = {m: i for i, m in enumerate(rank)}
         return sorted(order, key=lambda m: pos.get(m, len(pos) + order.index(m)))
@@ -287,16 +314,32 @@ class Ctx:
 P_HEAD = "page head"
 
 
+def unscored(c: Ctx) -> list[str]:
+    """The models the session's scorecard lists as not available and its residual table
+    lacks (Heston on a session with no stored fit, whose surface is built from its book)."""
+    return [str(m["model"]) for m in (c.sc or {}).get("models") or []
+            if m.get("available") is False and str(m.get("model")) not in c.s.models]
+
+
 def page_head(a: Audit, c: Ctx) -> None:
-    """Session, expiry and quote counts, models; the chain badge against the stored
-    chain and every stored session's expiry count."""
+    """Session, expiry and quote counts, models, then one item per model the scorecard
+    did not score ('Heston not scored on this session', linked to the scorecard and its
+    note); the chain badge against the stored chain and every stored session's expiry
+    count."""
     items = a.soup.select(".page-head > .page-badge:not(#chain-badge) > span.nowrap")
-    if not same_len(a, P_HEAD, "badge items", items, range(4)):
+    gone = unscored(c)
+    if not same_len(a, P_HEAD, "badge items", items, range(4 + len(gone))):
         return
     a.date(P_HEAD, "session", items[0], c.session)
     a.num(P_HEAD, "expiries (distinct expiries of the residual table)", items[1], float(len(c.exps)))
     a.num(P_HEAD, "quotes (one per quote of the residual table)", items[2], float(len(c.mkt)))
     a.text(P_HEAD, "models", items[3], "models: " + ", ".join(M.label(m) for m in c.s.models))
+    for el, m in zip(items[4:], gone):
+        a.text(P_HEAD, f"{M.label(m)}: not scored (scorecard.json available: false)", el,
+               f"{M.label(m)} not scored on this session")
+        link = el.select_one("a")
+        a.equal(P_HEAD, f"{M.label(m)} not scored: links to the scorecard and its note",
+                link.get("href") if link is not None else None, "#scorecard")
     chain_badge(a, c)
 
 
@@ -441,6 +484,10 @@ def score_tiles(a: Audit, c: Ctx) -> None:
     """Each model's out-of-sample median |z| tile: the scorecard's figures, the same
     figures recomputed from the residual table, and the range over every session."""
     tiles = kpis(a, "#surface-scores")
+    for row in (c.sc or {}).get("models") or []:
+        if row.get("available") is False:
+            name = f"{M.label(str(row.get('model')))} · median |z|"
+            a.equal(P_SCORES, f"{name}: no tile (not scored on this session)", tiles.get(norm(name)), None)
     for m in c.score_models:
         name = f"{M.label(m)} · median |z|"
         t = tiles.get(norm(name))
@@ -686,10 +733,13 @@ def surface_change(a: Audit, c: Ctx) -> None:
     a.equal(P_CHG, "panel shown", a.one("section#surface-change") is not None, c.compare)
     if not c.compare:
         return
-    earlier = c.earlier
-    nums(a, P_CHG, "panel meta (earlier sessions)", meta(a, "surface-change"), [len(earlier)])
+    earlier = c.compared
+    nums(a, P_CHG, "panel meta (compared of the earlier sessions)", meta(a, "surface-change"),
+         [len(earlier), len(c.earlier)])
+    nums(a, P_CHG, "which sessions are compared", a.one("#surface-change-picks"),
+         [*COMPARE_LAGS, len(earlier), len(c.earlier), len(COMPARE_LAGS) + 1])
     tabs = a.soup.select('#surface-change [role="tab"]')
-    a.equal(P_CHG, "tabs: earlier sessions, newest first", [t.get("data-value") for t in tabs],
+    a.equal(P_CHG, "tabs: the compared sessions, newest first", [t.get("data-value") for t in tabs],
             [x.name for x in earlier])
     a.equal(P_CHG, "default tab: the most recent earlier session",
             [t.get("data-value") for t in tabs if t.get("aria-selected") == "true"], [earlier[0].name])
@@ -724,8 +774,10 @@ def surface_change(a: Audit, c: Ctx) -> None:
 
 
 def rr_term(a: Audit, c: Ctx) -> None:
-    """RR25 of every listed expiry of every stored session: the chart's table and series."""
-    want = [(x.name, r) for x in sorted(c.desk, key=lambda x: x.name) for r in M.listed_grid(x)]
+    """RR25 of every listed expiry of this session and the compared ones: the chart's
+    table and series."""
+    shown = sorted([c.s, *c.compared], key=lambda x: x.name)
+    want = [(x.name, r) for x in shown for r in M.listed_grid(x)]
     trs = rows(chart_table(a, "chart-rr-term"))
     if same_len(a, P_CHG, "RR25 table rows", trs, want):
         for tr, (sname, r) in zip(trs, want):
@@ -739,12 +791,16 @@ def rr_term(a: Audit, c: Ctx) -> None:
     name = f"SVI-cal RR25 {c.session}"
     approx(a, P_CHG, f"chart-rr-term series {name}", series(sp, name),
            [[r["T_days"], r["rr25"]] for r in c.listed])
-    names = (["Every stored session"] if len(c.desk) > 1 else []) + [
-        f"SVI-cal RR25 {x.name}" for x in sorted(c.desk, key=lambda x: x.name) if x.name != c.session]
+    names = (["Sessions compared"] if c.compared else []) + [
+        f"SVI-cal RR25 {x.name}" for x in shown if x.name != c.session]
     legend(a, P_CHG, "chart-rr-term", [*names, f"SVI-cal RR25 {c.session}"])
-    for x in c.desk:
-        if x.name != c.session:
-            name = f"SVI-cal RR25 {x.name}"
+    others = [x for x in shown if x.name != c.session]
+    each = [f"SVI-cal RR25 {x.name}" for x in others] + [f"RR25 {x.name} (grey)" for x in others]
+    a.equal(P_CHG, "chart-rr-term series: this session's, and two per session compared",
+            sorted(str(x.get("name")) for x in (sp or {}).get("series") or []),
+            sorted([f"SVI-cal RR25 {c.session}", *each]))
+    for x in others:
+        for name in (f"SVI-cal RR25 {x.name}", f"RR25 {x.name} (grey)"):
             approx(a, P_CHG, f"chart-rr-term series {name}", series(sp, name),
                    [[r["T_days"], r["rr25"]] for r in M.listed_grid(x)])
 
@@ -784,7 +840,7 @@ def atm_term(a: Audit, c: Ctx) -> None:
             cell(a, P_ATM, f"{e} parity r (surface.json)", td[5], M.num(t.get("r")), scale=100.0)
             cell(a, P_ATM, f"{e} parity q (surface.json)", td[6], M.num(t.get("q")), scale=100.0)
             cell(a, P_ATM, f"{e} quotes (residual table)", td[7], float(nq.get(e, 0)))
-    earlier = c.earlier if c.compare else []
+    earlier = c.compared if c.compare else []
     for x in earlier:
         lst = M.listed_grid(x)
         tbl = chart_group(a, "chart-atm-ts", x.name)
@@ -1090,11 +1146,19 @@ def certified_slices(a: Audit, c: Ctx, tr_: list[dict]) -> None:
 P_IV, P_RES = "#iv-heat", "#residuals"
 
 
+# a heatmap cell's readout: its numbers in the session data file, this template (app.HEAT_DETAIL_*)
+HEAT_DETAIL_IV = "mid IV {0:2}% (median of {1}) · half-spread {2:2} vol pts"
+HEAT_DETAIL_RESID = "{0:+2} half-spreads (median of {1}) · {2:0}% inside"
+EMPTY_CELL = "a dot: no quotes in the bucket"
+
+
 def heat_rows(a: Audit, panel: str, tbl: Tag | None, c: Ctx, q: pd.DataFrame, what: str,
               value: Callable[[pd.DataFrame], float],
-              detail: Callable[[pd.DataFrame, float], list[float]]) -> list[float]:
+              detail: Callable[[pd.DataFrame, float], list[float]], template: str) -> list[float]:
     """A bucket heatmap: column heads, one row per expiry, each cell the value of its
-    quotes (or empty), with its detail; returns the cell values."""
+    quotes (or empty: blank, the caption saying what that means), and its readout's
+    numbers, read from the session's data file (D2) and verified (Audit.data_file),
+    each at the decimals its template prints; returns the cell values."""
     hd = heads(tbl)
     texts(a, panel, f"{what} column heads", hd[1:], [M.bucket_label(b, True) for b in c.used])
     trs = rows(tbl)
@@ -1102,26 +1166,49 @@ def heat_rows(a: Audit, panel: str, tbl: Tag | None, c: Ctx, q: pd.DataFrame, wh
     qb = q.assign(kb=M.bucket(q["k"]))
     if not same_len(a, panel, f"{what} rows", trs, c.exps):
         return out
-    for tr, (e, T) in zip(trs, c.exps.items()):
+    src = tbl.get("data-src") if tbl is not None else None
+    book = a.data_file(panel, src, tbl.get("data-integrity") if tbl is not None else None, c.session) or {}
+    a.equal(panel, f"{what} data file: this session", tbl.get("data-session") if tbl is not None else None,
+            c.session)
+    heat = (book.get("heat") or {}).get(tbl.get("id") if tbl is not None else "") or {}
+    a.equal(panel, f"{what} readout template", heat.get("detail"), template)
+    a.text(panel, f"{what} caption: empty cells", tbl.find("caption") if tbl is not None else None,
+           EMPTY_CELL, contains=True)
+    fcells = heat.get("cells") or []
+    decs = [int(x[-1]) if x else None for x in re.findall(r"\{\d(?::(\+?\d))?\}", template)]
+    bad: dict[str, list[str]] = {}
+    if not same_len(a, panel, f"{what} data file rows", fcells, c.exps):
+        fcells = [[]] * len(trs)
+    for tr, frow, (e, T) in zip(trs, fcells, c.exps.items()):
         a.equal(panel, f"{what} {e} data-exp", tr.get("data-exp"), e)
         days_nums(a, panel, f"{what} {e} row head (median T_days)", tr.find("th"), [T], [e])
         td = tds(tr)
         if not same_len(a, panel, f"{what} {e} cells", td, c.used):
             continue
-        for t, b in zip(td, c.used):
+        for i, (t, b) in enumerate(zip(td, c.used)):
             g = qb[(qb["expiry"] == e) & (qb["kb"] == b)]
             lab = f"{what} {e} {M.bucket_label(b, True)}"
+            fv = frow[i] if i < len(frow) else "missing"
             if g.empty:
-                a.equal(panel, f"{lab} empty", "empty" in (t.get("class") or []), True)
-                a.text(panel, f"{lab} empty-cell detail", t.select_one(".sr-only"),
-                       f"{e} · ln(K/F) {M.bucket_label(b, False)}: no quotes")
-                a.equal(panel, f"{lab} data-detail", t.get("data-detail"),
-                        f"{e} · ln(K/F) {M.bucket_label(b, False)}: no quotes")
+                a.equal(panel, f"{lab} empty: blank, no numbers in the file",
+                        ["empty" in (t.get("class") or []), text_of(t), fv], [True, "", None])
                 continue
             v = value(g)
             out.append(v)
             a.num(panel, lab, t, v)
-            text_nums(a, panel, f"{lab} detail", str(t.get("data-detail") or ""), detail(g, v))
+            want = detail(g, v)
+            if not (isinstance(fv, list) and len(fv) == len(want)):
+                bad.setdefault("cell's numbers", []).append(f"{e} {M.bucket_label(b, True)}")
+                continue
+            for j, (x, w, dec) in enumerate(zip(fv, want, decs)):
+                # desk.js prints a number with no decimals ({1}: a quote count) as it is
+                kind = int if dec is None else (int, float)
+                if isinstance(x, bool) or not isinstance(x, kind) or not spec_ok(x, w, FULL_SIG, dec):
+                    at = f"{e} {M.bucket_label(b, True)}"
+                    bad.setdefault(f"number {j + 1}", []).append(f"{at}: {x!r} vs {w}")
+    for name in ["cell's numbers", *(f"number {j + 1}" for j in range(len(decs)))]:
+        a.equal(panel, f"{what} readout {name} (data file) = recompute, every cell",
+                bad.get(name, [])[:3], [])
     return out
 
 
@@ -1130,7 +1217,7 @@ def iv_heat(a: Audit, c: Ctx) -> None:
     nums(a, P_IV, "panel meta (quotes)", meta(a, "iv-heat"), [len(c.mkt)])
     vals = heat_rows(a, P_IV, a.one("#iv-heatmap"), c, c.mkt, "mid IV",
                      lambda g: float(g["mid_iv"].median() * 100),
-                     lambda g, v: [v, len(g), float(g["half_spread_vp"].median())])
+                     lambda g, v: [v, len(g), float(g["half_spread_vp"].median())], HEAT_DETAIL_IV)
     if vals:
         nums(a, P_IV, "colour ramp lo/hi (cells shown)", a.one("#iv-heat .ramp"), [min(vals), max(vals)])
     note = a.one("#iv-heat p.note")
@@ -1149,7 +1236,8 @@ def iv_heat(a: Audit, c: Ctx) -> None:
 def surface_3d(a: Audit, c: Ctx, vals: list[float]) -> None:
     """The 3D view: one point per expiry and bucket at the bucket's midpoint (an open
     wing at its quotes' median k), the expiry's T_days and the cell's median mid IV;
-    shown from 9 filled cells."""
+    shown from 9 filled cells. Its points are in the session's data file (D2), read
+    and verified (Audit.data_file); the spec holds the colour scale."""
     sp = spec(a, "surface3d-spec")
     qb = c.mkt.assign(kb=M.bucket(c.mkt["k"]))
     x3 = {b: ((M.K_EDGES[b - 1] + M.K_EDGES[b]) / 2 if 0 < b < M.N_BUCKETS - 1 else
@@ -1163,7 +1251,11 @@ def surface_3d(a: Audit, c: Ctx, vals: list[float]) -> None:
             sum(1 for p in pts if p[2] is not None) >= 9)
     if sp is None:
         return
-    got = [p if isinstance(p, list) and len(p) == 3 else [None] * 3 for p in sp.get("points") or []]
+    a.equal(P_IV, "3D view: points in the session data file, not the page",
+            ["points" in sp, sp.get("session")], [False, c.session])
+    book = a.data_file(P_IV, sp.get("src"), sp.get("integrity"), c.session) or {}
+    got = [p if isinstance(p, list) and len(p) == 3 else [None] * 3
+           for p in (book.get("surface3d") or {}).get("points") or []]
     if same_len(a, P_IV, "3D view points", got, pts):
         for i, (what, dec) in enumerate((("bucket x (4 decimals)", 4), ("T_days", None),
                                          ("median mid IV % (3 decimals)", 3))):
@@ -1183,7 +1275,8 @@ def residual_heat(a: Audit, c: Ctx) -> None:
         nums(a, P_RES, f"{M.label(m)} caption (out-of-sample quotes; |value| ≤ 1)", cap, [len(q), 1])
         heat_rows(a, P_RES, a.one(f"#resid-heat-{m}"), c, q, M.label(m),
                   lambda g: float(g["error_hs"].median()),
-                  lambda g, v: [v, len(g), float(g["inside_spread"].astype(bool).mean() * 100)])
+                  lambda g, v: [v, len(g), float(g["inside_spread"].astype(bool).mean() * 100)],
+                  HEAT_DETAIL_RESID)
     for r in a.soup.select("#residuals .ramp"):
         statics(a, P_RES, "colour ramp ±5 half-spreads, 0 at mid", r, [-RESID_RAMP, RESID_RAMP, 0])
 
@@ -1216,32 +1309,82 @@ def residual_table(a: Audit, c: Ctx) -> None:
 
 # ── smile slices ──────────────────────────────────────────────────────────────
 P_SL = "#slices"
+MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def settlements(mkt: pd.DataFrame) -> dict[str, str]:
+    """{expiry: 'AM' | 'PM'} read off the OCC root of its lines (SPX: the opening
+    SOQ; SPXW: the close); none without a root column or where an expiry's lines mix."""
+    if "root" not in mkt.columns:
+        return {}
+    out: dict[str, str] = {}
+    for e, roots in mkt.groupby("expiry")["root"]:
+        st = {{"SPX": "AM", "SPXW": "PM"}.get(str(r).strip().upper()) for r in roots.unique()}
+        if len(st) == 1 and None not in st:
+            out[str(e)] = str(st.pop())
+    return out
+
+
+def masked(txt: str) -> str:
+    """A text's wording with its dates as 'D' and its numbers as '#' (checked apart)."""
+    return NUM.sub("#", DATE.sub("D", txt))
 
 
 def slices_panel(a: Audit, c: Ctx) -> None:
-    """Tabs, quotes and median half-spread per expiry, and each expiry's bucket table of
-    bid / mid / ask and every model's median IV; the packed quotes against the table."""
+    """Tabs (date, days, AM / PM from the OCC root, month boundaries), the selected
+    expiry's status line, the forward, quotes and median half-spread per expiry, and
+    each expiry's bucket table of bid / mid / ask and every model's median IV; the
+    packed quotes against the table."""
     tabs = a.soup.select('#slices [role="tab"]')
     a.equal(P_SL, "expiry tabs", [t.get("data-value") for t in tabs], list(c.exps))
     default = min(c.exps.items(), key=lambda kv: abs(kv[1] - M.CM_TENORS[0][0]))[0] if c.exps else None
     a.equal(P_SL, "selected tab: the expiry nearest 30 days",
             [t.get("data-value") for t in tabs if t.get("aria-selected") == "true"], [default])
-    for t, (e, T) in zip(tabs, c.exps.items()):
-        days_nums(a, P_SL, f"tab {e} days", t, [T])
+    settle = settlements(c.mkt)
+    # D3 review: the first tab of each year past the session's carries it ("Jan 15 ’27"),
+    # and the days sit in an <i> (desk.css prints 'd' and names it 'days')
+    years = [c.session[:4], *(e[:4] for e in c.exps)]
+    for i, (t, (e, T)) in enumerate(zip(tabs, c.exps.items())):
+        st = settle.get(e)
+        yr = years[i + 1] != years[i]
+        word = f"{MONTH_ABBR[int(e[5:7]) - 1]} #{' ’#' if yr else ''} · #" + (f" · {st}" if st else "")
+        a.equal(P_SL, f"tab {e}: wording", re.sub(r"\d+", "#", text_of(t)), word)
+        nums(a, P_SL, f"tab {e}: day of the month, year, days", t,
+             [float(int(e[8:10])), *([float(int(e[2:4]))] if yr else []), T])
+        nums(a, P_SL, f"tab {e}: days (<i>)", t.find("i"), [T])
+        a.equal(P_SL, f"tab {e}: settlement (OCC root)", t.get("data-settle"), st)
+    a.equal(P_SL, "tabs opening a month (.mo)",
+            [t.get("data-value") for t in tabs if "mo" in (t.get("class") or [])],
+            [e for e, prev in zip(list(c.exps)[1:], list(c.exps)) if e[:7] != prev[:7]])
     hs = c.mkt.groupby("expiry")["half_spread_vp"].median()
+    fwd = c.mkt.groupby("expiry")["forward"].first()
+    n_q = c.mkt.groupby("expiry").size()
     trs = rows(chart_table(a, "chart-slices"))
     if same_len(a, P_SL, "quotes per expiry rows", trs, c.exps):
         for tr, (e, T) in zip(trs, c.exps.items()):
             td = tds(tr)
             a.date(P_SL, f"{e} expiry", td[0], e)
             cell(a, P_SL, f"{e} days", td[1], T)
-            cell(a, P_SL, f"{e} quotes", td[2], float((c.mkt["expiry"] == e).sum()))
-            cell(a, P_SL, f"{e} median half-spread", td[3], float(hs[e]))
+            cell(a, P_SL, f"{e} forward F", td[2], float(fwd[e]))
+            cell(a, P_SL, f"{e} quotes", td[3], float(n_q[e]))
+            cell(a, P_SL, f"{e} median half-spread", td[4], float(hs[e]))
+    status = a.one("#slices-status")
+    if default is not None:
+        st = settle.get(default)
+        a.equal(P_SL, "status line: wording", masked(text_of(status)),
+                f"Expiry # of # · D · {pd.Timestamp(default).day_name()[:3]}" + (f" · {st}" if st else "")
+                + " · # days · F # · # quotes · median half-spread # vol pts")
+        place = [float(list(c.exps).index(default) + 1), float(len(c.exps))]
+        nums(a, P_SL, "status line: place among the tabs, days, F, quotes, median half-spread", status,
+             [*place, c.exps[default], float(fwd[default]), float(n_q[default]), float(hs[default])],
+             [default])
+    gt = a.one("div#chart-slices-data div.chart-groups > table")
+    texts(a, P_SL, "bucket table model columns", heads(gt)[5:], [M.label(m) for m in c.overlay])
+    a.equal(P_SL, "bucket table: a row group per expiry",
+            [tb.get("data-group") for tb in (gt.select(":scope > tbody") if gt else [])], list(c.exps))
     for e, T in c.exps.items():
-        tbl = chart_group(a, "chart-slices", e)
-        nums(a, P_SL, f"{e} group caption", tbl.find("caption") if tbl else None, [T], [e])
-        hd = heads(tbl)
-        texts(a, P_SL, f"{e} group model columns", hd[5:], [M.label(m) for m in c.overlay])
+        head, tb = group_rows(a, "chart-slices", e)
+        nums(a, P_SL, f"{e} row group header", head, [T], [e])
         q = c.mkt[c.mkt["expiry"] == e].sort_values("k", kind="mergesort")
         kb = M.bucket(q["k"])
         model_iv = {}
@@ -1249,7 +1392,7 @@ def slices_panel(a: Audit, c: Ctx) -> None:
             qm = c.s.res[(c.s.res["model"] == m) & (c.s.res["expiry"] == e)].set_index("k")["model_iv"]
             model_iv[m] = qm[~qm.index.duplicated()].reindex(q["k"].to_numpy()).to_numpy(float) * 100.0
         bs = [b for b in c.used if (kb == b).any()]
-        trs = rows(tbl)
+        trs = [tr for tr in (tb.find_all("tr", recursive=False) if tb is not None else []) if tds(tr)]
         if not same_len(a, P_SL, f"{e} bucket rows", trs, bs):
             continue
         for tr, b in zip(trs, bs):
@@ -1266,7 +1409,7 @@ def slices_panel(a: Audit, c: Ctx) -> None:
                 cell(a, P_SL, f"{lab} median {M.label(m)} IV", td[5 + i] if 5 + i < len(td) else None,
                      M.num(v))
     slices_prose(a, c)
-    packed_quotes(a, c)
+    packed_quotes(a, c, default)
 
 
 def slices_prose(a: Audit, c: Ctx) -> None:
@@ -1285,11 +1428,28 @@ def slices_prose(a: Audit, c: Ctx) -> None:
     statics(a, P_SL, "quote readout", a.one("#chart-slices-readout"), [READOUT_PAGE])
 
 
-def packed_quotes(a: Audit, c: Ctx) -> None:
+def packed_quotes(a: Audit, c: Ctx, default: str | None) -> None:
     """The smile chart's packed quotes (the quote inspector's data) against the residual
-    table: forward, days, strikes, rights, bid / mid / ask IV, each model's IV and flags."""
-    sp = spec(a, "chart-slices-spec")
-    groups = ((sp or {}).get("quotes") or {}).get("groups") or {}
+    table: forward, days, strikes, rights, bid / mid / ask IV, each model's IV and flags.
+    A book smile (D2) holds the default expiry inline, one dateless series set (its
+    template) and every expiry in the session's data file: the file is read and
+    verified (Audit.data_file), its expiries and the spec's order are the table's, and
+    the inline block is the file's."""
+    sp = spec(a, "chart-slices-spec") or {}
+    q = sp.get("quotes") or {}
+    groups = q.get("groups") or {}
+    if q.get("template"):
+        book = a.data_file(P_SL, q.get("src"), q.get("integrity"), c.session) or {}
+        a.equal(P_SL, "spec: session", q.get("session"), c.session)
+        a.equal(P_SL, "spec: expiry order = the residual table's", q.get("order"), list(c.exps))
+        bq = book.get("quotes") or {}
+        a.equal(P_SL, "data file: expiry order = the residual table's", bq.get("order"), list(c.exps))
+        a.equal(P_SL, "inline expiries: the selected tab's", list(groups), [default])
+        a.equal(P_SL, "inline quotes = the data file's", all(g == (bq.get("groups") or {}).get(e)
+                                                              for e, g in groups.items()), True)
+        a.equal(P_SL, "series: one dateless set (no group)", [s_.get("group") for s_ in sp.get("series") or []
+                                                              if s_.get("group") is not None], [])
+        groups = bq.get("groups") or {}
     a.equal(P_SL, "packed expiries", list(groups), list(c.exps))
     bad: dict[str, list[str]] = {}
     for e in c.exps:
@@ -1617,6 +1777,91 @@ def vix_terms(ix: dict) -> dict:
     return tm if isinstance(tm, dict) else {}
 
 
+# vix_replication.json rate.method when each term was priced at Cboe's rate (report_version 4 on)
+CBOE_RATE_METHOD = "cboe_cmt_bounded_spline"
+# what the page names as the causes of a gap's unexplained part
+CAUSE_TIMING, CAUSE_STALE, CAUSE_RATE = ("snapshot timing against the 16:15 ET print", "stale quotes",
+                                         "the rate")
+# how the page names the calculation time of a Cboe book (report_version 5 on)
+CALC_WORDS = {"book_quote_time": "the book’s quote time",
+              "closing_book_close": "the close its closing book’s quotes were left at"}
+
+
+def vix_timing(a: Audit, c: Ctx) -> str | None:
+    """The basis of the replication's calculation time as the record states it, checked
+    with the time, where the record states a basis (report_version 5 on), against the
+    instant rebuilt from surface.json's record of the chain (M.replication_instant): a
+    Cboe book's quote time while its quotes are live, a closing book's close (16:15 ET,
+    13:15 on an NYSE early close)."""
+    basis = c.vx.get("calculation_time_basis")
+    if basis is not None:
+        own = M.replication_instant(c.sj.get("inputs") or {}, c.session)
+        a.equal(P_VIX, "replication calculation time (rebuilt from the chain's record)",
+                c.vx.get("calculation_time_ny"), own[0] if own else None)
+        a.equal(P_VIX, "replication calculation time basis (rebuilt from the chain's record)", basis,
+                own[1] if own else None)
+    return basis
+
+
+def vix_rates(a: Audit, c: Ctx) -> set[str]:
+    """Where the replication says it priced its terms at Cboe's rate, every single-strike
+    term's R (any method) against Cboe's spline recomputed from the record's Treasury par
+    yields (the newest date before the session, the term's calendar days from it). Returns
+    the indices whose two headline terms were each discounted at that recomputed rate: a
+    parity-forward term discounts at its parity's own D (R = −ln D / T), which is not
+    Cboe's, so its index is left out. Empty when the record claims no Cboe rate, has no
+    curve, or a single-strike term's rate is not Cboe's."""
+    raw = c.vx.get("rate")
+    rate: dict = raw if isinstance(raw, dict) else {}
+    if rate.get("method") != CBOE_RATE_METHOD:
+        return set()
+    own = M.cmt_curve(c.store, c.session)
+    a.equal(P_VIX, "Treasury par curve the rates read (newest before the session)",
+            rate.get("curve_date"), own[0] if own else None)
+    if own is None:
+        return set()
+    day, curve = own
+
+    def cboe(term: dict) -> float:
+        days = (dt.date.fromisoformat(str(term["expiry"])[:10]) - dt.date.fromisoformat(day)).days
+        return M.cboe_cmt_rate(curve, float(days))
+
+    got, want = [], []
+    for _, ix in vix_rows(c):
+        for method in ("cboe_rules", "parity_forward", "any_expiry_parity_forward"):
+            rep = ix.get(method)
+            if not isinstance(rep, dict) or not rep.get("ok"):
+                continue
+            for term in (rep.get("near"), rep.get("next")):
+                if isinstance(term, dict) and term.get("forward_method") == "cboe_single_strike":
+                    got.append(M.num(term.get("R")))
+                    want.append(cboe(term))
+    ok = approx(a, P_VIX, "each single-strike term's rate: Cboe's CMT spline on the record's par yields",
+                got, want, sig=FULL_SIG)
+    at_cboe: set[str] = set()
+    for t, ix in vix_rows(c):
+        head = vix_terms(ix) if ix.get("headline_method") else {}
+        terms = [head.get("near"), head.get("next")]
+        if ok and got and all(isinstance(x, dict) and x.get("expiry")
+                              and spec_ok(M.num(x.get("R")), cboe(x), FULL_SIG) for x in terms):
+            at_cboe.add(t)
+    return at_cboe
+
+
+def vix_causes(basis: str | None, at_cboe_rate: set[str], tickers: Iterable[str]) -> list[str]:
+    """What the unexplained part of the gaps of ``tickers`` can come from: the snapshot's
+    timing unless the replication is calculated at the session's close (``basis``,
+    vix_timing), stale quotes, and the rate unless every one of them was discounted at
+    Cboe's (vix_rates)."""
+    timing = [] if basis == "closing_book_close" else [CAUSE_TIMING]
+    return [*timing, CAUSE_STALE] + ([] if set(tickers) <= at_cboe_rate else [CAUSE_RATE])
+
+
+def or_list(items: Sequence[str]) -> str:
+    """'a, b or c'."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " or " + items[-1]
+
+
 def vix_replication(a: Audit, c: Ctx) -> None:
     """Replicated VIX-family levels against the DB's Cboe closes, each index's terms and
     near weight, the gap split, ATM / VIX and the β estimator on the same chain."""
@@ -1657,7 +1902,9 @@ def vix_replication(a: Audit, c: Ctx) -> None:
             sp = splits[t]
             cell(a, P_VIX, f"{t} missing-strike shortfall", td[3], sp.short if sp else None)
             cell(a, P_VIX, f"{t} unexplained", td[4], sp.unexp if sp else None)
-    vix_terms_note(a, vr, splits)
+    basis, at_cboe = vix_timing(a, c), vix_rates(a, c)
+    # the terms note describes every index with a split; the gap sentence the VIX's
+    vix_terms_note(a, vr, splits, vix_causes(basis, at_cboe, [t for t, sp in splits.items() if sp]))
     beta = c.vx.get("beta") or {}
     note = a.one("#atm-vix-note")
     a.equal(P_VIX, "ATM / VIX note shown (vix_replication.json beta)", note is not None,
@@ -1670,12 +1917,14 @@ def vix_replication(a: Audit, c: Ctx) -> None:
         nums(a, P_VIX, "ATM / VIX: the VIX terms' ATM mid over the DB close; β estimator (30-day, Black-76)",
              note, want)
         a.num(P_VIX, "ATM / VIX (vix_replication.json)", note, M.num(beta.get("atm_over_vix_official")))
-    deviations(a, c, splits.get("VIX"))
+    deviations(a, c, splits.get("VIX"), vix_causes(basis, at_cboe, ["VIX"]))
 
 
-def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSplit | None]) -> None:
-    """'[0, 1]', each index that is not replicated and why, and with a split the 16:15 ET
-    print and the far-wing differences, positive ones first."""
+def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSplit | None],
+                   causes: list[str]) -> None:
+    """'[0, 1]', each index that is not replicated and why, and with a split the causes the
+    unexplained part can come from (vix_causes), the 16:15 ET print among them, and the
+    far-wing differences, positive ones first."""
     note = a.one("#vix-terms-note")
     want: list[float | None] = [0, 1]
     for t, ix in vr:
@@ -1689,13 +1938,17 @@ def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSp
     shown = [sp for sp in splits.values() if sp]
     far = [sp.far for sp in shown if sp.far is not None]
     if shown:
-        want += [16, 15, *(f for f in far if f > 0), *(f for f in far if f < 0)]
+        a.text(P_VIX, "terms note: what the unexplained part can come from", note,
+               f"({or_list(causes)}; not measured)", contains=True)
+        want += [*([16, 15] if CAUSE_TIMING in causes else []), *(f for f in far if f > 0),
+                 *(f for f in far if f < 0)]
     nums(a, P_VIX, "terms note (not replicated, far-wing market − model per index)", note, want)
 
 
-def deviations(a: Audit, c: Ctx, vix: GapSplit | None) -> None:
+def deviations(a: Audit, c: Ctx, vix: GapSplit | None, causes: list[str]) -> None:
     """'Where the replication departs from Cboe': the producer's deviations and notes as
-    written, and the gap-attribution sentence rebuilt from the recompute."""
+    written, and the gap-attribution sentence rebuilt from the recompute, naming the causes
+    vix_causes leaves for the VIX."""
     lis = a.soup.select("#vix-replication details.method ul.prose > li")
     devs = [prose(x) for x in c.vx.get("deviations") or []]
     notes = [prose(x) for x in c.vx.get("gap_notes") or [] if not str(x).startswith("Gap attribution (")]
@@ -1706,14 +1959,18 @@ def deviations(a: Audit, c: Ctx, vix: GapSplit | None) -> None:
     if vix:
         fit = list(vix.fit or ())
         sentence: list[float | None] = [vix.gap, vix.short, vix.unexp]
-        if vix.far is not None and abs(vix.far) >= FAR_WING_IN_LINE:
-            sentence += [*fit, abs(vix.far)]
+        if vix.far is not None:
+            # 'beyond the fitted K/F lo–hi price in line with that wing' or '… price x above/below'
+            sentence += [*fit, *([abs(vix.far)] if abs(vix.far) >= FAR_WING_IN_LINE else [])]
         if vix.inside is not None:
             sentence += [*fit, vix.inside]
         sentence += [vix.unexp]
         if vix.gap is not None and abs(vix.gap) > 1e-12:
             sentence += [100.0 * vix.unexp / vix.gap]
-        nums(a, P_VIX, "gap attribution sentence (rebuilt from the split)", lis[-1], [*sentence, 16, 15])
+        nums(a, P_VIX, "gap attribution sentence (rebuilt from the split)", lis[-1],
+             [*sentence, *([16, 15] if CAUSE_TIMING in causes else [])])
+        a.text(P_VIX, "gap attribution sentence: what the unexplained part can come from", lis[-1],
+               f"({', '.join(causes)}).", contains=True)
     near_next_notes(a, c, lis[len(devs):len(devs) + len(notes)])
 
 
@@ -1770,8 +2027,10 @@ def varswap(a: Audit, c: Ctx) -> None:
            points("var_swap_vol"))
     approx(a, P_VS, "chart-strip series ATM vol", series(sp, "ATM vol (quotes)"), points("atm_vol_quotes"))
     names = ["Variance-swap vol (Cboe formula)", "ATM vol (quotes)"]
+    # the Cboe closes print at the session's data cutoff: 13:15 ET on an NYSE early close
+    close = M.cboe_close_time(c.session)
     if marks:
-        name = "Cboe close (16:15 ET): VIX9D, VIX, VIX3M, VIX6M"
+        name = f"Cboe close ({close:%H:%M} ET): VIX9D, VIX, VIX3M, VIX6M"
         approx(a, P_VS, "chart-strip Cboe close markers (DB)", series(sp, name),
                [[d, v] for _, d, v in marks])
         names.append(name)
@@ -1781,9 +2040,13 @@ def varswap(a: Audit, c: Ctx) -> None:
     a.equal(P_VS, "Cboe markers note shown", note is not None, bool(marks))
     if note is not None:
         ct = c.vx.get("calculation_time_ny")
-        timed = f"; the replication is timed {str(ct).replace('T', ' ')} ET" if ct else ""
-        a.text(P_VS, "Cboe close time and the replication's", note, f"(16:15 ET{timed})", contains=True)
-        want = [16, 15, *(v for v, _, _ in numbers_in(timed)), *(x for _, d, v in marks for x in (v, d))]
+        words = CALC_WORDS.get(str(c.vx.get("calculation_time_basis")))   # checked by vix_timing
+        timed = (f"; the replication is timed {str(ct).replace('T', ' ')} ET"
+                 + (f", {words}" if words else "") if ct else "")
+        a.text(P_VS, "Cboe close time (the session's cutoff) and the replication's", note,
+               f"({close:%H:%M} ET{timed})", contains=True)
+        want = [close.hour, close.minute, *(v for v, _, _ in numbers_in(timed)),
+                *(x for _, d, v in marks for x in (v, d))]
         nums(a, P_VS, "Cboe closes (DB) at their constant maturities, calculation time", note, want,
              [m.group(0) for m in DATE.finditer(timed)])
     statics(a, P_VS, "skew-premium note", next((p for p in a.soup.select("#varswap p.note")
@@ -1808,14 +2071,19 @@ def history(a: Audit, c: Ctx) -> None:
     nums(a, P_HIST, "panel meta", meta(a, "surface-history"), [len(idx)])
     beta = M.beta_by_session(c.store)
     tbl = a.one("#surface-history-table")
+    # a column for every model a stored session scores: this session's, then the rest
+    # by name (a session without a Heston fit keeps the earlier sessions' Heston column)
+    hist = history_models(c)
     want_hd = (["Session", "Scored quotes", "Expiries"]
-               + [f"{M.label(m)} |z|, out of sample" for m in c.s.models]
+               + [f"{M.label(m)} |z|, out of sample" for m in hist]
                + ["Repair moves outside spread", "VIX rep. − close", "VIX-term ATM / VIX"]
                + (["β estimator ATM 30d / VIX"] if beta else []))
     texts(a, P_HIST, "columns", heads(tbl), want_hd)
     trs = rows(tbl)
     if not same_len(a, P_HIST, "rows", trs, idx):
         return
+    gaps = False
+    unfit: list[str] = []
     for tr, r in zip(trs, list(reversed(idx))):
         name = r["session"]
         x = by.get(name)
@@ -1827,14 +2095,19 @@ def history(a: Audit, c: Ctx) -> None:
              float(len(x.mkt)) if x is not None else M.num(r.get("n_quotes")))
         cell(a, P_HIST, f"{name} expiries (its residual table)", td[2],
              float(len(M.expiries(x))) if x is not None and x.sj is not None else None)
-        for i, m in enumerate(c.s.models):
-            o = (((c.sc_model(m, x) or {}).get("metrics") or {}).get("out_of_sample") or {}) if x else {}
+        for i, m in enumerate(hist):
+            row = (c.sc_model(m, x) or {}) if x else {}
+            scored = row.get("available") is not False
+            o = ((row.get("metrics") or {}).get("out_of_sample") or {}) if scored else {}
             v = M.num(o.get("median_abs_hs"))
             cell(a, P_HIST, f"{name} {M.label(m)} OOS median |z| (its scorecard.json)", td[3 + i], v)
+            gaps |= v is None
+            if v is None and m.lower().startswith("heston"):
+                unfit.append(name)
             if x is not None and x.sc and v is not None:
                 a.num(P_HIST, f"{name} {M.label(m)} OOS median |z| (its residual table)", td[3 + i],
                       oos_stats(c, m, x)["median_abs_hs"])
-        j = 3 + len(c.s.models)
+        j = 3 + len(hist)
         n_out = float(x.mkt["arb_flag"].astype(bool).sum()) if x is not None and "arb_flag" in x.res else None
         cell(a, P_HIST, f"{name} repair moves outside spread (its residual arb_flag)", td[j],
              n_out if n_out is not None else M.num(r.get("arbitrage_quotes_outside_spread")))
@@ -1852,7 +2125,58 @@ def history(a: Audit, c: Ctx) -> None:
             be = beta.get(name)
             cell(a, P_HIST, f"{name} β estimator on the DB chain (— when its implied spot is off the close)",
                  td[j + 3], be["ratio"] if be else None)
-    nums(a, P_HIST, "note (sessions)", a.one("#surface-history p.note"), [len(idx)])
+    note = a.one("#surface-history p.note")
+    why = unfitted_causes(c.store, unfit)
+    nums(a, P_HIST, "note (sessions; the run records' reasons)", note,
+         [len(idx), *(v for v, _, _ in numbers_in(why))], dates=["-".join(d) for d in DATE.findall(why)])
+    a.equal(P_HIST, "note: what a dash in a model's column means (shown when a cell is one)",
+            HIST_DASH in text_of(note) if note is not None else None, gaps)
+    a.equal(P_HIST, "note: why Heston has no fit, where the run records say (data_store/runs)",
+            text_of(note).split(HIST_UNFIT, 1)[1] if HIST_UNFIT in text_of(note) else "",
+            f"{norm(why)}." if why else "")
+
+
+HIST_DASH = "A dash in a model’s column: the model is not scored on that session"
+HIST_UNFIT = "Where the job’s run records say why Heston has none: "
+
+
+def unfitted_causes(store: Store, sessions: Sequence[str]) -> str:
+    """Why the history's sessions without a Heston figure have no fit, rebuilt from the
+    job's run records (data_store/runs/run_*.json, schema run_ledger/1, by run time):
+    per session the newest run that tried to fit it and stored nothing, among the runs
+    whose own (expected) session it is when there are any, a rejection first; sessions
+    grouped by what happened and the reason recorded, in session order
+    of each group's first; a session no record names is left out."""
+    recs = []
+    for path in sorted((store.root / "runs").glob("run_*.json")):
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("schema") == "run_ledger/1" and rec.get("run_utc"):
+            recs.append(rec)
+    recs.sort(key=lambda r: str(r["run_utc"]))
+    groups: dict[tuple[str, str], list[str]] = {}
+    for s in sorted(set(sessions)):
+        runs = [r for r in recs if isinstance(r.get("calibration"), dict)
+                and str(r["calibration"].get("session")) == s
+                and r["calibration"].get("status") in ("rejected", "skipped", "failed")]
+        runs = [r for r in runs if str(r.get("expected_session") or s) == s] or runs
+        on = [r["calibration"] for r in runs]
+        if on:
+            cal = ([x for x in on if x["status"] == "rejected"] or on)[-1]
+            groups.setdefault((cal["status"], str(cal.get("reason") or "no reason recorded").rstrip(".")),
+                              []).append(s)
+    lead = {"rejected": "the gate rejected the fit of ", "skipped": "the job did not fit "}
+    return "; ".join((f"{lead[k]}{', '.join(ss)}" if k in lead else f"the fit of {', '.join(ss)} failed")
+                     + f" — {why}" for (k, why), ss in groups.items())
+
+
+def history_models(c: Ctx) -> list[str]:
+    """The history table's model columns: this session's models in its residual table's
+    order, then every other model a stored session's residual table holds, by name."""
+    own = list(c.s.models)
+    return own + sorted({m for x in c.all for m in x.models} - set(own))
 
 
 # ── the page ──────────────────────────────────────────────────────────────────

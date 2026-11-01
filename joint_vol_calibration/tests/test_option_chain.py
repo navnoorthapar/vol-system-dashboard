@@ -197,12 +197,54 @@ def test_clean_chain_measures_T_from_a_gth_quote_time():
     rel = (old.quotes.loc[atm, "implied_vol"] / (0.18 - 0.4 * np.log(old.quotes.loc[atm, "strike"] / F)))
     assert rel.between(0.988, 0.992).all()           # sqrt(T / (14/365)) - 1 = -0.97%
 
-    stored = oc.observed_quotes(raw, gth, spot=S).assign(snapshot_date=session, quote_time=qt)
+    # stored by a vendor that records quote times (a Cboe capture)
+    stored = oc.observed_quotes(raw, gth, spot=S, source="cboe").assign(snapshot_date=session,
+                                                                        quote_time=qt)
     again = oc.clean_option_chain(stored, session, S, r_ref=0.042)
     cols = [c for c in oc._QUOTE_COLS if c != "yahoo_iv"]
     pd.testing.assert_frame_equal(again.quotes[cols], gth.quotes[cols], check_exact=True)
     pd.testing.assert_frame_equal(again.carry, gth.carry, check_exact=True)
     assert again.diagnostics["t_origin"] == gth.diagnostics["t_origin"]
+
+
+def test_a_yahoo_chain_has_no_quote_time_so_T_runs_from_the_close():
+    """CITSEC-02 / QUANT-01 / VALIDATOR-01: the bot stamped its Yahoo download
+    instant into quote_time (2026-10-26: 05:26:50Z, inside the next session's
+    GTH window), and the cleaner measured T from it and labelled the chain a
+    'Cboe GTH book'. Yahoo records no quote time: a time stored with a Yahoo
+    chain is its download instant (fetched_at), T runs from the 16:00 ET
+    close, and the GTH basis, used only for a vendor that records quote
+    times, names no vendor."""
+    S, session, fetched, T_days = 7700.0, "2026-10-19", "2026-10-20T02:30:00Z", 14
+    T = T_days / 365.0
+    raw = _synthetic_chain(S * math.exp(0.031 * T), math.exp(-0.042 * T), T_days, session=session)
+    close = oc.session_close(session).isoformat(timespec="seconds")
+    assert oc.t_origin(fetched, session).isoformat() != close        # the instant is in the GTH window
+    old_bot = oc.observed_quotes(raw, spot=S).assign(snapshot_date=session, quote_time=fetched)
+    assert set(old_bot["source"]) == {"yahoo"}
+    new_bot = old_bot.assign(quote_time=None, fetched_at=fetched)
+    live = raw.assign(source="yfinance")                               # as fetch_spx_chain labels it
+    for chain, kw in ((old_bot, {}), (new_bot, {}), (live, {"fetched_at": fetched})):
+        d = oc.clean_option_chain(chain, session, S, r_ref=0.042, **kw)
+        assert d.ok
+        assert d.diagnostics["quote_time"] is None
+        assert d.diagnostics["fetched_at"] == fetched
+        assert d.diagnostics["source"] in oc.NO_QUOTE_TIME_SOURCES
+        assert d.diagnostics["t_origin"] == close
+        assert d.diagnostics["t_origin_basis"] == oc.CLOSE_BASIS
+        assert (d.quotes["time_to_expiry"] == T).all()
+    # the same rows from a vendor that records quote times: a GTH book, T
+    # from the quote time, a basis that keeps the 'quote_time' prefix and
+    # names no vendor
+    g = oc.clean_option_chain(old_bot.assign(source="cboe"), session, S, r_ref=0.042)
+    assert g.diagnostics["quote_time"] == fetched
+    assert g.diagnostics["t_origin"] == "2026-10-19T22:30:00-04:00"
+    assert g.diagnostics["t_origin_basis"] == oc.GTH_BASIS
+    assert g.diagnostics["t_origin_basis"].startswith("quote_time")
+    assert "Cboe" not in g.diagnostics["t_origin_basis"]
+    # a quote time the caller vouches for is used as given
+    told = oc.clean_option_chain(live, session, S, r_ref=0.042, quote_time=fetched)
+    assert told.diagnostics["t_origin"] == g.diagnostics["t_origin"]
 
 
 def test_closing_book_and_legacy_snapshots_clean_exactly_as_before():

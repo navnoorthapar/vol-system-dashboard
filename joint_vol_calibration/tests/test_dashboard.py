@@ -36,6 +36,7 @@ import pickle
 import re
 import shutil
 import sqlite3
+from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
@@ -57,6 +58,34 @@ def _surface_file(name: str) -> Path:
     return root / sessions[-1] / name
 
 
+def _scored(sc: dict) -> list[str]:
+    """The models a scorecard.json scored, in its order. A row it marks ``available:
+    false`` has no metrics: Heston on a session with no stored fit (a skipped or
+    rejected calibration, every Friday so far), whose surface is built from its book
+    all the same; the page leaves that model out and says why."""
+    return [m["model"] for m in sc["models"] if m.get("available") is not False]
+
+
+def _fit_session(dash) -> str:
+    """The headline fit's session: what the Overview's surface figures and the
+    Calibration page's chain and smiles cite (the newest surface session may be a
+    newer one without a fit)."""
+    path, cal = dash.load_headline_calibration()
+    return dash._calibration_session(cal, path)
+
+
+def _overview_surface_file(dash, name: str) -> Path:
+    """``name`` of the session the Overview's surface figures cite (app.surface_result):
+    the headline fit's session when it has a scorecard, else the newest surface session."""
+    d = SHIPPED / "surface" / _fit_session(dash)
+    return d / name if (d / "scorecard.json").exists() else _surface_file(name)
+
+
+def _tight(text: str) -> str:
+    """Visible text without the space a no-wrap span (a date) leaves before ',', '.', ';', ')'."""
+    return re.sub(r"\s+([,.;)])", r"\1", text)
+
+
 def _load(name: str, rel: str):
     spec = importlib.util.spec_from_file_location(name, ROOT / rel)
     assert spec is not None
@@ -72,6 +101,7 @@ def dash():
     the committed record as the daily job and freeze_site do (app.record_db), not
     the checkout's cache, which the job never commits."""
     mod = _load("dashboard_app_under_test", "dashboard/app.py")
+    _record_html_fields(mod)
     with mod.record_db():
         _ACTIVE_APP.append(mod)
         try:
@@ -81,6 +111,41 @@ def dash():
 
 
 _ACTIVE_APP: list = []
+
+# C5 (D2): a chart's JSON block leaves out the fields its page renders as HTML from
+# the spec (app.SPEC_HTML_FIELDS: its aria-label, description, legend bar and data
+# table). The tests that read them read the spec the server rendered them from,
+# recorded here by the dash fixture under the sha256 of the JSON block it wrote, with
+# the description it renders (two renders can write one JSON block and differ in a
+# description: Research's VRP bars name a session count their data does not hold).
+# test_each_chart_renders_its_html_fields_from_its_spec ties the two together.
+_HTML_FIELDS: dict[str, list[tuple[str, dict]]] = {}
+
+
+def _record_html_fields(mod) -> None:
+    from markupsafe import escape
+
+    write = mod.app.jinja_env.filters.get("spec_json")
+    if write is None:                     # an app before C5: its JSON blocks hold every field
+        return
+
+    def recorded(spec):
+        out = write(spec)
+        if isinstance(spec, dict):
+            seen = _HTML_FIELDS.setdefault(hashlib.sha256(str(out).encode()).hexdigest(), [])
+            desc = f'-desc">{escape(mod.subs_text(spec.get("describe")))}</p>'
+            fields = {k: spec[k] for k in mod.SPEC_HTML_FIELDS if k in spec}
+            if (desc, fields) not in seen:
+                seen.append((desc, fields))
+        return out
+    mod.app.jinja_env.filters["spec_json"] = recorded
+
+
+def _html_fields(html: str, cid: str, block: str) -> dict:
+    """The HTML-rendered fields of the chart whose JSON block is ``block`` on ``html``:
+    the latest render of that block whose description the page carries."""
+    seen = _HTML_FIELDS.get(hashlib.sha256(block.encode()).hexdigest(), [])
+    return next((f for desc, f in reversed(seen) if f'id="{cid}{desc}' in html), seen[-1][1] if seen else {})
 
 
 def _market_db() -> Path:
@@ -856,6 +921,53 @@ def test_freeze_copies_static_and_refuses_a_script_that_fails_its_sri(dash, free
         monkeypatch.undo()
 
 
+def test_freeze_writes_each_referenced_data_file_and_fails_closed_on_a_bad_one(dash, freezer, tmp_path,
+                                                                              monkeypatch):
+    """D2: the frozen Surface page names its session data file (desk.js fetches it).
+    Freeze writes that file, its bytes those /data/<name> serves, their sha384 the
+    page's integrity value and their sha256 in its name, and nothing else under data/
+    (an earlier build's file goes; a registered file no page names is not written).
+    It writes nothing at all when a page names a file /data/<name> does not serve
+    (404) or whose bytes changed after the page was rendered, and a data/ path in a
+    page without its integrity value is a problem."""
+    out = tmp_path / "site"
+    (out / "data").mkdir(parents=True)
+    (out / "data" / "surface-1999-01-01-0123456789abcdef.json").write_text("{}")
+    monkeypatch.setitem(dash.DATA_FILES, "surface-stray-0123456789abcdef.json", b"{}")
+    assert freezer.freeze(str(out), dash) == 0
+    refs = freezer.data_refs((out / "surface.html").read_text())[0]
+    assert len(refs) == 1
+    ((src, sri),) = refs.items()
+    body = (out / src).read_bytes()
+    assert freezer.sri_of(body) == sri
+    assert src.endswith(hashlib.sha256(body).hexdigest()[:16] + ".json")
+    assert sorted(p.relative_to(out).as_posix() for p in (out / "data").iterdir()) == [src]
+    assert freezer.data_refs("<p>data/surface-x-0123456789abcdef.json</p>")[1]
+    # C6: the Surface heatmaps name the file on their tables (data-src, data-integrity)
+    surf = (out / "surface.html").read_text()
+    grids = re.findall(r'<table class="heat" id="(?:iv-heatmap|resid-heat-[\w-]+)"[^>]*>', surf)
+    assert len(grids) >= 2
+    assert all(f' data-src="{src}" data-integrity="{sri}"' in g for g in grids)
+    one = '<table class="heat" data-src="data/surface-x-0123456789abcdef.json" data-integrity="sha384-a">'
+    assert freezer.data_refs(one) == ({"data/surface-x-0123456789abcdef.json": "sha384-a"}, [])
+    assert freezer.data_refs(one.replace(' data-integrity="sha384-a"', ""))[1]
+    assert freezer.data_refs(one + one.replace("sha384-a", "sha384-b"))[1]
+
+    class Lost(dict):                     # rendered, never served: /data/<name> is a 404
+        def __setitem__(self, k, v):
+            pass
+
+    class Changed(dict):                  # served with other bytes than the page was given
+        def __setitem__(self, k, v):
+            super().__setitem__(k, v + b" ")
+
+    for cls in (Lost, Changed):
+        monkeypatch.setattr(dash, "DATA_FILES", cls())
+        out2 = tmp_path / cls.__name__
+        assert freezer.freeze(str(out2), dash) == 1, cls.__name__
+        assert not out2.exists() or not any(out2.iterdir())
+
+
 # ── Greeks page ───────────────────────────────────────────────────────────────
 
 def test_heatmap_draws_every_node(dash):
@@ -1048,7 +1160,7 @@ def test_every_chart_has_an_accessible_name_and_a_data_alternative(pages):
             assert desc and len(desc.group(1).strip()) > 20, (route, cid)
             m = re.search(rf'<div class="chart-data sr-only" id="{re.escape(cid)}-data">(.*?)</div>', html,
                           re.DOTALL)
-            assert m and "<table>" in m.group(1) and "<caption>" in m.group(1), (route, cid)
+            assert m and re.search(r"<table[ >]", m.group(1)) and "<caption>" in m.group(1), (route, cid)
             assert re.search(r"<td[^>]*>[^<]*\d", m.group(1)), (route, cid)        # it carries numbers
             spec = json.loads(_html_unescape(re.search(
                 rf'<script type="application/json" id="{re.escape(a["data-spec"])}">(.*?)</script>', html,
@@ -1293,16 +1405,39 @@ def test_regime_and_calibration_copy_state_the_actual_rules(pages):
 
 
 def _raw_specs(html: str) -> dict:
-    return {m.group(1): json.loads(_html_unescape(m.group(2))) for m in re.finditer(
-        r'<script type="application/json" id="([\w-]+)-spec">(.*?)</script>', html, re.DOTALL)}
+    """Each chart's spec as the server built it: its JSON block, with the fields the
+    page renders as HTML (_HTML_FIELDS) put back."""
+    return {m.group(1): {**json.loads(_html_unescape(m.group(2))),
+                         **_html_fields(html, m.group(1), m.group(2))}
+            for m in re.finditer(r'<script type="application/json" id="([\w-]+)-spec">(.*?)</script>', html,
+                                 re.DOTALL)}
 
 
-def _spec(html: str, chart_id: str) -> dict:
+def _spec(html: str, chart_id: str, site: Path | None = None) -> dict:
     """A chart's spec as desk.js draws it: compact x values expanded, shared x values
-    and derived series filled in (desk_charts.resolve, the twin of desk.js resolveSpec)."""
+    and derived series filled in (desk_charts.resolve, the twin of desk.js resolveSpec);
+    a book smile (Surface) with every expiry's quotes and series, from its data file."""
     raw = _raw_specs(html)
     assert chart_id in raw, chart_id
-    return _charts().resolve(raw[chart_id], raw)
+    return _charts().resolve(raw[chart_id], raw, _book(raw[chart_id], site))
+
+
+def _book(spec: dict, site: Path | None = None) -> dict | None:
+    """The session data file a book smile's spec names (quotes.src), parsed: from the
+    frozen ``site``, else from the app's registry (what /data/<name> serves)."""
+    src = (spec.get("quotes") or {}).get("src")
+    if not src:
+        return None
+    body = (site / src).read_bytes() if site else _ACTIVE_APP[-1].DATA_FILES[src.split("/", 1)[1]]
+    return json.loads(body)
+
+
+def _with_book(spec: dict, site: Path | None = None) -> dict:
+    """A smile spec with every expiry's packed quotes (its data file's, when it has one)."""
+    book = _book(spec, site)
+    if book is None:
+        return spec
+    return {**spec, "quotes": {**spec["quotes"], "groups": book["quotes"]["groups"]}}
 
 
 def _charts():
@@ -1342,7 +1477,9 @@ def test_backtest_audit_heading_counts_its_rows(pages):
     heading = re.search(r'id="audit-title">([^<]+)<', cp).group(1)
     assert heading == (f"{arts[0]}–{arts[-1]} corrections — {len(statuses)} findings, "
                        f"{n_fixed} fixed, {n_quant} quantified")
-    assert arts == [f"C{i}" for i in range(16, 24)]
+    # every round of the registry, in its order (the register is append-only: C24 followed C23)
+    registry = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    assert arts == [r["id"] for r in registry["rounds"]]
     assert "Ten Flaws Found" not in cp
     assert "C17 pipeline" not in cp
 
@@ -1934,11 +2071,10 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C contrarian"),
                       ("nav_s3", "S3 short SPX straddle"), ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (ref)")):
         rel = eq[col] / eq[col].iloc[0] - 1
-        want = "".join(f'<td class="num">{dash._pct_prose(x)}</td>'
-                       for x in (rel.iloc[-1], rel.min(), rel.max()))
+        want = "".join(f'<td>{dash._pct_prose(x)}</td>' for x in (rel.iloc[-1], rel.min(), rel.max()))
         assert f"<tr><td>{name}</td>{want}</tr>" in table, name
     # the C22 case (+5.647% printed as +5.7%) is now +6.105% on the C23 record
-    assert '<tr><td>S3 short SPX straddle</td><td class="num">+6.1%</td>' in table
+    assert '<tr><td>S3 short SPX straddle</td><td>+6.1%</td>' in table
     # model smile table: the Heston smile of the headline fit, formatted once
     _, cal = dash.load_headline_calibration()
     smile = {s["T"]: s for s in dash.heston_model_smile(cal["params"])}
@@ -2271,6 +2407,672 @@ def test_surface_page_renders_the_producers_numbers(dash, art):
     assert "2026-06-18" in html
 
 
+def _no_fit_surface_store(tmp_path: Path) -> Path:
+    """The artifact store with SESSION's surface as the producer writes it for a
+    session with a live Cboe book and no accepted Heston fit (CITSEC-05): no
+    joint_cal_<SESSION>.pkl and no diagnostics, the scorecard's Heston row
+    unavailable with its reason, no Heston residuals, the rankings and index row
+    without it. The headline fit is then an earlier session's."""
+    data = _artifact_store(tmp_path, diagnostics=False)
+    (data / "calibrations" / f"joint_cal_{SESSION}.pkl").unlink()
+    d = data / "surface" / SESSION
+    res = pd.read_parquet(d / "residuals.parquet")
+    heston = [m for m in res["model"].unique() if str(m).startswith("heston")]
+    kept = res[~res["model"].isin(heston)].reset_index(drop=True)
+    kept.to_parquet(d / "residuals.parquet", index=False)
+    sc = json.loads((d / "scorecard.json").read_text())
+    why = (f"no joint SPX/VIX Heston fit is stored for {SESSION} (data_store/calibrations/"
+           f"joint_cal_{SESSION}.pkl): the calibration was rejected by its gate or not run on this session.")
+    sc["models"] = [{"model": m["model"], "available": False, "reason": why} if m["model"] in heston else m
+                    for m in sc["models"]]
+    for key in ("ranking_by_oos_median_abs_hs", "ranking_by_common_oos_median_abs_hs"):
+        if key in sc:
+            sc[key] = [r for r in sc[key] if r["model"] not in heston]
+    if "models" in (sc.get("common_out_of_sample") or {}):
+        sc["common_out_of_sample"]["models"] = [m for m in sc["common_out_of_sample"]["models"]
+                                                if m not in heston]
+    sc["notes"][1] = ("Surfaces are fitted to alternate strikes, so their out-of-sample quotes are the "
+                      "strikes in between (an interpolation test); Heston is not scored on this "
+                      "session: " + why)
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    idx = json.loads((data / "surface" / "index.json").read_text())
+    for row in idx["sessions"]:
+        if row["session"] == SESSION:
+            row["models"] = {m: v for m, v in row["models"].items() if m not in heston}
+    (data / "surface" / "index.json").write_text(json.dumps(idx))
+    return data
+
+
+def test_a_surface_session_without_a_heston_fit_renders_everywhere(dash, tmp_path, monkeypatch):
+    """CITSEC-05: the bot now builds a session's surface from its Cboe book
+    whatever the Heston gate did, so the newest surface session can have no
+    fit and a scorecard whose Heston row is unavailable. Every page still
+    publishes with no loader error; the Surface scorecard lists the models it
+    scored and says why Heston is absent; no page prints a Heston error for
+    that session."""
+    data = _no_fit_surface_store(tmp_path)
+    monkeypatch.setattr(dash, "DATA", data)
+    sc = json.loads((data / "surface" / SESSION / "scorecard.json").read_text())
+    pages = {}
+    for route in ("/", "/surface", "/calibration", "/risk", "/research", "/corrections", "/model-risk"):
+        resp, pages[route] = _get(dash, route)
+        assert _errors(resp) == 0, route
+    html = pages["/surface"]
+    assert 'data-artifact-state="ok"' in html or 'id="scorecard-table"' in html
+    table = re.search(r'<table class="tbl dense[^"]*" id="scorecard-table">(.*?)</table>', html,
+                      re.DOTALL).group(1)
+    rows = re.findall(r"<tr[^>]*><td[^>]*>([^<]+)</td>", table.split("<tbody>")[1])
+    assert rows == [dash.model_label(r["model"]) for r in sc["ranking_by_oos_median_abs_hs"]]
+    assert dash.model_label("heston_v2") not in rows
+    assert sc["notes"][1] in _visible_text(html)
+    # Model Risk's calibrator check reads the session's scorecard: no Heston number, and why
+    why = next(m["reason"] for m in sc["models"] if m.get("available") is False)
+    assert re.search(rf"Heston is not scored on {SESSION}\s*:\s*{re.escape(why)}",
+                     _visible_text(pages["/model-risk"]))
+
+
+# ── a synthetic surface session of any size (the Surface page at 17, 45, 80 expiries) ──
+#
+# A stored session lists 17 expiries (a Yahoo chain) or about 45 (a full Cboe book),
+# and the daily bot replaces the newest one, so a test of how the page scales with the
+# expiry count cannot pin either. _surface_store writes SESSION's surface artifacts for
+# n synthetic expiries into the artifact store: a Cboe-like calendar (weekdays at the
+# short end, third Fridays further out); each expiry's quotes on one arbitrage-free
+# SSVI slice (Gatheral–Jacquier power law with η(1 + |ρ|) ≤ 2), whose raw-SVI
+# parameters are its SVI-cal slice; the four models' residuals; the VIX strip and the
+# term structure of the same expiries. roots=True: each line carries its OCC root
+# (SPX, AM-settled, on third Fridays beyond SYN_AM_AFTER_DAYS; SPXW, PM, elsewhere) and
+# a Cboe book's T (timed 22:30 ET); roots=False: no root and whole days, as a Yahoo
+# close-to-close chain has.
+
+SYN_MODELS = ("essvi", "svi", "svi_cal", "heston_v2")      # the fixture session's models, in its order
+SYN_SPOT, SYN_RATE, SYN_RHO, SYN_ETA = 7650.0, 0.04, -0.7, 1.0
+SYN_PM = (16.0 - 22.5) / 24.0       # T past whole days to a 16:00 ET PM settlement from a 22:30 ET book
+SYN_AM = SYN_PM - 6.5 / 24.0        # ... to the 09:30 ET AM settlement (SOQ)
+SYN_AM_AFTER_DAYS = 150             # third Fridays beyond this are the AM SPX line, as on a Cboe book
+SYN_STEP = 5                        # strike grid (index points)
+
+
+def _syn_calendar(n: int, roots: bool) -> list[tuple[str, float, str | None]]:
+    """n listed expiries after SESSION, log-spaced in days from 7 to 600 and snapped
+    to free weekdays (third Fridays past 120 days): (expiry, T_days, root)."""
+    s = pd.Timestamp(SESSION)
+    pool = list(pd.bdate_range(s + pd.Timedelta(days=7), s + pd.Timedelta(days=730)))
+    third = {d for d in pool if d.weekday() == 4 and 15 <= d.day <= 21}
+    taken: set = set()
+    for t in np.geomspace(7.0, 600.0, n):
+        cands = [d for d in pool if d not in taken and (t <= 120 or d in third)]
+        cands = cands or [d for d in pool if d not in taken]
+        taken.add(min(cands, key=lambda d: (abs((d - s).days - t), d)))
+    out: list[tuple[str, float, str | None]] = []
+    for d in sorted(taken):
+        days = float((d - s).days)
+        if not roots:
+            out.append((d.strftime("%Y-%m-%d"), days, None))
+            continue
+        am = d in third and days > SYN_AM_AFTER_DAYS
+        out.append((d.strftime("%Y-%m-%d"), days + (SYN_AM if am else SYN_PM), "SPX" if am else "SPXW"))
+    return out
+
+
+def _syn_slice(T: float) -> dict:
+    """Raw-SVI parameters of the SSVI slice at T years: ATM total variance θ rising
+    with T, φ(θ) = η / √(θ(1 + θ)) (butterfly- and calendar-free for η(1 + |ρ|) ≤ 2)."""
+    atm = 0.13 + 0.05 * T / (T + 0.5)
+    theta = atm * atm * T
+    phi = SYN_ETA / np.sqrt(theta * (1.0 + theta))
+    r = SYN_RHO
+    return {"a": theta / 2 * (1 - r * r), "b": theta * phi / 2, "rho": r, "m": -r / phi,
+            "sigma": float(np.sqrt(1 - r * r) / phi)}
+
+
+def _syn_w(k, p: dict):
+    """The raw-SVI total variance w(k), and its first two derivatives."""
+    x = np.asarray(k, dtype=float) - p["m"]
+    r = np.sqrt(x * x + p["sigma"] ** 2)
+    w = p["a"] + p["b"] * (p["rho"] * x + r)
+    return w, p["b"] * (p["rho"] + x / r), p["b"] * p["sigma"] ** 2 / r ** 3
+
+
+def _syn_black(F, K, T, iv, call, D):
+    from scipy.special import ndtr
+    sd = iv * np.sqrt(T)
+    d1 = np.log(F / K) / sd + sd / 2
+    d2 = d1 - sd
+    return D * np.where(call, F * ndtr(d1) - K * ndtr(d2), K * ndtr(-d2) - F * ndtr(-d1)), d1
+
+
+def _syn_session(n: int, roots: bool, seed: int = 7) -> dict:
+    """The synthetic session's residual table, SVI-cal slices, term structure and VIX strip."""
+    rng = np.random.default_rng(seed)
+    frames, slices, terms, strip = [], [], [], []
+    for i, (e, days, root) in enumerate(_syn_calendar(n, roots)):
+        T = days / 365.0
+        p = _syn_slice(T)
+        F, D = SYN_SPOT * np.exp(0.25 * SYN_RATE * T), float(np.exp(-SYN_RATE * T))
+        kw = min(0.35, 0.05 + 0.3 * np.sqrt(T))
+        nq = 60 + (i * 37) % 140                       # 60–199 quotes, as uneven as a real book
+        K = np.unique(np.round(F * np.exp(np.linspace(-kw, 0.5 * kw, nq)) / SYN_STEP) * SYN_STEP)
+        k = np.log(K / F)
+        iv = np.sqrt(_syn_w(k, p)[0] / T)
+        mid = iv + rng.normal(0.0, 4e-4, len(K))       # quote noise, 0.04 vol pts
+        hs = 0.03 + 0.3 * np.abs(k) / kw + 0.2 / np.sqrt(days)            # vol pts
+        bid_iv, ask_iv = mid - hs / 100, mid + hs / 100
+        call = K >= F
+        pos = np.arange(len(K))
+        bid_px, _ = _syn_black(F, K, T, bid_iv, call, D)
+        ask_px, d1 = _syn_black(F, K, T, mid + hs / 100, call, D)
+        from scipy.special import ndtr
+        delta = np.where(call, ndtr(d1), ndtr(d1) - 1.0)
+        arb_exec = (i % 7 == 3) & (pos == 1)
+        arb_flag = (i % 11 == 5) & (pos == 2)
+        market = {
+            "session": SESSION, "expiry": e, "T_days": days, "strike": K, "right": np.where(call, "C", "P"),
+            "k": k, "forward": F, "bid": bid_px, "ask": ask_px,
+            "bid_iv": bid_iv, "mid_iv": mid, "ask_iv": ask_iv,
+            "vega": D * F * np.sqrt(T) * np.exp(-d1 * d1 / 2) / np.sqrt(2 * np.pi) / 100,
+            "half_spread_vp": hs, "delta_bucket": np.where(
+                np.abs(delta) <= 0.10, np.where(call, "10C", "10P"),
+                np.where(np.abs(delta) <= 0.25, np.where(call, "25C", "25P"),
+                         np.where(call, "ATM-C", "ATM-P"))),
+            "tenor_bucket": "7-30d" if days <= 30 else "30-90d" if days <= 90 else "90-180d" if days <= 180
+            else "180-365d" if days <= 365 else "365-730d",
+            "arb_flag": arb_flag, "arb_exec": arb_exec, "arb_mid": arb_exec | ((i % 5 == 1) & (pos == 3)),
+            "repair_dprice": np.where(arb_flag, 2.5, np.where(arb_exec, 0.05, 0.0))}
+        if roots:
+            market["root"] = root
+        model_iv = {"essvi": iv + 0.004 * k, "svi": iv + rng.normal(0.0, 2e-4, len(K)), "svi_cal": iv,
+                    "heston_v2": iv + 0.02 * k * k - 0.001}
+        for m in SYN_MODELS:
+            err = (model_iv[m] - mid) * 100
+            fit = (pos % 5 == 0) & (i % 3 == 0) if m.startswith("heston") else pos % 2 == 0
+            frames.append(pd.DataFrame({
+                **market, "model": m, "model_iv": model_iv[m], "error_vp": err,
+                "error_hs": err / np.maximum(hs, 0.01),
+                "inside_spread": (model_iv[m] >= bid_iv) & (model_iv[m] <= ask_iv),
+                "outside_spread_vp": np.maximum(0.0, np.abs(err) - hs), "in_sample": fit}))
+        g = _syn_w(np.linspace(-3.0, 2.0, 5001), p)
+        w, w1, w2 = g
+        dur = (1 - np.linspace(-3.0, 2.0, 5001) * w1 / (2 * w)) ** 2 - w1 ** 2 / 4 * (1 / w + 0.25) + w2 / 2
+        slices.append({"T": T, **{x: float(v) for x, v in p.items()}, "certified": True, "expiry": e,
+                       "g_min": float(dur.min()), "success": True})
+        atm = float(np.sqrt(_syn_w(0.0, p)[0] / T)) * 100
+        terms.append({"T_days": days, "atm_skew_essvi": float(_syn_w(0.0, p)[1]) / (2 * atm / 100 * T),
+                      "atm_vol_essvi": atm + 0.4, "atm_vol_mid_quotes": float(np.interp(0.0, k, mid)) * 100,
+                      "atm_vol_svi_cal": atm, "carry_method": "parity_fixed_D", "discount": D, "expiry": e,
+                      "forward": float(F), "median_half_spread_vp": float(np.median(hs)), "n_quotes": len(K),
+                      "q": 0.75 * SYN_RATE, "r": SYN_RATE})
+        vs = atm * 1.3
+        strip.append({"F": float(F), "atm_over_vs": atm / vs, "atm_vol_quotes": atm, "days": days,
+                      "expiry": e, "n_calls": int(call.sum()), "n_puts": int((~call).sum()), "ok": True,
+                      "settlement": "AM" if root == "SPX" else "PM", "var_swap_vol": vs,
+                      "vs_minus_atm_vp": vs - atm})
+    res = pd.concat(frames, ignore_index=True)
+    res["model"] = pd.Categorical(res["model"], categories=list(SYN_MODELS), ordered=True)
+    res = res.sort_values(["model", "T_days", "strike"], kind="mergesort").reset_index(drop=True)
+    res["model"] = res["model"].astype(str)
+    return {"residuals": res, "slices": slices, "terms": terms, "strip": strip}
+
+
+def _surface_store(tmp_path: Path, n: int, roots: bool = False) -> Path:
+    """The artifact store (_artifact_store) with SESSION's surface replaced by n
+    synthetic expiries (see above); the other artifacts are the fixtures'."""
+    data = _artifact_store(tmp_path)
+    d = data / "surface" / SESSION
+    syn = _syn_session(n, roots)
+    res = syn["residuals"]
+    res.to_parquet(d / "residuals.parquet", index=False)
+    mkt = res[res["model"] == SYN_MODELS[0]]
+    sj = json.loads((d / "surface.json").read_text())
+    sj["universe"].update({"n_expiries": n, "n_universe": len(mkt), "T_days_min": float(mkt["T_days"].min()),
+                           "T_days_max": float(mkt["T_days"].max()),
+                           "median_half_spread_vp": float(mkt["half_spread_vp"].median())})
+    fit = res[(res["model"] == "svi_cal") & res["in_sample"]]
+    sj["fit_set"].update({"n": len(fit), "n_universe": len(mkt)})
+    arb = sj["arbitrage"]
+    arb.update({"n_quotes": len(mkt), "n_quotes_in_executable_violation": int(mkt["arb_exec"].sum()),
+                "n_quotes_in_mid_violation": int(mkt["arb_mid"].sum())})
+    out = mkt[mkt["arb_flag"]]
+    arb["quotes_repaired_outside_spread"] = {"by_expiry": out.groupby("expiry").size().astype(int).to_dict(),
+                                             "largest": [], "n": len(out)}
+    arb["calendar_total_variance_mid"].update({"n_crossing": 0, "n_pairs_crossing": 0, "worst_pairs": []})
+    sj["term_structure"] = syn["terms"]
+    sj["surfaces"]["svi_cal"]["params"] = {"model": "SVI-cal", "slices": syn["slices"]}
+    (d / "surface.json").write_text(json.dumps(sj))
+    vx = json.loads((d / "vix_replication.json").read_text())
+    vx["strip"] = syn["strip"]
+    (d / "vix_replication.json").write_text(json.dumps(vx))
+    return data
+
+
+def test_synthetic_surface_store_round_trips_through_the_quote_packing(dash, tmp_path, monkeypatch):
+    """The synthetic sessions the Surface scaling tests render (17, 45 and 80
+    expiries, with and without OCC roots) are what the producer writes: every model
+    on the same quotes, whole-point strikes, and each expiry packs (desk_quotes.encode)
+    and unpacks (decode) to its own rows: strike, right, ln(K/F), bid / mid / ask IV,
+    each model's IV, z and fit / inside flags. The 45-expiry store renders a Surface
+    page with no loader error and one smile tab per expiry."""
+    dq = dash.desk_quotes
+    for n, roots in ((17, False), (45, True), (80, True)):
+        syn = _syn_session(n, roots)
+        res = syn["residuals"]
+        assert res["expiry"].nunique() == n
+        assert ("root" in res.columns) == roots
+        if roots:
+            assert set(res["root"]) == {"SPX", "SPXW"}               # both settlements on the book
+            am = res.loc[res["root"] == "SPX", "T_days"] % 1
+            assert np.allclose(am, 1 + SYN_AM)                     # the AM line's T, 6.5 h short of the PM's
+        sizes = res.groupby("model").size()
+        assert (sizes == sizes.iloc[0]).all()
+        assert [s["expiry"] for s in syn["slices"]] == sorted(res["expiry"].unique())
+        assert min(s["g_min"] for s in syn["slices"]) >= 0         # butterfly-free slices
+        groups = dq.encode(res, list(SYN_MODELS))
+        assert list(groups) == sorted(res["expiry"].unique())
+        for e, g in groups.items():
+            rows = dq.decode(g)
+            q = res[(res["model"] == SYN_MODELS[0]) & (res["expiry"] == e)].sort_values("k")
+            assert [r["strike"] for r in rows] == q["strike"].astype(int).tolist()
+            assert "".join(r["right"] for r in rows) == "".join(q["right"])
+            assert np.allclose([r["k"] for r in rows], q["k"], atol=1e-12)
+            for col, key, tol in (("mid_iv", "mid", 1e-5), ("bid_iv", "bid", 1e-5), ("ask_iv", "ask", 1e-5)):
+                assert np.allclose([r[key] for r in rows], q[col] * 100, atol=tol), (e, col)
+            for m in SYN_MODELS:
+                qm = res[(res["model"] == m) & (res["expiry"] == e)].sort_values("k")
+                got = [r["models"][m] for r in rows]
+                assert np.allclose([x["iv"] for x in got], qm["model_iv"] * 100, atol=1e-4), (e, m)
+                assert np.allclose([x["z"] for x in got], qm["error_hs"], atol=0.01), (e, m)
+                assert [x["fit"] for x in got] == qm["in_sample"].tolist(), (e, m)
+                assert [x["inside"] for x in got] == qm["inside_spread"].tolist(), (e, m)
+    monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path, 45, roots=True))
+    resp, html = _get(dash, "/surface")
+    assert _errors(resp) == 0
+    assert len(re.findall(r'aria-controls="slices-panel" data-value="', html)) == 45
+
+
+def test_the_smile_spec_is_a_template_and_its_quotes_one_session_data_file(dash, tmp_path, monkeypatch):
+    """D2: the smile's spec held every expiry's packed quotes and 12 dated series per
+    expiry (729 KB of a 1.67 MB page on a full Cboe book). It now holds one dateless
+    set of series (quotes.template), its tabs' expiry order and the selected tab's
+    block; every expiry's block is in one session data file, data/surface-<session>-
+    <sha256[:16]>.json, that /data/<name> serves with the sha384 the spec gives and
+    that unpacks to the residual table. The synthetic 17- and 45-expiry sessions draw
+    the same series."""
+    import base64
+
+    dq, client, series = dash.desk_quotes, dash.app.test_client(), {}
+    for n, roots in ((17, False), (45, True)):
+        (tmp_path / str(n)).mkdir()
+        monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path / str(n), n, roots))
+        resp, html = _get(dash, "/surface")
+        assert _errors(resp) == 0
+        sp = _raw_specs(html)["chart-slices"]
+        q = sp["quotes"]
+        tabs = re.findall(r'aria-controls="slices-panel" data-value="([\d-]+)"', html)
+        sel = re.findall(r'aria-selected="true" aria-controls="slices-panel" data-value="([\d-]+)"', html)
+        assert q["template"] is True
+        assert q["order"] == tabs
+        assert list(q["groups"]) == sel
+        assert q["session"] == SESSION
+        assert not [s for s in sp["series"] if "group" in s or re.match(r"\d{4}-", s["name"])]
+        series[n] = [s["name"] for s in sp["series"]]
+        m = re.fullmatch(rf"data/surface-{SESSION}-([0-9a-f]{{16}})\.json", q["src"])
+        assert m, q["src"]
+        r = client.get("/" + q["src"])
+        assert r.status_code == 200
+        body = r.get_data()
+        assert hashlib.sha256(body).hexdigest()[:16] == m.group(1)
+        assert q["integrity"] == "sha384-" + base64.b64encode(hashlib.sha384(body).digest()).decode()
+        book = json.loads(body)
+        assert (book["schema"], book["session"]) == (1, SESSION)
+        assert book["quotes"]["order"] == list(book["quotes"]["groups"]) == tabs
+        assert book["quotes"]["groups"][sel[0]] == q["groups"][sel[0]]
+        res = _syn_session(n, roots)["residuals"]
+        mkt = res[res["model"] == SYN_MODELS[0]]
+        for e, g in book["quotes"]["groups"].items():
+            rows, qe = dq.decode(g), mkt[mkt["expiry"] == e].sort_values("k")
+            assert [r_["strike"] for r_ in rows] == qe["strike"].astype(int).tolist(), e
+            assert np.allclose([r_["mid"] for r_ in rows], qe["mid_iv"] * 100, atol=1e-5), e
+    assert series[17] == series[45]
+    assert client.get(f"/data/surface-{SESSION}-0123456789abcdef.json").status_code == 404
+
+
+def _syn_expected_strip(n: int, roots: bool) -> dict[str, dict]:
+    """The synthetic session's smile tabs and status lines, computed here from its
+    residual table: {expiry: T, tab text (the days without desk.css's 'd'), settlement,
+    whether it opens a month, status line} (expiry k of N · date · weekday · AM/PM ·
+    days · F · quotes · median half-spread); the first tab of a year past the
+    session's carries it ("Jan 15 ’27")."""
+    res = _syn_session(n, roots)["residuals"]
+    mkt = res[res["model"] == SYN_MODELS[0]]
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    out: dict[str, dict] = {}
+    prev = None
+    groups = list(mkt.groupby("expiry", sort=True))
+    for k, (e, q) in enumerate(groups, 1):
+        T, day = float(q["T_days"].median()), pd.Timestamp(e)
+        settle = {"SPX": "AM", "SPXW": "PM"}[q["root"].iloc[0]] if roots else None
+        tag = [settle] if settle else []
+        year = f" ’{e[2:4]}" if e[:4] != (prev or SESSION)[:4] else ""
+        out[e] = {"T": T, "settle": settle, "mo": prev is not None and prev[:7] != e[:7], "days": f"{T:.0f}",
+                  "label": " · ".join([f"{months[day.month - 1]} {day.day}{year}", f"{T:.0f}", *tag]),
+                  "status": " · ".join([f"Expiry {k} of {len(groups)}", e, day.day_name()[:3], *tag,
+                                        f"{T:.0f} days", f"F {q['forward'].iloc[0]:,.2f}", f"{len(q)} quotes",
+                                        f"median half-spread {q['half_spread_vp'].median():.2f} vol pts"])}
+        prev = e
+    return out
+
+
+SMILE_TAB = re.compile(r'<button class="btn( mo)?" type="button" role="tab" aria-selected="(true|false)" '
+                       r'aria-controls="slices-panel" data-value="([\d-]+)"'
+                       r'(?: data-settle="(AM|PM)")?>(.*?)</button>')
+
+
+def test_the_smile_tabs_name_each_expiry_and_a_settlement_only_from_its_occ_root(dash, tmp_path, monkeypatch):
+    """D3 / A2: a smile tab named its expiry by days alone ('30d'): on a full Cboe book
+    of ~45 tabs a reader counted along the strip to find a date, and an AM (SPX) line
+    looked like a PM (SPXW) one. A tab now reads 'Nov 25 · 30d', with ' · AM' or
+    ' · PM' only where the residual table carries the line's OCC root (a Cboe book's:
+    never a Yahoo chain's, never guessed from the date); a month's first expiry opens
+    a group (.mo); and one status line under the tabs names the selected expiry
+    (date · weekday · AM/PM · days · F · quotes · median half-spread), the server's
+    for the default expiry, from its row of 'Quotes per expiry', which now holds F.
+    D3 review: 'Nov 19 · 24d' and 'Nov 19 · 388d' were told apart only by the days, and
+    the strip showed 5-7 tabs with no sign of the rest: the first tab of each year past
+    the session's carries it ("Jan 15 ’27 · 81d"), the status line starts 'Expiry k of
+    N', and the days sit in an <i> whose 'd' desk.css writes and names ' days' (a
+    screen reader read '30d')."""
+    css = (ROOT / "dashboard" / "static" / "desk.css").read_text()
+    # a plain "d" first: an engine without content's alternative text drops that
+    # declaration and keeps the plain one, rather than printing the bare number
+    assert re.search(r'\.exp-strip i::after\s*\{\s*content:\s*"d";'
+                     r'\s*content:\s*"d"\s*/\s*" days";\s*\}', css)
+    for n, roots in ((17, False), (45, True)):
+        (tmp_path / f"n{n}").mkdir()
+        monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path / f"n{n}", n, roots))
+        resp, html = _get(dash, "/surface")
+        assert _errors(resp) == 0
+        want = _syn_expected_strip(n, roots)
+        tabs = SMILE_TAB.findall(html)
+        assert [t[2] for t in tabs] == list(want)
+        assert any("’" in w["label"] for w in want.values())
+        for mo, _sel, e, settle, inner in tabs:
+            assert _html_unescape(re.sub(r"<[^>]+>", "", inner)) == want[e]["label"], e
+            assert re.search(r"<i>(\d+)</i>", inner).group(1) == want[e]["days"], e
+            assert (settle or None) == want[e]["settle"], e
+            assert bool(mo) == want[e]["mo"], e
+        assert {t[3] for t in tabs} == ({"AM", "PM"} if roots else {""})
+        default = [t[2] for t in tabs if t[1] == "true"]
+        assert default == [min(want, key=lambda e: abs(want[e]["T"] - 30.0))]
+        st = re.search(r'<p class="exp-status js-only" id="slices-status" role="status" '
+                       r'data-from="chart-slices-data">(.*?)</p>', html)
+        assert st, n
+        assert _html_unescape(st.group(1)) == want[default[0]]["status"]
+
+
+def test_every_json_block_on_every_page_is_compact_and_leaves_out_its_html_fields(dash, pages):
+    """D2: the chart specs were pretty-printed ASCII JSON (', ', ': ', '\\u2013') that
+    also carried each chart's title, description, legend and data table: the page
+    renders those four as HTML and desk.js never reads them from the spec (209 KB of
+    a 45-expiry Surface page, 51 KB of Research's). Every JSON block on every page is
+    now compact UTF-8 with sorted keys, its <, >, & and ' as JSON escapes (so no
+    block can close its script element), and none of the four fields."""
+    from jinja2.utils import htmlsafe_json_dumps
+
+    n = 0
+    for route, html in pages.items():
+        for sid, raw in re.findall(r'<script type="application/json" id="([\w-]+)">(.*?)</script>', html,
+                                   re.DOTALL):
+            obj = json.loads(raw)
+            assert raw == str(htmlsafe_json_dumps(obj, separators=(",", ":"), ensure_ascii=False,
+                                                  sort_keys=True)), (route, sid)
+            assert not re.search(r"[<>&']", raw), (route, sid)
+            assert not set(dash.SPEC_HTML_FIELDS) & set(obj), (route, sid, set(obj))
+            n += 1
+        assert html.count('<script type="application/json"') == len(re.findall(
+            r'<script type="application/json" id="[\w-]+">', html)), route
+    assert n >= 20
+
+
+def test_each_chart_renders_its_html_fields_from_its_spec(dash, pages):
+    """C5: the fields a chart's JSON leaves out are on the page as HTML, rendered from
+    the spec the server built (the one the tests read through _raw_specs): its title
+    as the chart's accessible name, its description, one legend button per legend
+    item (pressed unless hidden) and its data table, a row per table row and an
+    expiry's group per group."""
+    from bs4 import BeautifulSoup
+
+    subs = dash.app.jinja_env.filters["subs_text"]
+    n = 0
+    for route, html in pages.items():
+        soup = BeautifulSoup(html, "lxml")
+        for cid, sp in _raw_specs(html).items():
+            el = soup.find(id=cid)
+            if el is None or "data-spec" not in el.attrs:
+                continue
+            assert el["aria-label"] == subs(sp["title"]), (route, cid)
+            assert soup.find(id=f"{cid}-desc").get_text() == subs(sp["describe"]), (route, cid)
+            keys = soup.select(f'[data-legend-for="{cid}"]')
+            if keys:
+                want = [(it["name"], "false" if it.get("hidden") else "true") for it in sp["legend_items"]]
+                assert [(b["data-series"], b["aria-pressed"]) for b in keys] == want, (route, cid)
+            data = soup.find(id=f"{cid}-data")
+            t = sp.get("table") or {}
+            if t.get("rows"):
+                assert len(data.find("table").select("tbody > tr")) == len(t["rows"]), (route, cid)
+                assert [g["data-group"] for g in data.select("[data-group]")] == [
+                    g["group"] for g in t.get("groups") or []], (route, cid)
+            n += 1
+    assert n >= 20
+
+
+def test_the_3d_view_reads_its_points_from_the_session_data_file(dash, tmp_path, monkeypatch):
+    """D2: the Surface 3D view's points (16 KB of a 45-expiry page) sat in the page for
+    a view few readers open. They are in the session's data file beside the smile's
+    quotes (one file, one fetch); the 3D spec keeps the colour scale and names the
+    file. Each point is an IV heatmap cell: its row's days, and its median mid IV or a
+    gap where the cell is empty."""
+    monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path, 17))
+    resp, html = _get(dash, "/surface")
+    assert _errors(resp) == 0
+    sp = json.loads(re.search(r'<script type="application/json" id="surface3d-spec">(.*?)</script>', html,
+                              re.DOTALL).group(1))
+    q = _raw_specs(html)["chart-slices"]["quotes"]
+    assert "points" not in sp
+    assert (sp["src"], sp["integrity"], sp["session"]) == (q["src"], q["integrity"], q["session"])
+    assert {"zmin", "zmax", "stops", "kind"} <= set(sp)
+    pts = json.loads(dash.DATA_FILES[sp["src"].split("/", 1)[1]])["surface3d"]["points"]
+    d = dash.load_surface()
+    cells = [(r, c) for r in d["iv_heat"]["rows"] for c in r["cells"]]
+    assert len(pts) == len(cells) == 17 * len(d["iv_heat"]["cols"])
+    days = {x["expiry"]: x["T_days"] for x in d["expiries"]}
+    for (_x, t_days, z), (r, c) in zip(pts, cells, strict=True):
+        assert t_days == pytest.approx(days[r["exp"]]), r["exp"]
+        assert (z is None) == (c["n"] == 0), r["exp"]
+        if z is not None:
+            assert abs(z - float(c["text"])) <= 0.05 + 1e-9, (r["exp"], z, c["text"])
+    zs = [p[2] for p in pts if p[2] is not None]                  # 3 decimals: the scale is unrounded
+    assert (sp["zmin"], sp["zmax"]) == (pytest.approx(min(zs), abs=5e-4), pytest.approx(max(zs), abs=5e-4))
+
+
+def test_surface_heatmap_details_are_numbers_in_the_session_data_file(dash, tmp_path, monkeypatch):
+    """D2: each of the five Surface heatmap cells carried its readout text in a
+    data-detail attribute (68 B a cell, 186 KB of a 45-expiry page) and each empty one
+    its 'no quotes' twice. The grids now name the session data file (data-src,
+    data-integrity, data-session, the smile's); the file holds each cell's numbers,
+    rounded as the readout prints them, and the grid's template, and desk.js fills
+    the readout from them. An empty cell is blank, a null in the file, and the
+    caption says what its dot means. Filled, the template gives the old text,
+    recomputed here from the residual table."""
+    monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path, 17))
+    resp, html = _get(dash, "/surface")
+    assert _errors(resp) == 0
+    q = _raw_specs(html)["chart-slices"]["quotes"]
+    book = json.loads(dash.DATA_FILES[q["src"].split("/", 1)[1]])
+    res = _syn_session(17, False)["residuals"]
+    mkt = res[res["model"] == SYN_MODELS[0]]
+    used = dash.k_buckets_used(mkt["k"])
+    exps = mkt.groupby("expiry")["T_days"].median().sort_values().index
+
+    def old_iv(g):
+        return (f"mid IV {dash._fmt(g['mid_iv'].median() * 100, '.2f')}% (median of {len(g)}) · half-spread "
+                f"{dash._fmt(g['half_spread_vp'].median(), '.2f')} vol pts")
+
+    def old_resid(g):
+        return (f"{dash.signed(g['error_hs'].median(), '.2f')} half-spreads (median of {len(g)}) · "
+                f"{dash._fmt(g['inside_spread'].astype(bool).mean() * 100, '.0f')}% inside")
+
+    grids = {"iv-heatmap": (mkt, old_iv)}
+    for m in SYN_MODELS:
+        r = res[(res["model"] == m) & ~res["in_sample"].astype(bool)]
+        grids[f"resid-heat-{m}"] = (r[pd.to_numeric(r["model_iv"], errors="coerce").notna()], old_resid)
+    assert set(book["heat"]) == set(grids)
+    n_filled = n_empty = 0
+    for tid, (qq, old) in grids.items():
+        tag = re.search(rf'<table class="heat" id="{tid}"[^>]*>', html).group(0)
+        a = _attrs(tag)
+        assert (a["data-src"], a["data-integrity"], a["data-session"]) == (q["src"], q["integrity"], SESSION)
+        assert a["data-empty"] == "no quotes"
+        body = re.search(rf'id="{tid}".*?</table>', html, re.DOTALL).group(0)
+        assert "data-detail" not in body, tid
+        assert "a dot: no quotes in the bucket</caption>" in body, tid
+        trs = re.findall(r"<tr data-exp[^>]*>(.*?)</tr>", body, re.DOTALL)
+        assert len(trs) == len(exps) == len(book["heat"][tid]["cells"])
+        qb = qq.assign(kb=dash.k_bucket(qq["k"]).to_numpy())
+        for tr, e, frow in zip(trs, exps, book["heat"][tid]["cells"], strict=True):
+            tds = re.findall(r"<td[^>]*>[^<]*</td>", tr)
+            assert len(tds) == len(frow) == len(used)
+            for td, b, v in zip(tds, used, frow, strict=True):
+                g = qb[(qb["expiry"] == e) & (qb["kb"] == b)]
+                if g.empty:
+                    assert (td, v) == ('<td class="empty"></td>', None), (tid, e, b)
+                    n_empty += 1
+                else:
+                    assert dash.heat_detail(book["heat"][tid]["detail"], v) == old(g), (tid, e, b)
+                    n_filled += 1
+    assert n_filled > 100
+    assert n_empty > 10
+    assert not re.search(r"\bvp\b", dash.HEAT_DETAIL_IV + dash.HEAT_DETAIL_RESID)    # the unit house style
+
+
+def test_heat_cells_take_their_ramp_steps_class(dash, pages):
+    """D2: a heatmap or delta-grid cell's colour was an inline style (35 B a cell, 100
+    KB of a 45-expiry Surface page). Cividis and the diverging ramp are now 101 steps
+    each (0.5% of a scale apart), each a desk.css class with the text colour that
+    contrasts more with it (dashboard/heat_css.py writes the block from
+    desk_format.HEAT_CLASSES); a cell takes its step's class. The P&L ramp keeps
+    its inline style (Risk's scenario grids, Research's monthly returns)."""
+    import importlib
+
+    _charts()                                         # dashboard/ on sys.path
+    fmt, heat_css = importlib.import_module("desk_format"), importlib.import_module("heat_css")
+    assert heat_css.block() in DESK_CSS.read_text()
+    by = {c: bg for bg, c in fmt.HEAT_CLASSES.items()}
+    assert set(by) == {f"{r}{i}" for r in "qd" for i in range(101)}
+    for i in range(101):
+        assert by[f"q{i}"] == fmt.ramp(fmt.CIVIDIS_11, i / 100)
+        assert by[f"d{i}"] == fmt.ramp(fmt.DIVERGE_11, i / 100)
+    css = DESK_CSS.read_text()
+    white = set(re.search(r":is\(\.heat,\.dgrid\) td:is\(([^)]*)\)\{color:#fff\}", css).group(1)
+                .replace(".", "").split(","))
+    for c, bg in by.items():
+        fg = "#ffffff" if c in white else "#000000"
+        assert max(fmt.contrast_ratio(x, bg) for x in ("#000000", "#ffffff")) == fmt.contrast_ratio(fg, bg), c
+        assert fmt.contrast_ratio(fg, bg) >= 4.5, c
+    # a value's colour is its step's
+    assert dash.seq_colour(12.3456, 10.0, 20.0) == by["q23"]
+    assert dash.div_colour(-1.0, 5.0) == by["d40"]
+    html = pages["/surface"]
+    n = 0
+    tables = re.findall(r'<table class="(?:heat|tbl dense dgrid)" id="([^"]+)"[^>]*>(.*?)</table>', html,
+                        re.DOTALL)
+    for tid, body in tables:
+        assert 'style="background' not in body, tid
+        for cls in re.findall(r'<td class="([^"]+)"', body):
+            k = [x for x in cls.split() if re.fullmatch(r"[qd]\d+", x)]
+            if k:
+                assert k[0] in by, (tid, cls)
+                n += 1
+    assert n > 100
+
+
+def test_surface_page_weight_grows_at_most_7000_bytes_an_expiry(dash, tmp_path, monkeypatch):
+    """D2: a full Cboe book (~45 expiries) made the Surface page 1.67 MB. On the
+    synthetic sessions (the same pages at 17, 45 and 80 expiries, so no stored
+    session's count is pinned) each expiry past 17 adds at most 7,000 bytes of
+    HTML, and the 17-expiry page is at most 300,000 bytes. The CI accessibility
+    job holds the real page to 450,000 + 7,000 a listed expiry past 45 (C7)."""
+    size = {}
+    for n, roots in SYN_SITES.items():
+        (tmp_path / str(n)).mkdir()
+        monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path / str(n), n, roots))
+        resp, html = _get(dash, "/surface")
+        assert _errors(resp) == 0
+        size[n] = len(html.encode("utf-8"))
+    slope = [(size[b] - size[a]) / (b - a) for a, b in itertools.pairwise(sorted(size))]
+    assert max(slope) <= 7_000, (size, slope)
+    assert size[17] <= 300_000, size
+
+
+def _earlier_copies(data: Path, ages: list[int], ref: str, dash) -> list[str]:
+    """Copies of the store's SESSION as earlier stored sessions, one per age in NYSE
+    sessions before ref (dash.session_age), each JSON artifact's session renamed."""
+    out = []
+    for age in ages:
+        day = pd.Timestamp(ref)
+        while dash.session_age(day.strftime("%Y-%m-%d"), ref) < age or day.weekday() > 4:
+            day -= pd.Timedelta(days=1)
+        name = day.strftime("%Y-%m-%d")
+        shutil.copytree(data / "surface" / SESSION, data / "surface" / name)
+        for f in (data / "surface" / name).glob("*.json"):
+            obj = json.loads(f.read_text())
+            obj["session"] = name
+            f.write_text(json.dumps(obj))
+        out.append(name)
+    return out
+
+
+def test_surface_page_does_not_grow_past_its_compared_sessions(dash, tmp_path, monkeypatch):
+    """D2: #surface-change compared the headline with every earlier stored session, and
+    the ATM and RR25 term charts drew them all: about 11 kB a session at 45 expiries,
+    so the page outgrew its 450 kB budget at eight earlier sessions and kept growing a
+    session a day. It compares at most len(COMPARE_LAGS) + 1 (the newest earlier one
+    and the newest at least each lag back). On synthetic 45-expiry stores with N
+    earlier sessions that fill every lag and with one more, the page has the same
+    views and the same size, give or take a digit."""
+    lags = getattr(dash, "COMPARE_LAGS", (5, 21, 63))
+    size, views = {}, {}
+    for extra in (False, True):
+        root = tmp_path / str(extra)
+        root.mkdir()
+        data = _surface_store(root, 45, roots=True)
+        _earlier_copies(data, [1, *lags] + ([2] if extra else []), SESSION, dash)
+        monkeypatch.setattr(dash, "DATA", data)
+        resp, html = _get(dash, "/surface")
+        assert _errors(resp) == 0
+        size[extra] = len(html.encode("utf-8"))
+        views[extra] = re.findall(r'role="tab" aria-selected="(?:true|false)" aria-controls="vs-([\d-]+)"',
+                                  html)
+    assert len(views[False]) == len(lags) + 1, views
+    assert views[True] == views[False], views
+    assert abs(size[True] - size[False]) <= 64, size
+
+
+def test_compared_sessions_are_the_newest_and_the_newest_past_each_lag_once(dash):
+    """D2: the newest earlier session, then per lag the newest at least that many NYSE
+    sessions back; one session past two lags is compared once, a lag none reaches adds
+    none, and the rest of the store is left out."""
+    head, lags = "2026-10-28", dash.COMPARE_LAGS
+    day, by_age = pd.Timestamp(head), {}
+    while len(by_age) < lags[-1] + 40:
+        day -= pd.Timedelta(days=1)
+        by_age.setdefault(dash.session_age(day.strftime("%Y-%m-%d"), head), day.strftime("%Y-%m-%d"))
+    ages = [1, 2, lags[0] + 1, lags[-1] + 30, lags[-1] + 35]   # one past every lag but the first
+    got = dash.compared_sessions(head, [by_age[a] for a in ages])
+    want = [by_age[1], by_age[lags[0] + 1]] + ([by_age[lags[-1] + 30]] if len(lags) > 1 else [])
+    assert got == sorted(dict.fromkeys(want), reverse=True)
+    assert dash.compared_sessions(head, []) == []
+
+
 def _card(html: str, href: str) -> str:
     card = re.search(rf'<a class="result" href="{re.escape(href)}"(.*?)</a>', html, re.DOTALL)
     assert card, href
@@ -2363,8 +3165,8 @@ def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
     the stored records state them."""
     pl = dash.pipeline_state(dash.artifacts.load_diagnostics_summary(dash.DATA))
     text = _visible_text(pages["/"])
-    cboe = SHIPPED / "options" / "cboe"
-    caps = sorted(cboe.glob("*.json")) if cboe.is_dir() else []
+    caps = [f for sub in ("cboe", "cboe_manifest") if (SHIPPED / "options" / sub).is_dir()
+            for f in sorted((SHIPPED / "options" / sub).glob("*.json"))]
     for rec in (json.loads(f.read_text()) for f in caps):
         latest = next(c for c in pl["captures"] if c["underlying"] == rec["underlying"])
         if latest["file"].startswith(f"{rec['underlying'].lower()}_{rec['session']}"):
@@ -2373,6 +3175,72 @@ def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
     assert f"{len(pl['surface_sessions'])} sessions" in text
     if pl["forward"]["state"] != "ok":
         assert dash.forward_ledger_protocol()["pending"] in text
+
+
+def test_pipeline_panel_reads_books_held_in_the_private_store(dash, tmp_path):
+    """CITSEC-06: once the raw books go to the private data repository the public
+    tree keeps a manifest of each (data_store/options/cboe_manifest/); the
+    pipeline panel's newest book per underlying reads those as it reads the
+    records beside committed books."""
+    opts = tmp_path / "options"
+    (opts / "cboe").mkdir(parents=True)
+    (opts / "cboe_manifest").mkdir()
+    old = {"underlying": "SPX", "session": "2026-10-20", "quote_time": "2026-10-21T03:32:10Z", "rows": 5}
+    new = {"schema": "cboe_manifest/1", "underlying": "SPX", "session": "2026-10-27",
+           "quote_time": "2026-10-28T02:15:00Z", "rows": 7, "private_path": "options/cboe/x.parquet"}
+    vix = {"underlying": "VIX", "session": "2026-10-20", "quote_time": "2026-10-21T03:32:11Z", "rows": 2}
+    (opts / "cboe" / "spx_2026-10-20_040622Z.json").write_text(json.dumps(old))
+    (opts / "cboe" / "vix_2026-10-20_040625Z.json").write_text(json.dumps(vix))
+    (opts / "cboe_manifest" / "spx_2026-10-27_023000Z.json").write_text(json.dumps(new))
+    got = {c["underlying"]: c for c in dash.latest_cboe_captures(tmp_path)}
+    assert (got["SPX"]["session"], got["SPX"]["rows"], got["SPX"]["file"]) == (
+        new["session"], new["rows"], "spx_2026-10-27_023000Z.json")
+    assert got["VIX"]["session"] == vix["session"]
+    (opts / "cboe_manifest" / "spx_2026-10-28_023000Z.json").write_text("{not json")
+    with pytest.raises(ValueError, match=r"options/cboe_manifest/spx_2026-10-28_023000Z\.json"):
+        dash.latest_cboe_captures(tmp_path)
+
+
+def test_overview_pipeline_panel_prints_the_deploy_streak(dash, tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.4: the daily workflow writes the deploy streak
+    (scripts/ci/deploy_streak.py, from the gh-pages deploy commits) before it
+    freezes; the pipeline panel prints it from that file. A local freeze has no
+    file and no row, and a file that is not a whole record is no row either."""
+    from datetime import date, timedelta
+    f = tmp_path / ".deploy-streak.json"
+    monkeypatch.setattr(dash, "DEPLOY_STREAK_FILE", f)
+
+    errors0 = _errors(dash.app.test_client().get("/"))
+
+    def row():
+        resp = dash.app.test_client().get("/")
+        assert _errors(resp) == errors0                      # the streak file is never a loader error
+        html = resp.get_data(as_text=True)
+        m = re.search(r'<tr id="deploy-streak">(.*?)</tr>', html, re.DOTALL)
+        return " ".join(_visible_text("<body>" + m.group(1)).split()) if m else None
+
+    assert row() is None                                     # no file: no row, no error
+    through = date(2026, 1, 2) + timedelta(days=400)          # a synthetic record: any dates
+    first = through - timedelta(days=17)
+    n = 13
+    f.write_text(json.dumps({"schema": "deploy_streak/1", "streak": n, "first": first.isoformat(),
+                             "through": through.isoformat(), "deploys": n + 2}))
+    want = {"streak": n, "first": first.isoformat(), "through": through.isoformat()}
+    assert dash.deploy_streak() == want
+    text = row()
+    assert text == (f"Deployed (gh-pages) {n} consecutive NYSE sessions, "
+                    f"{first.isoformat()} → {through.isoformat()}")
+    f.write_text(json.dumps({"schema": "deploy_streak/1", "streak": 1, "first": through.isoformat(),
+                             "through": through.isoformat()}))
+    assert f"1 consecutive NYSE session, {through.isoformat()} → {through.isoformat()}" in row()
+    for bad in ("{not json", json.dumps({"schema": "deploy_streak/1", "streak": 0, "first": None,
+                                         "through": None}),
+                json.dumps({"schema": "other/1", "streak": 3, "first": "2026-01-02",
+                            "through": "2026-01-06"}),
+                json.dumps({"schema": "deploy_streak/1", "streak": "3", "first": "a", "through": "b"})):
+        f.write_text(bad)
+        assert dash.deploy_streak() is None, bad
+        assert row() is None, bad
 
 
 def test_rough_vs_heston_panel_lists_every_diagnosed_session(dash, art):
@@ -2593,11 +3461,31 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     assert freezer.freeze(str(out), dash) == 0
     # research.html: 400 kB until B12 added every portfolio round trip (206 points), two
     # histograms and the trade and drawdown tables, about 30 kB raw (404 kB with them)
-    budget = {"index.html": 120_000, "surface.html": 600_000, "calibration.html": 300_000,
-              "risk.html": 300_000, "research.html": 430_000, "corrections.html": 120_000,
-              "model-risk.html": 80_000}
+    # corrections.html: 120 kB until C24 added eight findings (about 20 kB raw, 4 kB gzipped);
+    # the register is append-only, so the page grows by a round at a time
+    # research.html: 430 kB to 400 kB again (D2): its specs are compact and leave out the
+    # fields the page renders as HTML (app.spec_json; about 409 to 358 kB)
+    # surface.html: 600 kB, flat, until D2 held it to CI's formula (page_budget.py: 450 kB
+    # at 45 expiries, 5.5 kB less an expiry short), read off the page as CI reads it
+    pb = _load("page_budget_for_fixtures", "scripts/ci/page_budget.py")
+    surf = (out / "surface.html").read_text(encoding="utf-8")
+    budget = {"index.html": 120_000, "surface.html": pb.budget(len(pb.TAB.findall(surf))),
+              "calibration.html": 300_000, "risk.html": 300_000, "research.html": 400_000,
+              "corrections.html": 150_000, "model-risk.html": 100_000}
+    # model-risk.html: 80 kB until VALIDATOR-12/13 added M21–M23, three checks and a
+    # monitoring line per production model (about 88 kB). Its history strips draw one dot
+    # per stored session, about 150 bytes each, and the daily job adds a session a day:
+    # they are budgeted per dot (200 bytes) and the rest of the page as a whole, so the
+    # budget does not fail the bot's gate a few weeks of sessions from now.
     for name, cap in budget.items():
-        size = (out / name).stat().st_size
+        html = (out / name).read_text(encoding="utf-8")
+        size = len(html.encode("utf-8"))
+        if name == "model-risk.html":
+            strips = re.findall(r'<svg class="hist".*?</svg>', html, re.DOTALL)
+            hist = sum(len(x.encode("utf-8")) for x in strips)
+            dots = html.count('<circle class="h-')
+            assert hist <= 200 * dots, (name, hist, dots)
+            size -= hist
         assert size <= cap, (name, size)
     # shared assets: the chart library is the only large script, fonts are subsets
     import gzip
@@ -2606,10 +3494,18 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     # P4.1: the quote inspector, the residual strip and the linked chart groups
     # raised the page script from 51 KB; it is served gzipped like the pages. F4's keyboard
     # readout of the per-trade strip took it from 29.8 to 30.5 KB gzipped; R3-T9's table CSV
-    # numbers (one-number cells parsed, block children spaced) past 31 KB
+    # numbers (one-number cells parsed, block children spaced) past 31 KB. 31,500 to 32,000
+    # (D3): the Surface smile's one-line expiry strip keeps its selected tab in view and
+    # one status line names the selected expiry (31,324 to 31,726 B). 32,000 to 32,500
+    # (D2 / D3): the smile decodes an expiry when it is shown and reads a session's
+    # other expiries from its data file (fetch with integrity, a failure note, the CSV
+    # waiting for the file); the rest of the 1 KB the 45-expiry plan allows desk.js
     assert (static / "desk.js").stat().st_size < 110_000
-    assert len(gzip.compress((static / "desk.js").read_bytes())) < 31_500
-    assert (static / "desk.css").stat().st_size < 60_000
+    assert len(gzip.compress((static / "desk.js").read_bytes())) < 32_500
+    # desk.css: 60,000 to 64,000 (D2): every heatmap and delta-grid cell's colour is a
+    # class of its ramp step, 202 of them (5.4 KB; dashboard/heat_css.py), not an inline
+    # style on each cell (100 KB of a 45-expiry Surface page)
+    assert (static / "desk.css").stat().st_size < 64_000
     assert sum(p.stat().st_size for p in (static / "fonts").glob("*.woff2")) < 80_000
 
 
@@ -2687,6 +3583,49 @@ def test_calibration_page_reads_the_diagnostics_and_the_quote_smiles(dash, art):
                 f"{q['inside_spread'].mean() * 100:.0f}%") in text, e
 
 
+def test_model_risk_prints_the_last_reproduction(dash, pages, tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.3: the weekly make reproduce commits its result
+    (data_store/reproduce/status.json, scripts/ci/reproduce.py --status); Model
+    Risk prints 'Last reproduced <date>: k of n artifacts within tolerance (b
+    exact)' from it, every value read from the record, and 'Not yet reproduced'
+    without one. The shipped store's line is whatever its record says."""
+    import functools
+
+    def line(html):
+        m = re.search(r'<span id="reproduced">(.*?)</span></div>', html, re.DOTALL)
+        assert m
+        text = " ".join(_visible_text("<body>" + m.group(1)).split())
+        return re.sub(r"\s+([,):])", r"\1", re.sub(r"\(\s+", "(", text))   # tag edges, not page spaces
+
+    shipped = dash.reproduce_status()
+    text = line(pages["/model-risk"])
+    if shipped is None:
+        assert text.startswith("Not yet reproduced")
+    else:
+        assert text.startswith(f"Last reproduced {shipped['date']}: {shipped['n_ok']:,} of "
+                               f"{shipped['n_checks']:,} artifact")
+    f = tmp_path / "status.json"
+    orig = dash.reproduce_status
+    monkeypatch.setattr(dash, "reproduce_status", functools.partial(orig, f))
+    get = lambda: dash.app.test_client().get("/model-risk").get_data(as_text=True)   # noqa: E731
+    assert line(get()) == "Not yet reproduced (make reproduce, weekly)"
+    rec = {"schema": "reproduce_status/1", "commit": "e" * 40, "finished_utc": "2031-02-03T07:08:09+00:00",
+           "run_url": "https://github.com/o/r/actions/runs/5", "full": False, "n_checks": 17, "n_ok": 16,
+           "n_exact": 9, "max_deviation": 2e-9, "max_deviation_artifact": "c7",
+           "failed": [{"artifact": "c7"}]}
+    f.write_text(json.dumps(rec))
+    html = get()
+    assert line(html) == (f"Last reproduced {rec['finished_utc'][:10]}: {rec['n_ok']} of {rec['n_checks']} "
+                          f"artifacts within tolerance ({rec['n_exact']} exact) (make reproduce, weekly)")
+    assert f'<a href="{rec["run_url"]}">{rec["finished_utc"][:10]}</a>' in html
+    for bad in ({**rec, "n_ok": rec["n_checks"] + 1}, {**rec, "schema": "x/1"}, {**rec, "n_exact": "9"},
+                {**rec, "finished_utc": "yesterday"}):
+        f.write_text(json.dumps(bad))
+        assert line(get()).startswith("Not yet reproduced"), bad
+    f.write_text(json.dumps({**rec, "run_url": "javascript:alert(1)"}))
+    assert "javascript:" not in get()
+
+
 def test_model_risk_checks_use_the_surface_artifacts(dash, art):
     resp, _html = _get(dash, "/model-risk")
     assert _errors(resp) == 0
@@ -2724,7 +3663,9 @@ def test_model_risk_v1_counts_the_single_quote_outliers_apart(dash):
 def test_model_risk_without_artifacts_marks_their_checks_not_applicable(dash, no_art):
     d = dash.load_model_risk()
     na = [m for m in d["monitors"] if m["value"] == "artifact not yet generated"]
-    assert len(na) == 3
+    # the surface report's four checks: Heston's half-spreads, the VIX replication, the arbitrage share and
+    # the SVI-cal certificates (VALIDATOR-12)
+    assert {m["key"] for m in na} == {"median_abs_hs", "vix_rep_gap", "arb_exec_share", "svi_certificate"}
     assert all(m["status"] == "na" for m in na)
 
 
@@ -2754,7 +3695,7 @@ def test_every_correction_links_a_real_commit_and_existing_tests():
 
     reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
     rounds = [r["id"] for r in reg["rounds"]]
-    assert rounds == [f"C{i}" for i in range(16, 24)]
+    assert rounds == [f"C{i}" for i in range(16, 16 + len(rounds))]      # consecutive from C16
     shallow = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
                              capture_output=True, text=True, check=False).stdout.strip() != "false"
     for r in reg["rounds"]:
@@ -2859,20 +3800,22 @@ def test_one_colour_per_model_on_every_surface_chart(dash, pages):
     html = pages["/surface"]
     sl, be = _spec(html, "chart-slices"), _spec(html, "chart-by-expiry")
     by_name = {s["name"]: s["color"] for s in be["series"]}
-    models = json.loads(_surface_file("scorecard.json").read_text())["models"]
-    keys = [m["model"] for m in models]
-    assert len({dash.model_colour(k) for k in keys}) == len(keys)            # distinct
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    assert len({dash.model_colour(m["model"]) for m in sc["models"]}) == len(sc["models"])   # distinct
+    keys = _scored(sc)            # a model the session's scorecard did not score has no series
     for k in keys:
         label = dash.model_label(k)
         assert by_name[label] == dash.model_colour(k), k
         slice_cols = {s["color"] for s in sl["series"] if s.get("legendKey") == label}
         assert slice_cols == {dash.model_colour(k)}, (k, slice_cols)
     legend = [it["name"] for it in sl["legend_items"]]
-    assert {dash.model_label(k) for k in keys} <= set(legend)
-    assert {"Bid–ask", "Mid", "Heston fit anchors"} <= set(legend)
+    assert {dash.model_label(m["model"]) for m in sc["models"]} & set(legend) == {
+        dash.model_label(k) for k in keys}
+    assert {"Bid–ask", "Mid"} <= set(legend)
+    assert ("Heston fit anchors" in legend) == ("heston_v2" in keys)         # anchors of a scored fit
     assert len(legend) == len(set(legend))                                   # one button per key
     shown = {it["name"] for it in sl["legend_items"] if not it["hidden"]}
-    assert {dash.model_label("heston_v2"), dash.model_label("svi_cal")} <= shown
+    assert {dash.model_label(k) for k in ("heston_v2", "svi_cal") if k in keys} <= shown
     assert sl["marks"]["x"][0]["value"] == 0                                  # the forward
     # the same model keeps its colour on the calibration page
     cal = pages["/calibration"]
@@ -2902,31 +3845,58 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
         # the packed block carries K and F and the page takes k = ln(K/F) from them, so
         # it agrees with the residual table's k (10 significant digits) to rounding:
         # an exact compare after rounding both to 6 decimals failed at a ...5 boundary
+        # once the Cboe book (8,819 quotes) was scored
         # (the bot's 2026-10-28 session: −0.180998 against −0.180999)
         assert [m[0] for m in mids] == pytest.approx([float(k) for k in q["k"]], abs=1e-6), s["name"]
-        assert [p[1] for p in s["data"]] == pytest.approx([float(v) * 100 for v in q["model_iv"]], abs=1e-4)
+        # a quote where the model has no IV (NaN in the residual table: a deep wing the
+        # model cannot price) is a gap in the series, not a point
+        want = [float(v) * 100 if np.isfinite(v) else None for v in q["model_iv"]]
+        got = [p[1] for p in s["data"]]
+        assert [g is None for g in got] == [w is None for w in want], s["name"]
+        priced = [w for w in want if w is not None]
+        assert [g for g in got if g is not None] == pytest.approx(priced, abs=1e-4)
         assert [v for p in by[(e, "ba")]["data"] for v in p[1:]] == pytest.approx(
             [v for b, a in zip(q["bid_iv"], q["ask_iv"]) for v in (b * 100, a * 100)], abs=1e-5)
 
 
 def test_smile_slice_has_a_per_expiry_table_of_its_data(dash, pages):
     """UI-17: without the chart the slice offered 'the values listed below', a
-    table of quote counts. Its data block now has one table per expiry (bid,
-    mid, ask and every model's IV by ln(K/F) bucket); the default expiry's is
-    shown, the others are hidden until their tab is chosen (all show without JS)."""
+    table of quote counts. Its data block has a row group per expiry (bid, mid, ask
+    and every model's IV by ln(K/F) bucket); the default expiry's is shown, the others
+    are hidden until their tab is chosen (all show without JS). D2: the expiries were
+    45 tables, each with its caption and head; they are one table with one head, a
+    tbody per expiry under a header row naming its date and days, in a region that
+    scrolls inside 60% of the screen without JavaScript (desk.js drops its tab stop:
+    one group shows at a time)."""
     html = pages["/surface"]
     block = re.search(r'<div class="chart-data sr-only" id="chart-slices-data">(.*?)\n</div>', html,
                       re.DOTALL).group(1)
-    groups = re.findall(r'<div class="chart-data-group" data-group="([^"]+)"( hidden)?>', block)
-    exps = re.findall(r'data-value="(\d{4}-\d{2}-\d{2})">\d+d</button>', html)
-    assert [g for g, _ in groups] == exps
-    assert sum(1 for _, h in groups if not h) == 1
-    head = re.search(r'data-group="[^"]+"[^>]*><table>\s*<caption>[^<]+</caption>\s*<thead><tr>(.*?)</tr>',
-                     block, re.DOTALL).group(1)
-    for col in ("Bid", "Mid", "Ask", "Heston", "SVI-cal", "SVI", "eSSVI"):
-        assert f">{col}</th>" in head, col
-    assert ('[role="tabpanel"][hidden], .chart-data [data-group][hidden] { display: block !important; }'
+    region = re.search(r'<div class="chart-groups" tabindex="0" role="region" '
+                       r'aria-labelledby="chart-slices-data-gcap"><table class="nr">'
+                       r'<caption id="chart-slices-data-gcap">[^<]+</caption>\s*<thead><tr>(.*?)</tr></thead>'
+                       r'(.*?)</table></div>', block, re.DOTALL)
+    assert region
+    assert block.count("<table") == 2                 # 'Quotes per expiry', then the expiries'
+    groups = re.findall(r'<tbody data-group="([^"]+)"( hidden)?><tr><th scope="rowgroup" colspan="(\d+)">'
+                        r'([^<]+)</th></tr>', region.group(2))
+    exps = re.findall(r'aria-controls="slices-panel" data-value="(\d{4}-\d{2}-\d{2})"', html)
+    assert [g[0] for g in groups] == exps
+    assert sum(1 for g in groups if not g[1]) == 1
+    days = dict(re.findall(r"<tr><td>(\d{4}-\d{2}-\d{2})</td><td>(\d+)</td>", block))
+    for e, _h, span, head in groups:
+        assert head == f"{e} ({days[e]} days)", head
+        assert int(span) == region.group(1).count("<th ")
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    for col in ("Bid", "Mid", "Ask", *(dash.model_short(k) for k in _scored(sc))):
+        assert f">{col}</th>" in region.group(1), col
+    for k in {m["model"] for m in sc["models"]} - set(_scored(sc)):
+        assert f">{dash.model_short(k)}</th>" not in region.group(1), k
+    assert ('[role="tabpanel"][hidden], .chart-data div[data-group][hidden] { display: block !important; }'
             in html)
+    assert ".chart-data tbody[data-group][hidden] { display: table-row-group !important; }" in html
+    assert ".chart-groups { max-height: 60vh; overflow: auto; }" in html
+    js = DESK_JS.read_text()
+    assert "$$('.chart-groups').forEach(function (g) { g.removeAttribute('tabindex'); });" in js
 
 
 def test_iv_and_residual_grids_hold_every_quote(dash, pages):
@@ -2956,10 +3926,11 @@ def test_scorecard_and_by_expiry_chart_say_which_quotes_they_score(dash, pages):
     and the history column names the repair's moves."""
     html = pages["/surface"]
     sc = json.loads(_surface_file("scorecard.json").read_text())
-    ns = {m["metrics"]["out_of_sample"]["n"] for m in sc["models"]}
+    ns = {m["metrics"]["out_of_sample"]["n"] for m in sc["models"] if m["model"] in _scored(sc)}
     title = re.search(r'<h2 class="panel-title" id="scorecard-t">(.*?)</h2>', html).group(1)
     assert ("same quotes" in title) is (len(ns) == 1)
     be = _spec(html, "chart-by-expiry")
+    assert sorted(s["name"] for s in be["series"]) == sorted(dash.model_label(k) for k in _scored(sc))
     res = pd.read_parquet(_surface_file("residuals.parquet"))
     for s in be["series"]:
         key = next(k for k in res["model"].unique() if dash.model_label(k) == s["name"])
@@ -3107,12 +4078,22 @@ def test_waterfall_end_bar_is_named_for_the_record_it_holds(dash, pages):
     assert f"the published C22 run ended at {dash._usd(float(c23[0]['pnl']), signed=True)}" in note
 
 
-def test_surface_badge_lists_the_models(pages):
-    """UI-10: the badge read 'models:' and nothing else."""
-    badge = _visible_text("<body>" + re.search(r'<div class="page-badge">(.*?)</div>', pages["/surface"],
-                                                re.DOTALL).group(1))
-    for m in ("eSSVI", "SVI", "SVI-cal", "Heston"):
-        assert re.search(rf"models:.*\b{re.escape(m)}\b", badge), (m, badge)
+def test_surface_badge_lists_the_models(dash, pages):
+    """UI-10: the badge read 'models:' and nothing else. It lists the models the
+    session's scorecard scored, and names one it did not score (Heston on a session
+    with no stored fit) with a link to the scorecard, whose note says why."""
+    block = re.search(r'<div class="page-badge">(.*?)</div>', pages["/surface"], re.DOTALL).group(1)
+    badge = _visible_text("<body>" + block)
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    listed = re.search(r"models: ([^·]*)", badge).group(1).strip()
+    assert listed.split(", ") == [dash.model_short(k) for k in pd.read_parquet(
+        _surface_file("residuals.parquet"), columns=["model"])["model"].unique()]
+    assert sorted(listed.split(", ")) == sorted(dash.model_short(k) for k in _scored(sc))
+    gone = [m for m in sc["models"] if m.get("available") is False]
+    for m in gone:
+        assert f'<a href="#scorecard">{dash.model_short(m["model"])} not scored on this session</a>' in block
+        assert dash.prose(m["reason"]) in _visible_text(pages["/surface"]), m["model"]
+    assert ("not scored on this session" in badge) == bool(gone)
 
 
 def test_surface_key_result_shows_its_range_caveat(dash, pages):
@@ -3124,6 +4105,30 @@ def test_surface_key_result_shows_its_range_caveat(dash, pages):
     assert "not a sampling interval" in card
     assert "interpolation test" in card
     assert 'class="kpi-ci kpi-range"' in pages["/"]
+
+
+def test_a_calibration_smile_without_quotes_says_why_and_keeps_its_own_height(dash, monkeypatch):
+    """A simulated next session fitted an expiry its surface held no quotes for: that
+    smile panel drew the Heston line alone, with no legend or note, and its row
+    stretched it 108-157 px below its content (interact.mjs). It now says why it
+    has no quotes, and the smile grid aligns its panels to the top."""
+    first = dash.load_page2()["anchors_by_expiry"][0]["expiry"]
+    real = dash.artifacts.load_surface
+
+    def without_first_anchor(data, session):
+        surf = real(data, session)
+        if surf.get("state") != "ok":
+            return surf
+        res = surf["residuals"]
+        assert (res["expiry"] == first).any(), "the fit's first anchor expiry has no quotes already"
+        return {**surf, "residuals": res[res["expiry"] != first]}
+    monkeypatch.setattr(dash.artifacts, "load_surface", without_first_anchor)
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    panel = re.search(rf'<section[^>]*id="smile-{first}".*?</section>', html, re.DOTALL).group(0)
+    why = "has no quotes at this expiry; the line is the Heston smile alone."
+    assert why in _visible_text("<body>" + panel)
+    grid = html[html.rfind('<div class="g', 0, html.index(f'id="smile-{first}"')):]
+    assert re.match(r'<div class="g evenfill top"', grid)
 
 
 def test_calibration_smile_anchors_stand_apart_from_the_out_of_sample_mids(dash, pages):
@@ -3565,6 +4570,669 @@ def test_browser_slice_is_drawn_once_and_tables_follow_the_tab(site_browser):
                           ".filter(g => !g.hidden).map(g => g.dataset.group)")
     assert shown == [exp]
     ctx.close()
+
+
+# The synthetic session (_surface_store) at the expiry counts the Surface page must
+# hold: 17 (a Yahoo chain: no OCC root), about 45 (a full Cboe book, with roots) and
+# 80 (headroom). Its pages, not a stored session's, carry the scaling tests: the
+# daily bot replaces the stored sessions and with them the expiry count.
+SYN_SITES = {17: False, 45: True, 80: True}
+
+
+@pytest.fixture(scope="module")
+def syn_browser(dash, freezer, site_browser, tmp_path_factory):
+    """The synthetic session's Surface page at each SYN_SITES size, frozen as
+    surface-<n>.html beside static/ (freeze_site's link rewrites applied) and served
+    on loopback, in site_browser's Chromium (one Playwright per process)."""
+    import functools
+    import http.server
+    import socketserver
+    import threading
+
+    out = tmp_path_factory.mktemp("syn_site")
+    shutil.copytree(freezer.STATIC, out / "static", ignore=shutil.ignore_patterns("__pycache__", ".*"))
+    html, old = {}, dash.DATA
+    try:
+        for n, roots in SYN_SITES.items():
+            dash.DATA = _surface_store(tmp_path_factory.mktemp(f"syn{n}"), n, roots)
+            resp, page = _get(dash, "/surface")
+            assert _errors(resp) == 0, (n, resp.headers.get("X-Dashboard-Error-Components"))
+            for a, b in freezer._rewrites(dash):
+                page = page.replace(a, b)
+            html[n] = page
+            (out / f"surface-{n}.html").write_text(page, encoding="utf-8")
+            for src in freezer.data_refs(page)[0]:          # its session data file, as freeze writes it
+                (out / src).parent.mkdir(exist_ok=True)
+                (out / src).write_bytes(dash.DATA_FILES[src.split("/", 1)[1]])
+    finally:
+        dash.DATA = old
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(out)))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield {"base": f"http://127.0.0.1:{httpd.server_address[1]}/", "browser": site_browser["browser"],
+           "site": out, "html": html}
+    httpd.shutdown()
+
+
+def _syn_page(sb, n: int, width: int, height: int = 900):
+    ctx, page = _page(sb, width, height)
+    page.goto(f"{sb['base']}surface-{n}.html", wait_until="load")
+    return ctx, page
+
+
+# the smile's box and the screen position of its middle quote (the one the quote
+# inspector check hovers), from the chart's own coordinate system
+_SMILE_MIDDLE_QUOTE_JS = """(id) => {
+  const c = Desk.charts[id], rows = Desk.rowsOf(c.spec, Desk.filters[id]);
+  const q = rows[Math.floor((rows.length - 1) / 2)];
+  const px = c.chart.convertToPixel({xAxisIndex: 0, yAxisIndex: 0}, [q.k, q.mid]);
+  const r = c.el.getBoundingClientRect();
+  return {height: r.height, x: r.left + px[0], y: r.top + px[1], vw: innerWidth, vh: innerHeight};
+}"""
+
+def test_browser_the_smile_keeps_its_height_beside_a_45_expiry_grid(syn_browser):
+    """D3 / P4.1 layout: on a 45-expiry book the smile grew to the height of the
+    45-row IV grid beside it (1,164 px), so its quotes sat below the screen (the
+    quote inspector found no tooltip), and the 45-row residual grid stretched the
+    arbitrage panel beside it, which ended 214 px below its content. At 1024–1920 px
+    the smile is as tall as its h440 class says, 360 px on a phone, and its middle
+    quote is on screen once the chart is scrolled to; neither row ends a panel in
+    blank space: the IV and residual grids take their row's height and scroll
+    inside it under their sticky column heads."""
+    sb = syn_browser
+    for width, want in ((1024, 440), (1440, 440), (1920, 440), (390, 360)):
+        ctx, page = _syn_page(sb, 45, width, 844 if width < 600 else 900)
+        page.locator("#chart-slices").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-slices")
+        r = page.evaluate(_SMILE_MIDDLE_QUOTE_JS, "chart-slices")
+        assert abs(r["height"] - want) <= 1, (width, r)
+        assert 0 <= r["x"] <= r["vw"], (width, r)
+        assert 0 <= r["y"] <= r["vh"], (width, r)
+        if width > 1180:                          # side by side: each row is as tall as its taller panel
+            r = page.evaluate(_LAYOUT_JS, [60, 96, []])
+            rows = ("iv-heat", "slices", "residuals", "arbitrage")
+            assert [b for b in r["blanks"] if b.split()[0] in rows] == [], (width, r)
+            heads = page.evaluate("""() => [...document.querySelectorAll('.heat-wrap.capped')]
+                .filter(w => !w.closest('[hidden]')).map(w => {
+                  w.scrollTop = w.scrollHeight;
+                  const h = w.querySelector('thead th').getBoundingClientRect();
+                  const b = w.getBoundingClientRect();
+                  return [w.querySelector('table').id, w.scrollHeight > w.clientHeight,
+                          Math.round(h.top - b.top)]; })""")
+            by_id = {h[0]: h[1:] for h in heads}
+            assert "iv-heatmap" in by_id, heads
+            assert any(i.startswith("resid-heat-") for i in by_id), heads
+            # the 45-row IV grid is taller than the smile's row: it scrolls inside it, and
+            # every grid that scrolls keeps its column heads in view at its bottom
+            assert by_id["iv-heatmap"][0], (width, heads)
+            assert all(0 <= top <= 2 for scrolls, top in by_id.values() if scrolls), (width, heads)
+        ctx.close()
+
+
+# the smile's expiry strip after a step of ``step`` expiries (Desk.stepExpiry: what
+# '[' / ']' and a table row's head do, choosing a tab without focusing it)
+_STRIP_JS = """async (step) => {
+  const list = document.querySelector('[role="tablist"][data-state-key="exp"]');
+  const tabs = [...list.querySelectorAll('[role="tab"]')];
+  if (step) Desk.stepExpiry(step);
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const sel = tabs.find(t => t.getAttribute('aria-selected') === 'true');
+  const l = list.getBoundingClientRect(), t = sel.getBoundingClientRect();
+  const inside = x => { const r = x.getBoundingClientRect();
+    return r.left >= l.left - 1 && r.right <= l.right + 1
+      && r.top >= l.top - 1 && r.bottom <= l.bottom + 1; };
+  const tops = tabs.map(x => Math.round(x.getBoundingClientRect().top));
+  const shown = new Set(tabs.filter(inside).map(x => Math.round(x.getBoundingClientRect().top)));
+  return {lines: new Set(tops).size, shownLines: shown.size, shown: tabs.filter(inside).length,
+          onShownLines: tops.filter(x => shown.has(x)).length,
+          scrolls: list.scrollHeight > list.clientHeight, selected: sel.dataset.value,
+          inView: inside(sel), scrollY: Math.round(scrollY),
+          status: (document.getElementById('slices-status') || {}).textContent,
+          overflow: document.documentElement.scrollWidth - innerWidth};
+}"""
+
+
+def test_browser_the_expiry_strip_shows_two_lines_and_keeps_the_selected_expiry_in_view(syn_browser):
+    """D3: a full Cboe book's ~45 smile tabs wrapped to four or five lines above the
+    chart; one line that scrolled sideways then showed 5-7 of them with no sign of
+    the rest. At 1024–1920 px the strip shows two full lines of tabs for 17, 45 and
+    80 expiries and scrolls when it has more; the selected expiry is in view at load,
+    after a step to the last or the first expiry without focusing its tab (the strip
+    scrolls, not the page) and on a link to the last (exp= in the hash); the status
+    line under it names the selected expiry as the server names the default."""
+    sb = syn_browser
+    for n, roots in SYN_SITES.items():
+        want = _syn_expected_strip(n, roots)
+        exps = list(want)
+        for width in (1024, 1280, 1440, 1920):
+            ctx, page = _syn_page(sb, n, width)
+            page.locator("#chart-slices").scroll_into_view_if_needed()
+            _wait_for_chart(page, "chart-slices")
+            r0 = page.evaluate(_STRIP_JS, 0)
+            assert r0["shownLines"] == min(2, r0["lines"]), (n, width, r0)
+            assert r0["shown"] == r0["onShownLines"], (n, width, r0)
+            assert r0["inView"], (n, width, r0)
+            assert r0["status"] == want[r0["selected"]]["status"], (n, width, r0)
+            assert r0["overflow"] <= 0, (n, width, r0)
+            if n >= 45:
+                assert r0["scrolls"], (n, width, r0)
+            for step, e in ((n, exps[-1]), (-n, exps[0])):
+                r = page.evaluate(_STRIP_JS, step)
+                assert r["selected"] == e, (n, width, r)
+                assert r["inView"], (n, width, r)
+                assert r["scrollY"] == r0["scrollY"], (n, width, r)
+                assert r["status"] == want[e]["status"], (n, width, r)
+            ctx.close()
+    exps = list(_syn_expected_strip(45, True))
+    ctx, page = _page(sb, 1440, 900)
+    page.goto(f"{sb['base']}surface-45.html#slices&exp={exps[-1]}", wait_until="load")
+    r = page.evaluate(_STRIP_JS, 0)
+    assert r["selected"] == exps[-1], r
+    assert r["inView"], r
+    assert r["status"].startswith(f"Expiry {len(exps)} of {len(exps)} · {exps[-1]} · "), r
+    ctx.close()
+
+
+_TAB_STOPS_JS = """() => [...document.querySelectorAll(
+    'a[href], button, input, select, textarea, summary, [tabindex]')]
+  .filter(el => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length > 0
+    && !el.closest('[hidden], [inert], details:not([open]) > :not(summary)')
+    && getComputedStyle(el).visibility !== 'hidden').length"""
+
+
+def test_browser_surface_has_as_many_tab_stops_at_45_expiries_as_at_17(syn_browser):
+    """A2: a keyboard reader tabs through the Surface page in as many stops on a full
+    Cboe book (45 expiries) as on a 17-expiry chain: the expiry strip, each heatmap's
+    row heads and each table are one stop each, whatever the expiry count."""
+    counts = {}
+    for n in (17, 45):
+        ctx, page = _syn_page(syn_browser, n, 1440)
+        page.wait_for_timeout(300)
+        counts[n] = page.evaluate(_TAB_STOPS_JS)
+        ctx.close()
+    assert counts[17] == counts[45], counts
+
+
+# a click on an expiry tab, resolved once the smile has drawn it (its 'finished'
+# event, then a frame); the expiry's quotes and what the smile now draws
+_PICK_JS = """(e) => new Promise(done => {
+  const c = Desk.charts['chart-slices'], ch = c.chart;
+  const fin = () => { ch.off('finished', fin); requestAnimationFrame(() => done(state())); };
+  const state = () => { const o = ch.getOption(), rows = Desk.rowsOf(c.spec, e);
+    const mid = o.series.find(s => s && (s.name === 'mid' || s.name === e + ' mid'))
+      || {};
+    return { filter: Desk.filters['chart-slices'], decoded: Object.keys(c.spec._rows).sort(),
+             rows: rows.length, mids: (mid.data || []).length, x: [o.xAxis[0].min, o.xAxis[0].max],
+             k: rows.length ? [rows[0].k, rows[rows.length - 1].k] : null }; };
+  ch.on('finished', fin);
+  document.querySelector(`[data-chart-filter="chart-slices"] [data-value="${e}"]`).click();
+})"""
+
+
+_SHOWN_MIDS_JS = ("Desk.charts['chart-slices'].chart.getOption().series"
+                  ".find(s => s && s.name === 'mid').data.length")
+
+
+def _syn_tabs(sb, n: int) -> list[str]:
+    return re.findall(r'aria-controls="slices-panel" data-value="([\d-]+)"', sb["html"][n])
+
+
+def test_browser_the_smile_decodes_an_expiry_only_when_it_is_shown(syn_browser):
+    """D3: desk.js decoded every expiry's packed quotes when the page loaded (45 on a
+    full Cboe book: a 174 ms task at 4× CPU before the smile drew). It decodes the
+    shown expiry only: one after the first draw, one more for each expiry shown
+    (17 and 45 expiries; the others come from the session data file)."""
+    sb = syn_browser
+    for n in (17, 45):
+        ctx, page = _syn_page(sb, n, 1440)
+        page.locator("#chart-slices").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-slices")
+        first = page.evaluate("Desk.filters['chart-slices']")
+        assert page.evaluate("Object.keys(Desk.charts['chart-slices'].spec._rows)") == [first], n
+        page.evaluate("Desk.quotesReady('chart-slices')")
+        picks = [e for e in _syn_tabs(sb, n) if e != first][::15][:3]
+        for k, e in enumerate(picks, 1):
+            st = page.evaluate(_PICK_JS, e)
+            assert st["decoded"] == sorted([first, *picks[:k]]), (n, st)
+            assert st["mids"] == st["rows"] > 0, (n, st)
+        ctx.close()
+
+
+def test_browser_a_book_smile_draws_its_default_inline_and_fetches_the_session_file_once(syn_browser):
+    """D2 / D3: the smile's default expiry is in the page, the session's other
+    expiries in one data file. Nothing is fetched while the smile is off screen; the
+    file is requested within 3 s of the smile's first draw with no input, once for
+    any number of switches; each expiry then draws all its quotes; the CSV, asked
+    for before the file arrived, holds every quote of every expiry."""
+    import time
+
+    sb = syn_browser
+    book = json.loads((sb["site"] / _raw_specs(sb["html"][45])["chart-slices"]["quotes"]["src"]).read_bytes())
+    total = sum(len(g["mid"]) for g in book["quotes"]["groups"].values())
+    ctx, page = _page(sb, 1440, 900)
+    reqs, errors = [], []
+    page.on("request", lambda r: reqs.append(time.monotonic()) if "/data/" in r.url else None)
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(sb["base"] + "surface-45.html", wait_until="load")
+    page.wait_for_timeout(1500)
+    assert reqs == [], "a data file was fetched before the smile was drawn"
+    page.locator("#chart-slices").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-slices")
+    t0 = time.monotonic()
+    first = page.evaluate("Desk.filters['chart-slices']")
+    assert page.evaluate(_SHOWN_MIDS_JS) == len(book["quotes"]["groups"][first]["mid"])
+    while not reqs and time.monotonic() - t0 < 5:
+        page.wait_for_timeout(100)
+    assert reqs, "the data file was not requested"
+    assert reqs[0] - t0 <= 3.0, reqs
+    for e in [e for e in _syn_tabs(sb, 45) if e != first][::9][:5]:
+        st = page.evaluate(_PICK_JS, e)
+        assert st["filter"] == e
+        assert st["mids"] == st["rows"] == len(book["quotes"]["groups"][e]["mid"]), (e, st)
+        assert st["x"][0] <= st["k"][0], (e, st)
+        assert st["x"][1] >= st["k"][1], (e, st)
+    assert len(reqs) == 1, reqs
+    assert errors == []
+    ctx.close()
+    ctx, page = _page(sb, 1440, 900)
+    page.goto(sb["base"] + "surface-45.html", wait_until="load")
+    with page.expect_download() as dl:
+        page.click("[data-csv-for='chart-slices']")
+    csv = Path(dl.value.path()).read_text()
+    assert len(csv.strip().split("\n")) == 1 + total
+    ctx.close()
+
+
+def test_browser_the_3d_view_draws_the_session_files_points(syn_browser):
+    """D2: the 3D view's points are in the session data file (the smile's): "Show 3D"
+    draws every point of the file (one fetch however the view and the smile share
+    it), and a file that fails to load leaves the button saying so, the 2D heatmap
+    being the full view, with no script error."""
+    sb = syn_browser
+    sp = json.loads(re.search(r'<script type="application/json" id="surface3d-spec">(.*?)</script>',
+                              sb["html"][17], re.DOTALL).group(1))
+    pts = json.loads((sb["site"] / sp["src"]).read_bytes())["surface3d"]["points"]
+    for how in ("ok", "abort"):
+        ctx, page = _page(sb, 1440, 900)
+        reqs, errors = [], []
+        page.on("request", lambda r, reqs=reqs: reqs.append(r.url) if "/data/" in r.url else None)
+        page.on("pageerror", lambda e, errors=errors: errors.append(str(e)))
+        if how == "abort":
+            page.route("**/data/**", lambda r: r.abort())
+        page.goto(sb["base"] + "surface-17.html", wait_until="load")
+        if not page.evaluate("() => { const c = document.createElement('canvas'); "
+                             "return !!(c.getContext('webgl') || c.getContext('experimental-webgl')); }"):
+            ctx.close()
+            pytest.skip("no WebGL in this Chromium")
+        page.click("[data-load-3d='surface3d']")
+        page.evaluate("""() => new Promise(done => { (function poll() {
+          if (!/Loading/.test(document.querySelector('[data-load-3d]').textContent)) return done();
+          setTimeout(poll, 50); })(); })""")
+        st = page.evaluate("""() => { const c = Desk.charts.surface3d;
+          return { text: document.querySelector('[data-load-3d]').textContent,
+                   n: c ? c.chart.getOption().series[0].data.length : null,
+                   hidden: document.getElementById('surface3d').hidden }; }""")
+        if how == "ok":
+            assert st["n"] == len(pts), st
+            assert not st["hidden"], st
+            assert len(reqs) == 1, reqs
+        else:
+            assert st["n"] is None, st
+            assert st["hidden"], st
+            assert "failed to load" in st["text"], st
+            assert "2D heatmap is the full view" in st["text"], st
+        assert errors == [], (how, errors)
+        ctx.close()
+
+
+_HEAT_FOCUS_JS = """([ri, ci]) => {
+  const t = document.getElementById('iv-heatmap'), td = t.tBodies[0].rows[ri].cells[ci + 1];
+  td.focus();
+  return { head: td.parentNode.cells[0].textContent.trim() + ' \u00b7 '
+             + t.tHead.rows[0].cells[ci + 1].textContent.trim() + ' \u00b7 ',
+           text: td.textContent, readout: document.getElementById('iv-heatmap-readout').textContent }; }"""
+
+
+def test_browser_a_surface_heatmap_reads_its_cells_details_from_the_session_file(dash, syn_browser):
+    """D2: a Surface heatmap cell's readout was its data-detail attribute. Its numbers
+    are now in the session data file: until the file is in (here: never, its request
+    refused) a focused cell reads its row, column and printed value; once it is in,
+    the cell's numbers in its grid's template (the text the attribute held), and an
+    empty cell reads 'no quotes'. The file is the smile's: one request for both."""
+    sb = syn_browser
+    tag = _attrs(re.search(r'<table class="heat" id="iv-heatmap"[^>]*>', sb["html"][17]).group(0))
+    heat = json.loads((sb["site"] / tag["data-src"]).read_bytes())["heat"]["iv-heatmap"]
+    filled = next((ri, ci) for ri, r in enumerate(heat["cells"]) for ci, v in enumerate(r) if v)
+    empty = next((ri, ci) for ri, r in enumerate(heat["cells"]) for ci, v in enumerate(r) if v is None)
+    for how in ("abort", "ok"):
+        ctx, page = _page(sb, 1440, 900)
+        reqs: list[str] = []
+        page.on("request", lambda r, reqs=reqs: reqs.append(r.url) if "/data/" in r.url else None)
+        if how == "abort":
+            page.route("**/data/**", lambda r: r.abort())
+        page.goto(sb["base"] + "surface-17.html", wait_until="load")
+        page.locator("#iv-heatmap").scroll_into_view_if_needed()
+        st = page.evaluate(_HEAT_FOCUS_JS, list(filled))
+        if how == "abort":
+            page.wait_for_timeout(800)
+            st = page.evaluate(_HEAT_FOCUS_JS, list(filled))
+            assert st["readout"] == st["head"] + st["text"], st
+        else:
+            want = st["head"] + dash.heat_detail(heat["detail"], heat["cells"][filled[0]][filled[1]])
+            page.evaluate("""(want) => new Promise(done => { const t0 = Date.now(); (function poll() {
+              const out = document.getElementById('iv-heatmap-readout');
+              if (out.textContent === want || Date.now() - t0 > 10000) return done();
+              setTimeout(poll, 50); })(); })""", want)
+            assert page.evaluate("document.getElementById('iv-heatmap-readout').textContent") == want
+            st = page.evaluate(_HEAT_FOCUS_JS, list(empty))
+            assert st["readout"] == st["head"] + "no quotes", st
+            page.locator("#chart-slices").scroll_into_view_if_needed()
+            _wait_for_chart(page, "chart-slices")
+            page.wait_for_timeout(1500)
+            assert len(reqs) == 1, reqs
+        ctx.close()
+
+
+# a stand-in for Desk.data that counts its calls and resolves with `file` (after 50
+# calls it never resolves, so a page that keeps asking cannot hang the test)
+_HEAT_STUB_JS = """(file) => { window.__dataCalls = 0; window.__errs = [];
+  window.addEventListener('error', e => window.__errs.push(String(e.message)));
+  Desk.data = () => ++window.__dataCalls > 50 ? new Promise(() => {}) : Promise.resolve(file); }"""
+
+
+def test_browser_a_heatmap_whose_file_lacks_its_details_reads_the_cell_and_does_not_hang(syn_browser):
+    """D2 review: a heatmap cell's readout asked the data file for its table's entry
+    and, when the file had none (heat[id] undefined), asked again for ever: the tab
+    hung on the first hover. A file without the entry, or with fewer rows than the
+    grid, now leaves the readout at the cell's row, column and printed value, after
+    one request (the old code made 50 here, the stub's limit) and without an error.
+    freeze_site refuses such a file (the next test)."""
+    sb = syn_browser
+    for file in ({"heat": {}}, {}, {"heat": {"iv-heatmap": {"detail": "{0:2}", "cells": []}}}):
+        ctx, page = _syn_page(sb, 17, 1440)
+        page.locator("#iv-heatmap").scroll_into_view_if_needed()
+        page.evaluate(_HEAT_STUB_JS, file)
+        at = page.evaluate("""() => { const rows = [...document.getElementById('iv-heatmap').tBodies[0].rows];
+          for (const [ri, r] of rows.entries()) for (const c of [...r.cells].slice(1))
+            if (c.className !== 'empty') return [ri, c.cellIndex - 1]; }""")
+        page.evaluate(_HEAT_FOCUS_JS, at)
+        page.wait_for_timeout(300)
+        st = page.evaluate(_HEAT_FOCUS_JS, at)
+        calls, errs = page.evaluate("[window.__dataCalls, window.__errs]")
+        assert calls <= 2, (file, calls)          # the grid's, and the smile's beside it
+        assert errs == [], (file, errs)
+        assert st["readout"] == st["head"] + st["text"], (file, st)
+        ctx.close()
+
+
+def test_freeze_refuses_a_data_file_without_a_heatmaps_details(dash, freezer, tmp_path, monkeypatch):
+    """D2 review: a Surface heatmap (data-src) reads its cells' numbers from the
+    session data file's heat entry under its table id. Freeze checked the file's
+    hashes, not that the entry is there: a file without it published, and desk.js
+    then hung on the first hover. Freeze now fails closed and writes nothing."""
+    orig = dash.publish_json
+
+    def drop(kind, session, obj):
+        heat = {k: v for k, v in (obj.get("heat") or {}).items() if k != "iv-heatmap"}
+        return orig(kind, session, {**obj, "heat": heat} if "heat" in obj else obj)
+
+    monkeypatch.setattr(dash, "publish_json", drop)
+    out = tmp_path / "site"
+    assert freezer.freeze(str(out), dash) == 1
+    assert not out.exists() or not any(out.iterdir())
+    # an entry without its detail template or its cells (the readout then threw on
+    # every hover and described the previous cell) is refused the same way
+    for broken in ({"cells": []}, {"detail": "{0}"}, {"detail": 1, "cells": []}):
+        def bad(kind, session, obj, broken=broken):
+            heat = dict(obj.get("heat") or {})
+            if "iv-heatmap" in heat:
+                heat["iv-heatmap"] = broken
+            return orig(kind, session, {**obj, "heat": heat} if "heat" in obj else obj)
+        monkeypatch.setattr(dash, "publish_json", bad)
+        out = tmp_path / f"site-{len(broken)}-{min(broken)}"
+        assert freezer.freeze(str(out), dash) == 1, broken
+    page = '<table class="heat" id="iv-heatmap" data-src="data/x-0123456789abcdef.json" data-integrity="a">'
+    assert freezer._heat_ids(page + '<p data-id="no">', "data/x-0123456789abcdef.json") == ["iv-heatmap"]
+
+
+def test_browser_a_smile_whose_session_file_fails_keeps_its_default_and_says_so(syn_browser):
+    """D2: a page left open across a deploy names a data file the deploy removed, and
+    a file:// preview cannot fetch one; a file whose bytes are not its integrity hash
+    is refused. The default expiry still draws from the page; a switch to another
+    shows a status note saying the quotes did not load and opens the expiry's table
+    of medians; no script error."""
+    sb = syn_browser
+    for how in ("abort", "tampered"):
+        ctx, page = _page(sb, 1440, 900)
+        errors: list[str] = []
+        page.on("pageerror", lambda e, errors=errors: errors.append(str(e)))
+
+        def handler(route, how=how):
+            if how == "abort":
+                return route.abort()
+            body = (sb["site"] / route.request.url.split("/", 3)[3]).read_bytes()
+            return route.fulfill(status=200, body=body.replace(b'"mid":[', b'"mid":[1,', 1),
+                                 headers={"content-type": "application/json"})
+
+        page.route("**/data/**", handler)
+        page.goto(sb["base"] + "surface-45.html", wait_until="load")
+        page.locator("#chart-slices").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-slices")
+        first = page.evaluate("Desk.filters['chart-slices']")
+        assert page.evaluate(_SHOWN_MIDS_JS)
+        page.wait_for_timeout(2500)
+        other = next(e for e in _syn_tabs(sb, 45) if e != first)
+        page.click(f"[data-chart-filter='chart-slices'] [data-value='{other}']")
+        page.wait_for_timeout(1500)
+        st = page.evaluate("""() => { const n = document.getElementById('chart-slices-note');
+          return { note: n && n.textContent, role: n && n.getAttribute('role'),
+            table: document.getElementById('chart-slices-data').classList.contains('show'),
+            expanded: document.querySelector('[data-table-for="chart-slices-data"]')
+              .getAttribute('aria-expanded'),
+            shown: [...document.querySelectorAll('#chart-slices-data [data-group]')].filter(g => !g.hidden)
+              .map(g => g.dataset.group) }; }""")
+        assert "did not load" in (st["note"] or ""), (how, st)
+        assert st["role"] == "status", (how, st)
+        assert st["table"], (how, st)
+        assert st["expanded"] == "true", (how, st)
+        assert st["shown"] == [other], (how, st)
+        assert errors == [], (how, errors)
+        ctx.close()
+
+# five expiry switches on a drawn smile: the DOM mutations of each click's own task,
+# then (the chart drawn, the deferred work done) what the smile draws; and the
+# ResizeObserver entries on the smile over all five
+_SWITCH_WORK_JS = """async (picks) => {
+  const id = 'chart-slices', c = Desk.charts[id], ch = c.chart;
+  const frame = () => new Promise(r => requestAnimationFrame(r));
+  let ro = -1;
+  const obs = new ResizeObserver(es => { ro += ro < 0 ? 1 : es.length; });
+  obs.observe(c.el);
+  await frame(); await frame();
+  const out = [];
+  for (const e of picks) {
+    const mo = new MutationObserver(() => {});
+    mo.observe(document, { subtree: true, attributes: true, childList: true, characterData: true });
+    const drawn = new Promise(done => {
+      const fin = () => { ch.off('finished', fin); frame().then(done); };
+      ch.on('finished', fin); });
+    document.querySelector(`[data-chart-filter="${id}"] [data-value="${e}"]`).click();
+    const click = mo.takeRecords()
+      .map(r => r.type + ' ' + (r.attributeName || '') + ' ' + (r.target.id || r.target.tagName));
+    mo.disconnect();
+    await drawn;
+    await new Promise(r => setTimeout(r, 150));
+    const o = ch.getOption(), g = o.grid[0], ser = o.series.filter(Boolean);    // replaceMerge leaves holes
+    const len = n => ((ser.find(s => s.name === n) || {}).data || []).length;
+    out.push({ exp: e, click, series: ser.length,
+      legend: Object.keys((o.legend[0] || {}).selected || {}).length,
+      quotes: Desk.rowsOf(c.spec, e).length, mids: len('mid'), bars: len('bid–ask'),
+      plotW: ch.getWidth() - g.left - g.right,
+      status: document.getElementById('slices-status').textContent,
+      current: [...document.querySelectorAll('tr[aria-current]')].map(r => r.dataset.exp) });
+  }
+  obs.disconnect();
+  return { out, ro };
+}"""
+
+
+def test_browser_an_expiry_switch_writes_six_nodes_in_its_click_and_draws_one_expiry(syn_browser):
+    """D3: an expiry click wrote aria-selected and tabindex on all 45 tabs, hid 45
+    bucket tables, rewrote the status line and the aria-current of 270 heatmap rows in
+    its own task (about 150 DOM mutations before the next paint), and the smile drew
+    17 series, the models toggled off among them. On the synthetic 45-expiry page each
+    click's task now writes at most 6 nodes (the old and new tab, the old and new
+    table); after the frame the status line names the expiry and only its rows are
+    aria-current. The smile draws at most 16 series with a legend map of at most 16
+    keys, every quote of the expiry, bid–ask caps only with 8 px a quote (7 points a
+    bar, else 3), and never changes size (no ResizeObserver entry over the 5 switches)."""
+    sb = syn_browser
+    ctx, page = _syn_page(sb, 45, 1440)
+    page.locator("#chart-slices").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-slices")
+    page.evaluate("Desk.quotesReady('chart-slices')")
+    first = page.evaluate("Desk.filters['chart-slices']")
+    book = _with_book(_raw_specs(sb["html"][45])["chart-slices"], sb["site"])["quotes"]["groups"]
+    by_n = sorted((len(g["mid"]), e) for e, g in book.items() if e != first)
+    picks = [by_n[0][1], by_n[-1][1], by_n[len(by_n) // 2][1], by_n[1][1], first]
+    r = page.evaluate(_SWITCH_WORK_JS, picks)
+    assert r["ro"] == 0, r["ro"]
+    caps = set()
+    for st in r["out"]:
+        assert len(st["click"]) <= 6, "; ".join(st["click"])
+        assert st["series"] <= 16, st
+        assert st["legend"] <= 16, st
+        assert st["mids"] == st["quotes"] == len(book[st["exp"]]["mid"]), st
+        cap = st["plotW"] >= 8 * st["quotes"]
+        caps.add(cap)
+        assert st["bars"] == (7 if cap else 3) * st["quotes"], st
+        assert re.match(rf"Expiry \d+ of \d+ · {st['exp']} · ", st["status"]), st
+        assert set(st["current"]) == {st["exp"]}, st
+    assert caps == {True, False}           # both kinds of expiry were drawn
+    ctx.close()
+
+
+def test_browser_the_quote_readout_is_written_only_when_the_quote_changes(syn_browser):
+    """D3: the tooltip rewrote the quote readout (an aria-live region) on every pointer
+    move over the smile, the same text each time. It is written when the nearest
+    quote changes: moving the pointer within one quote writes nothing."""
+    sb = syn_browser
+    ctx, page = _syn_page(sb, 45, 1440)
+    page.locator("#chart-slices").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-slices")
+    pos = page.evaluate(_SMILE_MIDDLE_QUOTE_JS, "chart-slices")
+    page.mouse.move(pos["x"], pos["y"])
+    page.wait_for_timeout(250)
+    page.evaluate("""() => { window.__ro = 0; new MutationObserver(r => { window.__ro += r.length; })
+      .observe(document.getElementById('chart-slices-readout'),
+               {subtree: true, childList: true, characterData: true}); }""")
+    for dx, dy in ((0.4, 0), (0, 3), (-0.4, -3)):
+        page.mouse.move(pos["x"] + dx, pos["y"] + dy)
+        page.wait_for_timeout(150)
+    assert page.locator("#chart-slices-readout").inner_text().startswith("K ")
+    assert page.evaluate("window.__ro") == 0
+    ctx.close()
+
+
+def test_browser_a_capped_grid_scrolls_its_own_rows_to_the_selected_expiry(syn_browser):
+    """D3: from 1181 px the 45-row IV and residual grids scroll inside their rows
+    (C1), so the row of an expiry picked on the smile's strip could sit out of view
+    in its grid. Once the page is idle each capped grid scrolls itself (its own
+    scrollTop, never the page) to show that row below its sticky head."""
+    sb = syn_browser
+    ctx, page = _syn_page(sb, 45, 1440)
+    tabs = _syn_tabs(sb, 45)
+    y0 = page.evaluate("scrollY")
+    for e in (tabs[-1], tabs[len(tabs) // 2], tabs[0]):
+        page.evaluate("(e) => document.querySelector("
+                      "`[data-chart-filter='chart-slices'] [data-value='${e}']`).click()", e)
+        page.wait_for_timeout(2500)
+        st = page.evaluate("""(e) => [...document.querySelectorAll('.heat-wrap.capped')]
+          .filter(w => w.offsetParent && w.scrollHeight > w.clientHeight + 1)
+          .map(w => { const tr = w.querySelector(`tr[data-exp="${e}"]`), a = w.getBoundingClientRect();
+            if (!tr) return null;
+            const r = tr.getBoundingClientRect(), head = w.querySelector('thead').getBoundingClientRect();
+            return { id: w.querySelector('table').id, top: r.top - head.bottom,
+                     bottom: a.bottom - r.bottom }; })
+          .filter(Boolean)""", e)
+        assert st, e
+        assert all(x["top"] >= -1 and x["bottom"] >= -1 for x in st), (e, st)
+    assert page.evaluate("scrollY") == y0
+    ctx.close()
+
+
+# each shown capped grid's row of expiry e (below the sticky head and above the
+# bottom when top and bottom are >= -1), polled for up to 5 s (the grids scroll when idle)
+_ROW_IN_GRID_JS = """(e) => new Promise(done => { const t0 = Date.now(); (function poll() {
+  const st = [...document.querySelectorAll('.heat-wrap.capped')]
+    .filter(w => w.offsetParent && w.scrollHeight > w.clientHeight + 1)
+    .map(w => { const tr = w.querySelector(`tr[data-exp="${e}"]`), a = w.getBoundingClientRect();
+      const r = tr.getBoundingClientRect(), head = w.querySelector('thead').getBoundingClientRect();
+      return { id: w.querySelector('table').id, top: r.top - head.bottom, bottom: a.bottom - r.bottom }; });
+  if ((st.length && st.every(x => x.top >= -1 && x.bottom >= -1)) || Date.now() - t0 > 5000) return done(st);
+  setTimeout(poll, 100); })(); })"""
+
+
+def test_browser_a_residual_grid_shown_by_its_tab_scrolls_to_the_selected_expiry(syn_browser):
+    """D3 review: below 1181 px the residual grids are tabs, and a grid on a hidden tab
+    could not be scrolled to the expiry picked meanwhile (a hidden row measures 0):
+    shown by its tab, it sat at its top with the selected row out of view. A grid
+    shown by its tab now scrolls itself to that row once the page is idle."""
+    sb = syn_browser
+    ctx, page = _syn_page(sb, 45, 1024)
+    e = _syn_tabs(sb, 45)[-3]
+    page.evaluate("(e) => document.querySelector("
+                  "`[data-chart-filter='chart-slices'] [data-value='${e}']`).click()", e)
+    page.wait_for_timeout(1500)
+    tabs = page.evaluate("""() => [...document.querySelectorAll('#residuals [role=tab]')]
+      .filter(t => t.getAttribute('aria-selected') !== 'true').map(t => t.getAttribute('aria-controls'))""")
+    assert tabs
+    for ctl in tabs:
+        page.click(f'#residuals [role=tab][aria-controls="{ctl}"]')
+        st = page.evaluate(_ROW_IN_GRID_JS, e)
+        assert st, ctl
+        assert all(x["top"] >= -1 and x["bottom"] >= -1 for x in st), (ctl, st)
+    ctx.close()
+
+
+def test_browser_a_focused_heat_cell_stays_in_view(syn_browser):
+    """D3 review: ']' (the next expiry) scrolled every capped grid to the new row, the
+    one holding the focus too, so a focused cell left the screen; and a cell focused
+    with ↑ stopped under the sticky column heads (19 of its 26 px hidden). A grid that
+    holds the focus on another row now stays where it is, and a capped grid keeps a
+    focused cell below its heads (scroll-padding-top)."""
+    sb = syn_browser
+    for width in (1440, 1024):
+        ctx, page = _syn_page(sb, 45, width)
+        page.locator("#iv-heatmap").scroll_into_view_if_needed()
+        page.evaluate("""() => { const t = document.getElementById('iv-heatmap');
+          [...t.tBodies[0].rows[1].cells].slice(1).find(x => x.className !== 'empty').focus(); }""")
+        top0 = page.evaluate("document.getElementById('iv-heatmap').parentElement.scrollTop")
+        page.keyboard.press("]")
+        page.wait_for_timeout(1500)
+        st = page.evaluate("""() => { const c = document.activeElement, w = c.closest('.heat-wrap');
+          const a = w.getBoundingClientRect(), r = c.getBoundingClientRect();
+          const h = w.querySelector('thead').getBoundingClientRect();
+          return { tag: c.tagName, top: w.scrollTop, under: h.bottom - r.top,
+                   below: r.bottom - a.bottom }; }""")
+        assert st["tag"] == "TD", (width, st)
+        assert st["top"] == top0, (width, st)
+        assert st["under"] <= 1, (width, st)
+        assert st["below"] <= 1, (width, st)
+        # down the grid, then back up a row at a time: the focused cell clears the heads
+        for _ in range(12):
+            page.keyboard.press("ArrowDown")
+        for _ in range(8):
+            page.keyboard.press("ArrowUp")
+            st = page.evaluate("""() => { const c = document.activeElement, w = c.closest('.heat-wrap');
+              const h = w.querySelector('thead').getBoundingClientRect();
+              return h.bottom - c.getBoundingClientRect().top; }""")
+            assert st <= 1, (width, st)
+        ctx.close()
 
 
 def test_browser_layout_is_stable_and_fits_at_desk_and_phone_widths(site_browser):
@@ -4486,15 +6154,69 @@ def test_stale_calibration_banner_names_its_cause_from_the_store(dash, synth):
     assert not any("No newer fit passed the quality gate" in c for c in causes)
 
 
+def _run_record(runs: Path, run_utc: str, slot: str, session: str, status: str, reason: str) -> None:
+    """A daily-job run record (scripts/cloud_refresh.py run_record, the fields the banner reads)."""
+    from datetime import UTC, datetime
+    t = datetime.fromisoformat(run_utc).astimezone(UTC)
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / f"run_{t:%Y%m%dT%H%M%SZ}_{slot}.json").write_text(json.dumps(
+        {"schema": "run_ledger/1", "run_utc": run_utc, "slot": slot, "complete": True,
+         "calibration": {"status": status, "reason": reason, "session": session, "chain": {}}}))
+
+
+def test_stale_banner_names_the_rejection_from_the_run_records(dash, synth):
+    """FUND_GRADE_PLAN 0.9 / VALIDATOR-15: with no later chain or fit stored (the
+    job stores neither for a rejected fit) the banner could only say the store
+    cannot tell a rejected fit from none. The daily job's run records
+    (data_store/runs) name the session the gate rejected, the slot and the
+    gate's reason; every expected string is built from the records written here."""
+    data, dates = synth["data"], synth["dates"]
+    cal_dir = data / "calibrations"
+    for p in cal_dir.glob("*.pkl"):
+        p.unlink()
+    old, mid, newer = (str(dates[i].date()) for i in (-11, -4, -3))
+    _write_cals(cal_dir, {f"joint_cal_{old}.pkl": _cal(old, 1.0)})
+    runs = data / "runs"
+    gate = "SPX IV RMSE above the gate's limit"
+    _run_record(runs, f"{mid}T23:30:00+00:00", "book", mid, "skipped", "no live two-sided quotes")
+    _run_record(runs, f"{newer}T23:30:00+00:00", "book", newer, "rejected", gate)
+    _run_record(runs, f"{newer}T23:59:00+00:00", "manual", newer, "skipped", "the book is another session's")
+    _run_record(runs, f"{newer}T22:07:00+00:00", "close", newer, "accepted", "ok")   # not a later failure
+    cause = dash.calibration_stale_cause(old)
+    assert cause == (f"The gate rejected {newer} (book): {gate} (3 runs after {old} tried a fit: "
+                     f"1 rejected, 2 skipped); the {old} fit is shown.")
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    b = re.search(r'data-stale="calibration"(.*?)</div>\s*</div>\s*</div>', html, re.DOTALL)
+    assert b
+    assert f"The gate rejected {newer} (book): {gate}" in _visible_text("<body>" + b.group(1))
+    # the Overview's staleness strip carries the same cause
+    assert f"The gate rejected {newer} (book)" in _visible_text(
+        dash.app.test_client().get("/").get_data(as_text=True))
+    (runs / "run_99999999T000000Z_book.json").write_text("{not json")       # skipped, not fatal
+    assert dash.calibration_stale_cause(old) == cause
+    for p in runs.glob("*.json"):
+        p.unlink()
+    _run_record(runs, f"{newer}T23:30:00+00:00", "book", newer, "skipped", "the session guard refused")
+    assert dash.calibration_stale_cause(old) == (
+        f"The book run did not fit {newer}: the session guard refused; the {old} fit is shown.")
+    for p in runs.glob("*.json"):
+        p.unlink()
+    assert dash.calibration_stale_cause(old).startswith(f"No SPX closing chain or fit after {old}")
+
+
 def test_stale_calibration_banner_on_the_shipped_store(dash, pages):
-    """The shipped store's cause is computed from its own chains and fits."""
+    """The shipped store's cause is computed from its own chains, fits and run
+    records (the bot commits a record of every run, a rejected fit's included)."""
     path, cal = dash.load_headline_calibration()
     session = dash._calibration_session(cal, path)
     cause = dash.calibration_stale_cause(session)
     assert session in cause
     later_chains = [f for f in (SHIPPED / "options").glob("spx_*.parquet") if f.stem[4:] > session]
     later_fits = [r for r in dash.scan_calibrations() if r["session"] and r["session"] > session]
-    if not later_chains and not later_fits:
+    from_runs = dash._run_record_cause(session, dash.load_run_records(SHIPPED))
+    if not later_fits and from_runs:
+        assert cause == from_runs
+    elif not later_chains and not later_fits:
         assert cause.startswith(f"No SPX closing chain or fit after {session} is stored.")
     if dash.load_page2()["calib_age"] >= dash.STALE_WARN_SESSIONS:
         assert cause in _visible_text(pages["/calibration"])
@@ -4551,6 +6273,416 @@ def test_m5_vx_futures_range_is_computed_from_the_gated_fits(dash, pages):
             f"through {last}).")
     row = re.search(r'<tr id="inv-m5">(.*?)</tr>', pages["/model-risk"], re.DOTALL).group(1)
     assert text in _visible_text("<body>" + re.sub(r"</?span[^>]*>", "", row))
+
+
+def _inventory_row(pages: dict, mid: str) -> str:
+    hit = re.search(rf'<tr id="inv-{mid.lower()}">(.*?)</tr>', pages["/model-risk"], re.DOTALL)
+    assert hit, mid
+    row = hit.group(1)
+    return " ".join(_visible_text("<body>" + re.sub(r"</?span[^>]*>", "", row)).split())
+
+
+def test_inventory_prose_states_no_fact_the_data_can_change(dash, pages):
+    """VALIDATOR-04, CODE-03, CIO-04, QUANT-05, CITSEC-13: model_inventory.json typed
+    'σ sits on its box ceiling in 2 of 5 fits' (six are stored), 'on its 2.0 cap in
+    the headline fit' (σ 1.833) and 'No entry committed yet' (a ledger entry is
+    committed), and the page printed them beside checks that said otherwise.
+    The literal prose now states no count over fits or sessions, no session date,
+    no parameter on a bound and no artifact that does not exist yet
+    (desk_inventory.STALE_PROSE): each such fact is a placeholder the page fills
+    from the artifacts, and every placeholder the JSON uses is one it fills."""
+    di = dash.desk_inventory
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())
+    used: set[str] = set()
+    for m in inv["models"]:
+        for field in di.PROSE_FIELDS:
+            text = m.get(field) or ""
+            assert di.stale_prose(text) == [], (m["id"], field, di.stale_prose(text))
+            used |= set(di.placeholders(text))
+        used |= set(di.placeholders(m.get("outputs_pending") or ""))
+    known = set(dash.inventory_values(dash.load_page3(), [], {}))
+    assert used <= known, sorted(used - known)
+    assert {"sigma_box", "greeks_sigma", "beta_later", "rough_h", "ledger_record"} <= used
+    tbl = re.search(r'id="inventory-table">(.*?)</table>', pages["/model-risk"], re.DOTALL).group(1)
+    assert not re.search(r"\{[a-z0-9_]+\}", tbl)
+
+
+def test_inventory_facts_are_the_artifacts(dash, pages):
+    """Each fact the inventory's placeholders fill is recomputed here from its
+    artifact (the gated pickles, diagnostics/summary.json, the Greeks surface's
+    provenance, the β chains, forecast_eval.json, the classifier and Quintic
+    pickles, the forward ledger files) and must be the rendered text, whichever
+    way the data fall."""
+    import pyarrow.parquet as pq
+
+    from joint_vol_calibration.backtest import run_backtest as rb
+    from joint_vol_calibration.config import HESTON_BOUNDS, ROUGH_HESTON_H_BOUNDS
+
+    def count(k: int, n: int, what: str) -> str:
+        if k == 0:
+            return f"no {what}" if n == 1 else f"none of the {n} {what}s"
+        if n == 1:
+            return f"the only {what}"
+        return f"all {n} {what}s" if k == n else f"{k} of {n} {what}s"
+
+    gated = []
+    for r in dash.scan_calibrations():
+        if r["legacy"] is False and r["ok"] and r["session"]:
+            with open(r["path"], "rb") as f:
+                gated.append((r["session"], pickle.load(f)))
+    gated.sort(key=lambda x: x[0])
+    n = len(gated)
+    assert n
+    m4 = _inventory_row(pages, "M4")
+    s_lo, s_hi = HESTON_BOUNDS["sigma"]
+    pinned = [(s, "ceiling" if c["params"]["sigma"] >= (s_lo + s_hi) / 2 else "floor") for s, c in gated
+              if "sigma" in (c.get("pinned_params") or [])]
+    for side in ("ceiling", "floor"):
+        on = [s for s, b in pinned if b == side]
+        if on:
+            what = count(len(on), n, "gate-passing fit")
+            assert f"σ sits on its box {side} in {what} ({', '.join(on)})" in m4
+        else:
+            assert f"box {side}" not in m4
+    if not pinned:
+        assert f"σ is inside its box in {count(n, n, 'gate-passing fit')}" in m4
+    w3 = [c["weights"]["w3"] for _, c in gated if (c.get("weights") or {}).get("w3") is not None]
+    if w3 and not any(w3):
+        assert f"the VIX-options leg has weight 0 in {count(len(w3), len(w3), 'gate-passing fit')}" in m4
+    elif w3:
+        what = count(sum(1 for w in w3 if w > 0), len(w3), "gate-passing fit")
+        assert f"the VIX-options leg is weighted in {what}" in m4
+    rows = json.loads((SHIPPED / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
+    prof = [r for r in rows if all(r.get(k) is not None for k in (
+        "sigma_free", "kappa_free", "sigma_free_oos", "sigma_cap2_oos", "sigma_free_loss_rel"))]
+    costliest = min(prof, key=lambda r: r["sigma_free_loss_rel"]) if prof else None
+    if costliest and costliest["sigma_free_loss_rel"] < -1e-6:
+        assert f"the {costliest['session']} fit moves" in m4
+        assert (f"to σ {costliest['sigma_free']:.2f}, κ {costliest['kappa_free']:.1f} "
+                "and its out-of-sample error "
+                f"from {costliest['sigma_cap2_oos']:.2f} to {costliest['sigma_free_oos']:.2f} vol pts") in m4
+    vv = [(r["vvix_model_cap2"], r["vvix_market"]) for r in rows
+          if r.get("vvix_model_cap2") is not None and r.get("vvix_market") is not None]
+    if vv:
+        mods, mkts = [a for a, _ in vv], [b for _, b in vv]
+        assert (f"(model {min(mods):.0f}–{max(mods):.0f} "
+                f"against ^VVIX {min(mkts):.0f}–{max(mkts):.0f})") in m4
+    # M6: the σ of the fit the Greeks surface was built from, and 'cap' only when σ is on it
+    meta = pq.read_schema(SHIPPED / "greeks" / "greeks_surface.parquet").metadata
+    prov = json.loads(meta[b"greeks_provenance"])
+    sig, (lo, hi) = float(prov["params"]["sigma"]), HESTON_BOUNDS["sigma"]
+    m6 = _inventory_row(pages, "M6")
+    assert f"{sig:.2f} in the {prov['as_of_date']} fit the surface is built from" in m6
+    assert ("cap" in m6) is (abs(sig - hi) <= 1e-4 * (hi - lo))
+    assert ("floor" in m6) is (abs(sig - lo) <= 1e-4 * (hi - lo))
+    # M7: every chain after β's estimation set
+    tab = rb.estimate_beta(include_live=False)
+    later = [(str(pd.Timestamp(r["session"]).date()), float(r["ratio"])) for r in tab.to_dict("records")
+             if str(r["status"]).startswith("out-of-sample") and pd.notna(r["ratio"])]
+    m7 = _inventory_row(pages, "M7")
+    for s, ratio in later:
+        assert f"{ratio:.2f} ({s})" in m7
+    assert ("holds no chain after the estimation set" in m7) is (not later)
+    assert "first later chain" not in m7
+    # M9: the PDV forecaster's rank on both losses
+    rank = json.loads((SHIPPED / "backtest" / "inference" / "forecast_eval.json").read_text())
+    rank = rank["backtest_window"]["rank"]
+    m9 = _inventory_row(pages, "M9")
+    for key, label in (("mse", "21-day MSE"), ("qlike", "QLIKE")):
+        assert f"{dash.ordinal(rank[key]['pdv'])} of {len(rank[key])} on {label}" in m9
+    # M11: the classifier's stored evaluation
+    ev = dash._load_pickle(SHIPPED / "signals" / "regime_classifier.pkl").metadata_["evaluation"]
+    m11 = _inventory_row(pages, "M11")
+    assert f"({ev['oos_acc'] * 100:.1f}% against {ev['persistence_acc'] * 100:.1f}% accuracy" in m11
+    assert ("Loses to" in m11) is (ev["oos_acc"] < ev["persistence_acc"])
+    # M13: the stored Quintic fit's own record
+    q = dash._load_pickle(max((SHIPPED / "calibrations").glob("quintic_cal_*.pkl")))
+    m13 = _inventory_row(pages, "M13")
+    assert ("Not converged" in m13) is (not q["success"])
+    if q["at_bound"].get("epsilon"):
+        assert f"ε on its {dash._fmt(q['params_dict']['epsilon'], 'g')} bound" in m13
+    # M15: rough Heston's H on its floor, and at ½ (Heston)
+    h_lo, h_hi = ROUGH_HESTON_H_BOUNDS
+    floor = [r["session"] for r in rows if r["joint_rough_H"] <= h_lo + 1e-6]
+    half = [r["session"] for r in rows if r["joint_rough_H"] >= h_hi - 1e-9]
+    m15 = _inventory_row(pages, "M15")
+    for s in floor:
+        assert s in m15.split("floor on ")[1].split(";")[0]
+    if half and len(rows) > 1:
+        assert f"{count(len(half), len(rows), 'diagnosed session')}: " in m15
+        assert all(s in m15 for s in half)
+    # M18: the ledger files, and no 'no entry' once one exists
+    files = sorted((SHIPPED / "forward").glob("ledger_*.json"))
+    m18 = _inventory_row(pages, "M18")
+    if files:
+        first, last = files[0].stem[len("ledger_"):], files[-1].stem[len("ledger_"):]
+        span = first if len(files) == 1 else f"{first} → {last}"
+        noun = "session" if len(files) == 1 else "sessions"
+        assert f"{len(files)} {noun} registered ({span}), its hash chain intact" in m18
+        assert "no entry" not in m18.lower()
+    else:
+        assert "No entry committed yet" in m18
+
+
+def test_short_end_sentence_names_the_box_only_when_sigma_is_on_it(dash):
+    """VALIDATOR-09: the #oos caption typed 'the short end is where a one-factor
+    model with σ on its box ceiling fails' under a fit with σ interior. The
+    sentence is now the fit's own worst expiry, and names the box only when σ
+    sits on it; both ways on synthetic rows."""
+    rows = [{"expiry": "2026-11-06", "T_days": 10.6, "rmse": 4.2},
+            {"expiry": "2026-12-18", "T_days": 52.6, "rmse": 1.7}]
+    interior = dash.short_end_sentence(rows, None)
+    assert interior == ("The worst expiry is 2026-11-06, 11 days out (4.20 vol pts): "
+                        "a one-factor model misses the short end.")
+    assert "box" not in interior
+    assert dash.short_end_sentence(rows, "upper").endswith(", here with σ on its box ceiling.")
+    assert dash.short_end_sentence(rows, "lower").endswith(", here with σ on its box floor.")
+    long_worst = [{**rows[0], "rmse": 1.0}, rows[1]]
+    assert dash.short_end_sentence(long_worst, "upper") == (
+        "The worst expiry is 2026-12-18, 53 days out (1.70 vol pts), not the short end (≤ 30 days).")
+    assert dash.short_end_sentence([], None) is None
+
+
+def test_oos_caption_matches_the_headline_fit(dash, pages):
+    """The rendered #oos caption against the headline pickle: 'box ceiling'
+    appears iff σ is pinned at the top of the production box, and the worst
+    expiry it names is the fit's own."""
+    from joint_vol_calibration.config import HESTON_BOUNDS
+
+    p2 = dash.load_page2()
+    with open(dash.DATA / "calibrations" / p2["calib_file"], "rb") as f:
+        cal = pickle.load(f)
+    lo, hi = HESTON_BOUNDS["sigma"]
+    on_ceiling = "sigma" in (cal.get("pinned_params") or []) and cal["params"]["sigma"] >= (lo + hi) / 2
+    oos = re.search(r'id="oos".*?</section>', pages["/calibration"], re.DOTALL)
+    assert oos
+    text = " ".join(_visible_text("<body>" + oos.group(0)).split())
+    assert ("box ceiling" in text) is on_ceiling
+    by_exp = (cal.get("oos") or {}).get("spx_oos_rmse_by_expiry") or {}
+    if by_exp:
+        worst = max(by_exp, key=lambda k: by_exp[k])
+        sentence = text.split("The worst expiry is ", 1)[1].split(". ", 1)[0]
+        assert sentence.startswith(worst)
+        assert f"({by_exp[worst]:.2f}" in sentence
+
+
+def test_bates_note_counts_the_stored_fits(dash, tmp_path):
+    """The ρ-at-bound banner typed 'The one Bates SVJ fit did not converge';
+    the note is now read from the stored bates_cal_<session>.pkl files."""
+    def fit(session, ok):
+        path = tmp_path / f"bates_cal_{session}.pkl"
+        with open(path, "wb") as f:
+            pickle.dump({"success": ok, "params": {}}, f)
+        return path
+    one = [fit("2026-03-24", False)]
+    assert dash.bates_fits_note(one) == ("The one stored Bates SVJ fit (2026-03-24) did not converge, "
+                                         "so it is not a result.")
+    two = [*one, fit("2026-10-26", False)]
+    assert dash.bates_fits_note(two) == ("None of the 2 stored Bates SVJ fits (2026-03-24, 2026-10-26) "
+                                         "converged, so none is a result.")
+    mixed = [*one, fit("2026-10-27", True)]
+    assert dash.bates_fits_note(mixed) == ("1 stored Bates SVJ fit converged (2026-10-27); "
+                                           "1 did not (2026-03-24).")
+    assert dash.bates_fits_note([]) == "No Bates SVJ fit is stored."
+    shipped = sorted((SHIPPED / "calibrations").glob("bates_cal_*.pkl"))
+    assert dash.load_page2()["bates_note"] == dash.bates_fits_note(shipped)
+
+
+def test_calibration_captions_name_the_config_boxes(dash, monkeypatch):
+    """The Calibration captions typed σ ≤ 2, σ ≤ 10, κ ≤ 60 and H ∈ [0.02, ½];
+    they now print joint_vol_calibration.config's values, so a changed box
+    cannot leave the prose behind."""
+    from joint_vol_calibration import config
+
+    monkeypatch.setattr(config, "SIGMA_PROFILE_CAPS", (1.0, 2.0, 11.0))
+    monkeypatch.setattr(config, "PROFILE_KAPPA_MAX", 61.0)
+    monkeypatch.setattr(config, "ROUGH_HESTON_H_BOUNDS", (0.03, 0.5))
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    text = " ".join(_visible_text(html).split())
+    assert "free-σ OOS refits it with σ ≤ 11 and κ ≤ 61" in text
+    if 'id="rough-verdict"' in html:
+        assert "plus H ∈ [0.03, ½]" in text
+    assert "σ ≤ 10 and κ ≤ 60" not in text
+    assert "[0.02, ½]" not in text
+
+
+def test_quintic_stop_reason_is_the_fits_own(dash, pages):
+    """'The Quintic optimiser stopped at its iteration limits' was typed for any
+    non-converged fit; the reason is now the stored fit's own messages."""
+    q = dash.load_page2().get("quintic")
+    if not q:
+        return
+    qcal = dash._load_pickle(SHIPPED / "calibrations" / q["file"])
+    text = " ".join(_visible_text(pages["/calibration"]).split())
+    conv = qcal.get("convergence") or {}
+    msgs = [m for m in (conv.get("de_message"), conv.get("polish_message")) if m]
+    if qcal.get("success"):
+        assert "The Quintic optimiser stopped" not in text
+    else:
+        reason = "iteration limit" if any("iteration" in str(m).lower() for m in msgs) else None
+        assert "The Quintic optimiser stopped without meeting its tolerance" in text
+        if reason:
+            assert f"tolerance ({reason})" in text
+    assert "iteration limits without" not in text
+
+
+def test_model_risk_links_the_validation_pack(pages):
+    """VALIDATOR-10: Model Risk named 'docs/model_validation/README.md §1' as
+    plain text and no page linked the validation pack; the page header links it."""
+    a = re.search(r'<a id="validation-pack-link" href="([^"]+)"', pages["/model-risk"])
+    assert a
+    assert a.group(1).endswith("/docs/model_validation/README.md")
+    assert (ROOT / "docs" / "model_validation" / "README.md").exists()
+    assert a.group(1).startswith("https://github.com/navnoorthapar/vol-system-dashboard/")
+
+
+def test_every_production_model_names_its_checks_or_why_it_has_none(dash, pages):
+    """VALIDATOR-12: 8 of 12 production-tier models had no monitoring check and
+    the page did not say so. Each production model now has a check, or an
+    explicit 'not monitored' reason the page prints (never both, so a reason
+    cannot outlive a new check); every limits key a check uses is in
+    MONITOR_LIMITS (the VX lag reused label_lag's)."""
+    d = dash.load_model_risk()
+    html = pages["/model-risk"]
+    by_model: dict[str, list[dict]] = {}
+    for c in d["monitors"]:
+        by_model.setdefault(c["model"], []).append(c)
+        assert not c.get("limits_key") or c["limits_key"] in dash.MONITOR_LIMITS, c["check"]
+    prod = [m for m in d["inventory"] if m["tier"] == "production"]
+    assert len(prod) >= 12
+    for m in prod:
+        checks = by_model.get(m["id"], [])
+        reason = (m.get("not_monitored") or "").strip()
+        assert bool(checks) != bool(reason), (m["id"], [c["check"] for c in checks], reason)
+        row = re.search(rf'<tr id="inv-{m["id"].lower()}">(.*?)</tr>', html, re.DOTALL)
+        assert row, m["id"]
+        cell = row.group(1)
+        if checks:
+            assert 'data-monitoring="checks"' in cell, m["id"]
+            for c in checks:
+                assert f'href="#{c["id"]}"' in cell, (m["id"], c["id"])
+        else:
+            text = " ".join(_visible_text("<body>" + cell).split())
+            assert 'data-monitoring="none"' in cell, m["id"]
+            assert "Not monitored per session: " in text, m["id"]
+    # the checks VALIDATOR-12 asked for: the surface's certificates, the ledger's chain, the rate reference
+    assert {"svi_certificate", "ledger_chain", "rate_reference"} <= {c["key"] for c in d["monitors"]}
+
+
+def test_new_model_risk_checks_read_their_artifacts(dash):
+    """M14, M18 and M19 checks, each from its artifact: the newest surface
+    report's SVI-cal certificate flag, the forward ledger files, the headline
+    pickle's rate reference."""
+    d = {c["key"]: c for c in dash.load_model_risk()["monitors"]}
+    surf = dash.artifacts.load_surface(dash.DATA)
+    cert = surf["surface"]["surfaces"]["svi_cal"]["arbitrage_free_certified"]
+    assert d["svi_certificate"]["model"] == "M14"
+    assert (d["svi_certificate"]["value"], d["svi_certificate"]["status"]) == (
+        ("yes", "ok") if cert else ("no", "breach"))
+    files = sorted((dash.DATA / "forward").glob("ledger_*.json"))
+    assert d["ledger_chain"]["model"] == "M18"
+    if files:
+        assert d["ledger_chain"]["value"] == f"yes, {dash.plural(len(files), 'session')}"
+        assert d["ledger_chain"]["status"] == "ok"
+    p2 = dash.load_page2()
+    with open(dash.DATA / "calibrations" / p2["calib_file"], "rb") as f:
+        kind = (pickle.load(f).get("rate_reference") or {}).get("kind")
+    assert d["rate_reference"]["model"] == "M19"
+    assert d["rate_reference"]["status"] == ("ok" if kind == "treasury_curve" else "watch")
+
+
+def test_rate_reference_note_reads_the_curve_age_limit_from_the_code(dash, monkeypatch):
+    """M19's note typed 'refused when older than 7 days'. The limit is the
+    default of rates.get_zero_curve (the calibrator does not override it), so a
+    changed default must change the page: here it is moved to 5."""
+    import inspect
+
+    from joint_vol_calibration.data import rates
+
+    default = inspect.signature(rates.get_zero_curve).parameters["max_age_days"].default
+    assert dash.curve_max_age_days() == default
+    moved, original = default - 2, rates.get_zero_curve
+
+    def patched(as_of, *, max_age_days=moved, same_day=True, root=None):
+        return original(as_of, max_age_days=max_age_days, same_day=same_day, root=root)
+    monkeypatch.setattr(rates, "get_zero_curve", patched)
+    d = {c["key"]: c for c in dash.load_model_risk()["monitors"]}
+    assert f"missing or older than {moved} days" in d["rate_reference"]["note"]
+    assert f"older than {default} days" not in d["rate_reference"]["note"]
+
+
+def test_by_design_breaches_are_apart_from_live_ones(dash, pages, monkeypatch):
+    """CIO-14: half the BREACH rows were permanent by design (the research
+    classifier below persistence, the VX futures table the daily job did not
+    refresh), which trains a reader to ignore red. A check of a research-tier
+    model, or one in BY_DESIGN_CHECKS, that is over its limit carries the status
+    'design' with its reason, listed after the live statuses; a production or
+    backtest model's breach stays a breach. The VX futures lag is a live check
+    again: the daily job stores each session's settlements (FUND_GRADE_PLAN 1.12)."""
+    assert "vx_lag" not in dash.BY_DESIGN_CHECKS
+    refresh = (ROOT / "scripts" / "cloud_refresh.py").read_text()
+    assert "vix_futures" in refresh
+    monkeypatch.setitem(dash.BY_DESIGN_CHECKS, "steady_check", "a reason that does not change")
+    rows = [{"model": "M4", "key": "oos_rmse", "status": "breach"},
+            {"model": "M11", "key": "classifier", "status": "breach"},
+            {"model": "M11", "key": "classifier", "status": "ok"},
+            {"model": "M5", "key": "steady_check", "status": "watch"},
+            {"model": "M5", "key": "vx_lag", "status": "watch"},
+            {"model": "M7", "key": "beta_drift", "status": "breach"}]
+    tiers = {"M4": "production", "M5": "production", "M7": "backtest", "M11": "research"}
+    out = dash.by_design(rows, tiers)
+    assert [r["status"] for r in out] == ["breach", "design", "ok", "design", "watch", "breach"]
+    assert out[1]["limit_status"] == "breach"
+    assert out[1]["by_design"] == dash.RESEARCH_BY_DESIGN
+    assert out[3]["by_design"] == "a reason that does not change"
+    assert "by_design" not in out[4]                             # the VX lag stays a live watch
+    assert rows[1]["status"] == "breach"                         # the input is not edited
+    # on the page: no research-tier model is a live watch or breach; each design row says why
+    d = dash.load_model_risk()
+    tier = {m["id"]: m["tier"] for m in d["inventory"]}
+    for c in d["monitors"]:
+        if tier.get(c["model"]) == "research":
+            assert c["status"] not in ("watch", "breach"), c["check"]
+    html = pages["/model-risk"]
+    designs = [c for c in d["monitors"] if c["status"] == "design"]
+    for c in designs:
+        row = re.search(rf'<tr id="{c["id"]}" data-status="design">(.*?)</tr>', html, re.DOTALL)
+        assert row, c["id"]
+        text = _html_unescape(" ".join(_visible_text("<body>" + row.group(1)).split()))
+        assert "BY DESIGN" in text
+        assert f"By design ({c['limit_status']} on its limits): {c['by_design']}." in text
+    if designs:
+        assert f"{len(designs)} by design" in _visible_text(html)
+
+
+def test_model_risk_badge_wraps_between_its_counts(pages):
+    """The status counts were one no-wrap span ('8 OK · 5 watch · 1 breach · 1
+    informational · 2 by design'), which scrolled Model Risk sideways at 320 px
+    once the by-design count joined it (a11y.mjs, letter-spacing stress). Each
+    count is its own no-wrap part, short enough for a phone, as the chain
+    badge's parts are."""
+    badge = re.search(r'<div class="page-badge"[^>]*>(.*?)</div>', pages["/model-risk"], re.DOTALL).group(1)
+    parts = [" ".join(_visible_text("<body>" + x).split())
+             for x in re.findall(r'<span class="nowrap"[^>]*>(.*?)</span>', badge, re.DOTALL)]
+    assert len(parts) >= 6, parts
+    assert all(len(x) <= 40 for x in parts), parts
+    text = " ".join(_visible_text("<body>" + badge).split())
+    assert re.search(r"\d+ OK · \d+ watch · \d+ breach · \d+ informational", text), text
+
+
+def test_dashboard_side_models_are_in_the_inventory():
+    """VALIDATOR-13: the dashboard's own models publish numbers (the density and
+    tail probabilities, the delta grid and constant maturity behind the ticker,
+    the realised-vol cone) and were missing from the inventory 'of every model
+    the system runs'. Each module is listed, with its limitations."""
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())
+    modules = {m["module"]: m for m in inv["models"]}
+    for mod in ("dashboard/desk_density.py", "dashboard/desk_surface.py", "dashboard/desk_cone.py"):
+        assert mod in modules, mod
+        m = modules[mod]
+        assert m["tier"] == "production"
+        assert len(m["limitations"]) > 80, mod
+        assert m["page"] == "/surface"
 
 
 def test_overview_first_result_names_the_surface_and_its_test(dash, pages):
@@ -4846,16 +6978,24 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     # works: the arbitrage-free surface on held-out strikes, the VIX replication, the gate
     path, cal = dash.load_headline_calibration()
     session = dash._calibration_session(cal, path)
-    sc = json.loads(_surface_file("scorecard.json").read_text())
+    # the surface item cites the headline fit's session (the surface and Heston on the
+    # same session's quotes) and names the newer session Surface shows, if there is one
+    sc = json.loads(_overview_surface_file(dash, "scorecard.json").read_text())
     svi = next(m for m in sc["models"] if m["model"] == "svi_cal")["metrics"]["out_of_sample"]
+    cited, newest = sc["session"], _surface_file("scorecard.json").parent.name
     assert (f"median {svi['median_abs_hs']:.2f} half-spreads from the mid, "
-            f"{svi['inside_spread_pct']:.1f}% inside") in works
+            f"{svi['inside_spread_pct']:.1f}% inside the bid–ask, on the held-out strikes of {cited}"
+            + (f", the headline fit’s session (Surface shows the newer {newest})." if cited != newest
+               else ".")) in _tight(works)
+    # the replication item cites the session Surface shows (it links to that page's
+    # #vix-replication; no Heston figure is paired with it)
     rep = json.loads(_surface_file("vix_replication.json").read_text())
     gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
     if gap is None:     # a session whose chain does not replicate the VIX: no replication line
         assert "index pts from the Cboe close" not in works
     else:
-        assert f"{dash.signed(gap, '.2f')} index pts from the Cboe close" in works
+        assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
+                f"{newest}") in _tight(works)
     rows = dash.scan_calibrations()
     n_legacy = sum(1 for r in rows if r["legacy"])
     assert f"{n_legacy:,} pre-C22 fit" in works
@@ -4895,24 +7035,39 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     assert all(t.split(": ", 1)[1].startswith(("not ", "not yet")) for t in text["→ Next · not done yet"])
 
 
-def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(pages):
+def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(dash, pages):
     """R3-T3: the Overview and Model Risk said the VIX was replicated 'by the
     Cboe rules' while Surface's 'Where the replication departs from Cboe' lists
     the departures (the rate, the quote time, the forward, PM lines for AM
     monthlies, ...). Both now say 'the Cboe formula, with N listed departures
-    (Surface)', N counted from that list on the rendered Surface page."""
+    (Surface)', N counted from that list on the rendered Surface page. The
+    Overview's item links to that page, so it cites the session Surface shows (the
+    newest surface session, with or without a fit; no Heston figure sits beside the
+    replication): with 2026-10-30 built without a fit it cited 2026-10-29's +0.28 and
+    6 departures beside a Surface page showing 2026-10-30's +1.32 and 3."""
     m = re.search(r"<summary>Where the replication departs from Cboe</summary>(.*?)</details>",
                   pages["/surface"], re.DOTALL)
     rep = json.loads(_surface_file("vix_replication.json").read_text())
+    shown = _surface_file("vix_replication.json").parent.name
+    works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
+    gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
+    if gap is not None:
+        assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
+                f"{shown}, by the Cboe formula") in _tight(works)
     if m is None:       # no replication on this session: no claim either way
         assert "listed departure" not in pages["/"] + pages["/model-risk"]
         return
     n = len(re.findall(r"<li>", m.group(1)))
     assert n > 0
-    assert n >= len(rep.get("deviations") or [])
+    # QUANT-02 / VALIDATOR-05: the departures are the artifact's deviations; its gap
+    # notes (strip coverage, model variance swaps, the attribution) are listed
+    # apart and not counted
+    assert n == len(rep.get("deviations") or [])
+    notes = re.search(r"<summary>Notes on the replication \(not departures\)</summary>(.*?)</details>",
+                      pages["/surface"], re.DOTALL)
+    assert (notes is not None) == bool(rep.get("gap_notes"))
     tail = f"with {n} listed departure{'' if n == 1 else 's'} (Surface)"
-    works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
-    if (rep["indices"].get("VIX") or {}).get("gap_vs_official") is not None:
+    if gap is not None:
         assert f"by the Cboe formula, {tail}." in works
     mr = _visible_text(pages["/model-risk"])
     assert f"Cboe VIX formula on the stored two-sided chain, {tail}; a gap points" in mr
@@ -4957,9 +7112,8 @@ def test_corrections_register_lists_every_finding(dash, pages):
     tbl = re.search(r'<table class="tbl dense cards" id="register-table">(.*?)</table>', html, re.DOTALL)
     assert tbl
     rows = re.findall(r'<tr data-status="(\w+)" data-tests="(\d+)">(.*?)</tr>', tbl.group(1), re.DOTALL)
-    assert len(rows) == len(fs) == 33
+    assert len(rows) == len(fs) >= 33
     assert [s for s, _, _ in rows] == [f["status"] for _, _, f in fs]
-    assert (sum(s == "fixed" for s, _, _ in rows), sum(s == "quantified" for s, _, _ in rows)) == (30, 3)
     gaps = [i for i, (_, n, _) in enumerate(rows) if n == "0"]
     assert gaps
     assert all("chip-breach\">gap</span>" in rows[i][2] for i in gaps)
@@ -4988,6 +7142,51 @@ def test_corrections_register_lists_every_finding(dash, pages):
     # the rounds are disclosures, the newest open; every finding stays in the page
     opened = re.findall(r'<details class="pm-details"( open)?>', html)
     assert opened == [""] * (len(reg["rounds"]) - 1) + [" open"]
+
+
+def test_the_newest_correction_round_renders_with_its_findings(dash, pages):
+    """VALIDATOR-11: the register stopped at C23 though later commits changed
+    published numbers and claims (the 95.0 idx pt 'executable arbitrage' tile,
+    the double-rounded fit tiles, the 'Cboe rules' claim, the smile-table
+    medians, the stale-cache render, the Yahoo-download labels). The newest
+    round renders on the page (title span, open postmortem, every finding in
+    the register with no bridge effect, its commits linked), in
+    docs/corrections.md and in the pack's findings log, and no page or doc
+    types the span of rounds."""
+    reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    last = reg["rounds"][-1]
+    assert last["id"] != "C23"
+    html = pages["/corrections"]
+    text = " ".join(_visible_text(html).split())
+    span = f"{reg['rounds'][0]['id']}–{last['id']}"
+    assert f"{span} corrections" in text
+    assert f'content="Corrections {span}' in html
+    for n, f in enumerate(last["findings"], 1):
+        assert f'id="{last["id"].lower()}-f{n}"' in html, f["id"]
+        assert not f.get("bridge_steps")                                        # no P&L change
+        assert not f.get("c23_bridge_steps")
+        assert f["commits"]
+        assert set(f["commits"]) <= set(last["commits"])
+    for c in last["commits"]:
+        assert f"/commit/{c}" in html, c
+    reg_rows = dash.findings_register(dash.load_corrections()["rounds"])
+    mine = [r for r in reg_rows if r["round"] == last["id"]]
+    assert [r["id"] for r in mine] == [f["id"] for f in last["findings"]]
+    assert all(r["pnl"] is None for r in mine)
+    doc = (ROOT / "docs" / "corrections.md").read_text()
+    pack = (ROOT / "docs" / "model_validation" / "README.md").read_text()
+    assert f"### {last['id']}" in doc
+    for f in last["findings"]:
+        assert f"| {f['id']} |" in pack
+    # the span of rounds is computed, never typed (C16–C22, the trials ledger's span, is fixed history)
+    typed = re.compile(r"C16[–-]C(?:2[3-9]|[3-9]\d)")
+    for path in ("dashboard/app.py", "dashboard/templates/corrections.html",
+                 "dashboard/templates/research.html", "README.md", "docs/README.md",
+                 "docs/model_validation/README.md", "docs/corrections.md"):
+        src = (ROOT / path).read_text()
+        if path == "docs/corrections.md":
+            src = src.split("<!-- BEGIN GENERATED")[0]
+        assert not typed.search(src), (path, typed.search(src).group(0))
 
 
 def test_browser_corrections_register_filters_links_and_height(site_browser):
@@ -5498,16 +7697,21 @@ def _cm_of(ds, s: dict) -> list[dict]:
     return ds.constant_maturity(ds.delta_grid(s["surface"], s["quotes"], s["vix"]))
 
 
-def test_surface_change_against_every_earlier_session_states_its_gap(dash, pages):
-    """P2.3: the headline's constant-maturity grid against each earlier stored
-    session (newest first, the newest selected), each table headed with the gap
-    in NYSE sessions (session_age) and its Δ cells the differences of the two
-    grids desk_surface computes from the artifacts."""
+def test_surface_change_against_the_compared_sessions_states_its_gap(dash, pages):
+    """P2.3: the headline's constant-maturity grid against each compared earlier
+    session (newest first, the newest selected; D2: the newest earlier one and the
+    newest at least each COMPARE_LAGS back), each table headed with the gap in NYSE
+    sessions (session_age) and its Δ cells the differences of the two grids
+    desk_surface computes from the artifacts."""
     ds = _desk_module()
     html = pages["/surface"]
     inputs = dash.artifacts.load_surface_desk_inputs(SHIPPED)
     head = _surface_file("surface.json").parent.name
-    earlier = sorted((s["session"] for s in inputs if s["session"] < head), reverse=True)
+    stored = sorted((s["session"] for s in inputs if s["session"] < head), reverse=True)
+    earlier = dash.compared_sessions(head, stored)
+    assert earlier[:1] == stored[:1]
+    assert set(earlier) <= set(stored)
+    assert len(earlier) <= len(dash.COMPARE_LAGS) + 1
     sec = re.search(r'id="surface-change".*?</section>', html, re.DOTALL).group(0)
     tabs = re.findall(r'role="tab" aria-selected="(true|false)" aria-controls="vs-([\d-]+)"', sec)
     assert [t for _, t in tabs] == earlier
@@ -5638,7 +7842,11 @@ def test_atm_term_forward_steps_and_a_calendar_flag_marker(dash, pages):
 def test_varswap_strip_marks_the_four_official_closes(dash, pages):
     html = pages["/surface"]
     spec = _spec(html, "chart-strip")
-    mk = [s for s in spec["series"] if s["name"].startswith("Cboe close (16:15 ET)")]
+    # the closes print at the session's cutoff as the record states it: 13:15 ET on an NYSE
+    # early close; 16:15 for a record written before it said
+    rec = json.loads(_surface_file("vix_replication.json").read_text()).get("cboe_close_ny")
+    hm = rec[11:16] if rec else "16:15"
+    mk = [s for s in spec["series"] if s["name"].startswith(f"Cboe close ({hm} ET)")]
     assert len(mk) == 1
     assert mk[0]["type"] == "scatter"
     assert mk[0].get("hollow") is True
@@ -5649,6 +7857,7 @@ def test_varswap_strip_marks_the_four_official_closes(dash, pages):
     legend = {it["name"] for it in spec["legend_items"]}
     assert {"Variance-swap vol (Cboe formula)", mk[0]["name"]} <= legend
     assert re.search(r'id="vix-markers">', html)
+    assert f"Hollow circles: the Cboe closes ({hm} ET" in _visible_text(html)
 
 
 
@@ -5717,8 +7926,12 @@ def test_vix_replication_prose_gives_the_gap_split_with_the_tables_signs(dash, p
     vix = json.loads((SHIPPED / "surface" / session / "vix_replication.json").read_text())
     head = re.search(r'<table[^>]*id="vix-terms-table".*?</thead>', html, re.DOTALL).group(0)
     assert "Missing-strike shortfall (replicated − full strip)" in _visible_text("<body>" + head)
-    prose = _visible_text("<body>" + re.search(r'<ul class="prose"[^>]*>.*?</ul>', html[html.index(
-        'id="vix-terms-table"'):], re.DOTALL).group(0))
+    # the replication's method lists under the terms table: its departures, then its
+    # notes (the gap attribution is a note, not a departure)
+    panel = html[html.index('id="vix-terms-table"'):]
+    panel = panel[:panel.index("</section>")] if "</section>" in panel else panel
+    prose = " ".join(_visible_text("<body>" + u) for u in
+                     re.findall(r'<ul class="prose"[^>]*>.*?</ul>', panel, re.DOTALL))
     assert "official − replicated" not in prose
     assert "official - replicated" not in prose
     row = {r[0]: r for r in _table_rows(html, "vix-terms-table")}.get("VIX")
@@ -5750,7 +7963,7 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
              "next": {"expiry": "2030-08-16", "days": 216.7291667}, "near_weight": 0.935, "gap": -0.10,
              "truncation": -0.01, "unexplained": -0.09, "far_wing": -0.40, "surface": "svi_cal",
              "surface_label": "SVI-cal"}]
-    html = str(macros.vix_terms(rows))
+    html = str(macros.vix_terms(rows, ["snapshot timing against the 16:15 ET print", "stale quotes"]))
     got = _table_rows(html, "vix-terms-table")
     assert got[0] == ["VIX9D", "—", "—", "—", "—"]
     assert got[1] == ["VIX", "28 / 49", "0.905", "−0.05", "−0.25"]
@@ -5761,6 +7974,12 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
     assert "The stored quotes beyond the surface’s fitted range price below that wing (VIX6M −0.40" in note
     assert "likely understates" not in note
     assert "None" not in note
+    # tier 0.5: the causes the unexplained part is named as coming from are the ones
+    # given (desk_surface.vix_unexplained_causes: the rate only where it is not Cboe's)
+    assert ("Unexplained: what the chain leaves of the gap (snapshot timing against the 16:15 ET "
+            "print or stale quotes; not measured).") in note
+    three = str(macros.vix_terms(rows, ["a", "b", "c"]))
+    assert "the gap (a, b or c; not measured)" in _visible_text("<body>" + three)
 
 def test_chain_badge_names_the_source_and_the_quote_time(dash):
     """P2.5: the badge is generic: a Yahoo snapshot says so and that it has no
@@ -5785,12 +8004,19 @@ def test_surface_and_calibration_badges_and_the_expiries_column_read_the_artifac
     sj = next(s["surface"] for s in inputs if s["session"] == head)
     others = [dash.session_expiries(s["surface"]) for s in inputs if s["session"] != head]
     want = dash.chain_badge(sj, others)
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
     for route in ("/surface", "/calibration"):
         badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', pages[route], re.DOTALL)
-        if route == "/calibration" and dash.load_page2().get("session") != head:
-            continue                       # the fit's own session's chain, when it has a surface report
         assert badge, route
         text = re.sub(r"\s+", " ", _visible_text("<body>" + badge.group(1))).strip()
+        if route == "/calibration":
+            # the chain the fit was made on, from the fit and its stored chain (its
+            # session's surface may be built from another book, a Cboe capture)
+            assert text.startswith("Chain: "), text
+            for part in _fit_chain_parts(SHIPPED, cal, fit):
+                assert part in text, (part, text)
+            continue
         assert text == want, route
         if sj["inputs"]["source"] == "yfinance" and not sj["inputs"].get("quote_time"):
             assert "Yahoo" in text
@@ -5979,7 +8205,8 @@ def test_surface_model_tiles_carry_their_range_over_every_stored_session(dash, p
     oos = dash.artifacts.surface_oos_by_session(SHIPPED)
     tiles = _kpi_blocks(html, "surface-scores")
     model_tiles = {k: v for k, v in tiles.items() if k.endswith("· median |z|")}
-    assert len(model_tiles) >= 4
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    assert sorted(model_tiles) == sorted(f"{dash.model_short(k)} · median |z|" for k in _scored(sc))
     score_rows = dash.load_surface()["score_rows"]
     for label, tile in model_tiles.items():
         key = next(r["key"] for r in score_rows if r["short"] + " · median |z|" == label)
@@ -6053,13 +8280,19 @@ def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_
     at one precision, wherever it is named."""
     _, cal = dash.load_headline_calibration()
     heston = dash._cal_losses(cal)["spx_oos_iv_rmse"]
-    sc = json.loads(_surface_file("scorecard.json").read_text())
-    svi_m = next(m for m in sc["models"] if m["model"] == "svi_cal")
-    svi = svi_m["metrics"]["out_of_sample"]["median_abs_hs"]
+
+    def svi_cal(path):
+        row = next(m for m in json.loads(path.read_text())["models"] if m["model"] == "svi_cal")
+        return row["metrics"]["out_of_sample"]["median_abs_hs"]
+    # the Overview cites the headline fit's session, Surface the newest (the same
+    # session unless the newest has no fit)
+    svi_ov = svi_cal(_overview_surface_file(dash, "scorecard.json"))
+    svi = svi_cal(_surface_file("scorecard.json"))
     for name, v, must, words in (
             ("Heston OOS RMSE", heston, ("/", "/calibration", "/model-risk"),
              ("RMSE", "out of sample", "Out of sample", "OOS")),
-            ("SVI-cal median |z|", svi, ("/", "/surface"), ("|z|", "half-spread"))):
+            ("SVI-cal median |z| (the Overview's session)", svi_ov, ("/",), ("|z|", "half-spread")),
+            ("SVI-cal median |z|", svi, ("/surface",), ("|z|", "half-spread"))):
         seen = {route: f for route, html in pages.items() if (f := _renderings_in_blocks(html, v, words))}
         assert set(must) <= set(seen), (name, seen)
         assert set().union(*seen.values()) == {f"{v:.2f}"}, (name, seen)
@@ -6068,14 +8301,17 @@ def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_
 def test_surface_history_heads_name_their_population(dash, pages):
     heads = _table_heads(pages["/surface"], "surface-history-table")
     models = [h for h in heads if "|z|" in h]
-    assert len(models) >= 4
+    oos = dash.artifacts.surface_oos_by_session(SHIPPED)
+    # every model a stored session scores keeps its column (a newest session without a
+    # Heston fit dropped Heston's column from every earlier session)
+    want = {x["model"] for x in oos}
+    assert sorted(models) == sorted(f"{dash.model_short(m)} |z|, out of sample" for m in want)
     assert all(h.endswith("|z|, out of sample") for h in models)
     assert "Scored quotes" in heads
     assert "Quotes" not in heads
     cap = re.search(r'id="surface-history-table"><caption>(.*?)</caption>', pages["/surface"], re.DOTALL)
     assert "out-of-sample quotes" in _html_unescape(cap.group(1))
     assert "all scored quotes" not in _html_unescape(cap.group(1))
-    oos = dash.artifacts.surface_oos_by_session(SHIPPED)
     rows = _table_rows(pages["/surface"], "surface-history-table")
     history_models = dash.load_surface()["history_models"]
     for r in rows:
@@ -6085,6 +8321,443 @@ def test_surface_history_heads_name_their_population(dash, pages):
                 v = next((x["median_abs_hs"] for x in oos
                           if x["session"] == r[0] and x["model"] == key), None)
                 assert cell == dash._fmt(v, ".2f"), (r[0], h)
+
+
+# ── a newest surface session without a Heston fit ─────────────────────────────
+
+def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
+    """The committed record as the bot leaves it after a session whose Heston fit was
+    skipped or rejected: every Friday so far (the Saturday book slot finds Yahoo's book
+    empty), and any session the gate rejects. Its surface is built from its book all
+    the same (tier 0.7 item 4), so the newest surface session has no stored fit: its
+    scorecard lists Heston as not scored, with the producer's reason and note, and its
+    residual table and index row hold no Heston rows; the headline fit is an earlier
+    session's. Made from the newest committed surface session by leaving out its Heston
+    rows and every fit on or after it (a newer fit whose surface build failed, which the
+    bot's fail-soft step allows, would otherwise be the headline), with the run record
+    the bot writes for a fit its gate rejected. Returns (data dir, that session)."""
+    from types import SimpleNamespace
+    from typing import Any
+
+    from joint_vol_calibration.surface import report, scorecard
+
+    data = tmp_path / "data_store"
+    data.mkdir()
+    newest = _surface_file("scorecard.json").parent.name
+    for child in SHIPPED.iterdir():
+        if child.name not in ("calibrations", "surface", "runs"):
+            (data / child.name).symlink_to(child)
+
+    def no_later_fit(c: Path) -> bool:
+        return not (c.name.startswith("joint_cal_") and c.stem[len("joint_cal_"):] >= newest)
+
+    def no_later_run(c: Path) -> bool:
+        # a real run record of the newest session (or later) would say something else
+        # happened to it than the rejection this view stands for
+        try:
+            rec = json.loads(c.read_text())
+        except (OSError, ValueError):
+            return True
+        s = str((rec.get("calibration") or {}).get("session") or "") if isinstance(rec, dict) else ""
+        return not s or s < newest
+    for sub, keep in (("calibrations", no_later_fit),
+                      ("surface", lambda c: c.name not in (newest, "index.json")),
+                      ("runs", no_later_run)):
+        (data / sub).mkdir()
+        for child in (SHIPPED / sub).iterdir() if (SHIPPED / sub).is_dir() else []:
+            if keep(child):
+                (data / sub / child.name).symlink_to(child)
+    # the run record of the fit the gate rejected (scripts/cloud_refresh.py run_record)
+    (data / "runs" / f"run_{newest.replace('-', '')}T235959Z_book.json").write_text(json.dumps({
+        "schema": "run_ledger/1", "run_utc": f"{newest}T23:59:59+00:00", "slot": "book",
+        "session": newest, "calibration": {"session": newest, "status": "rejected",
+                                           "reason": "kappa pinned at bound (kappa=0.10)"}}))
+    d = data / "surface" / newest
+    shutil.copytree(SHIPPED / "surface" / newest, d)
+    sc = json.loads((d / "scorecard.json").read_text())
+    gone = {m["model"] for m in sc["models"] if str(m["model"]).startswith("heston")}
+    ctx: Any = SimpleNamespace(sq=SimpleNamespace(session=newest), calibrations_dir=data / "calibrations")
+    why = scorecard.heston_v2_unavailable_reason(ctx)
+    note = report._heston_note(sc["models"])
+    sc["models"] = [{"model": m["model"], "available": False, "reason": why} if m["model"] in gone else m
+                    for m in sc["models"]]
+    sc["notes"] = [n.replace(note, report._heston_note(sc["models"])) for n in sc["notes"]]
+    for key in ("ranking_by_oos_median_abs_hs", "ranking_by_common_oos_median_abs_hs"):
+        sc[key] = [r for r in sc.get(key) or [] if r.get("model") not in gone]
+    sc["common_out_of_sample"]["models"] = [m for m in sc["common_out_of_sample"]["models"] if m not in gone]
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    res = pd.read_parquet(d / "residuals.parquet")
+    res[~res["model"].isin(gone)].reset_index(drop=True).to_parquet(d / "residuals.parquet", index=False)
+    idx = json.loads((SHIPPED / "surface" / "index.json").read_text())
+    for r in idx["sessions"]:
+        if r["session"] == newest:
+            r["models"] = {k: v for k, v in (r.get("models") or {}).items() if k not in gone}
+    (data / "surface" / "index.json").write_text(json.dumps(idx))
+    return data, newest
+
+
+@pytest.fixture(scope="module")
+def no_fit(dash, tmp_path_factory):
+    """The Overview, Surface and Calibration pages rendered from _no_fit_store, with
+    what they cite: the no-fit session, the headline fit's session and its data dir."""
+    data, newest = _no_fit_store(tmp_path_factory.mktemp("no_fit"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        path, cal = dash.load_headline_calibration()
+        out = {"data": data, "session": newest, "fit": dash._calibration_session(cal, path)}
+        client = dash.app.test_client()
+        for route in ("/", "/surface", "/calibration"):
+            r = client.get(route)
+            assert r.status_code == 200, route
+            out[route] = r.get_data(as_text=True)
+    return out
+
+
+def test_a_surface_session_without_a_fit_names_the_model_it_did_not_score(dash, no_fit):
+    """Tier 0.7 item 4 builds a session's surface whatever its Heston fit did, so after
+    a Friday (the Saturday slot finds Yahoo's book empty and skips the fit) or a
+    rejected fit the newest surface session has no Heston row. On a copy of the record
+    with 2026-10-30 built that way, the Surface badge listed three models and said
+    nothing of Heston. It now lists the scored models and names Heston as not scored,
+    linked to the scorecard, whose note gives the producer's reason; Heston has no tile."""
+    data, newest = no_fit["data"], no_fit["session"]
+    sc = json.loads((data / "surface" / newest / "scorecard.json").read_text())
+    scored, gone = _scored(sc), [m for m in sc["models"] if m.get("available") is False]
+    assert [m["model"] for m in gone] == ["heston_v2"]
+    html = no_fit["/surface"]
+    block = re.search(r'<div class="page-badge">(.*?)</div>', html, re.DOTALL).group(1)
+    badge = _visible_text("<body>" + block)
+    assert f"Session {newest}" in badge
+    assert re.search(r"models: ([^·]*)", badge).group(1).strip() == ", ".join(
+        dash.model_short(k) for k in pd.read_parquet(data / "surface" / newest / "residuals.parquet",
+                                                     columns=["model"])["model"].unique())
+    assert '<a href="#scorecard">Heston not scored on this session</a>' in block
+    assert dash.prose(gone[0]["reason"]) in _visible_text(html)
+    tiles = _kpi_blocks(html, "surface-scores")
+    assert sorted(k for k in tiles if k.endswith("· median |z|")) == sorted(
+        f"{dash.model_short(k)} · median |z|" for k in scored)
+
+
+def test_a_surface_session_without_a_fit_keeps_heston_in_the_history(dash, no_fit):
+    """The Surface history table took its model columns from the page session's
+    models, so a newest session without a Heston fit dropped Heston's column from
+    every earlier session as well. It keeps a column for every model a stored session
+    scores: a dash on the session without the fit, each earlier session's own figure,
+    and a note saying what the dash means."""
+    data, newest = no_fit["data"], no_fit["session"]
+    html = no_fit["/surface"]
+    heads = _table_heads(html, "surface-history-table")
+    assert "Heston |z|, out of sample" in heads
+    col = heads.index("Heston |z|, out of sample")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        oos = {(r["session"], r["model"]): r["median_abs_hs"]
+               for r in dash.artifacts.surface_oos_by_session(data)}
+    rows = {r[0]: r for r in _table_rows(html, "surface-history-table")}
+    assert rows[newest][col] == "—"
+    earlier = [s_ for s_ in rows if s_ != newest]
+    assert earlier
+    for s_ in earlier:
+        assert rows[s_][col] == dash._fmt(oos.get((s_, "heston_v2")), ".2f"), s_
+    note = re.search(r'id="surface-history".*?<p class="note">(.*?)</p>', html, re.DOTALL).group(1)
+    assert "A dash in a model’s column: the model is not scored on that session" in _html_unescape(note)
+
+
+def test_the_surface_history_gives_the_run_records_reason_for_a_session_without_a_fit(dash, no_fit):
+    """The history note said a dash's session's scorecard 'says why', but the scorecard
+    says only that no fit is stored ('rejected by its gate or not run'), and on a Friday
+    the fit is one session old, so no stale banner gives the reason either. The note now
+    reads the job's run records as the banner does: on the no-fit view, whose run record
+    says the gate rejected the newest session's fit, it names that session and the
+    recorded reason."""
+    data, newest = no_fit["data"], no_fit["session"]
+    rec = json.loads(next((data / "runs").glob(f"run_{newest.replace('-', '')}T*_book.json")).read_text())
+    why = rec["calibration"]["reason"].rstrip(".")
+    note = re.search(r'id="surface-history".*?<p class="note">(.*?)</p>', no_fit["/surface"], re.DOTALL)
+    text = _visible_text("<body>" + note.group(1))
+    assert "scorecard says why" not in text
+    lead = ("A dash in a model’s column: the model is not scored on that session. Where the job’s run "
+            "records say why Heston has none: ")
+    assert lead in text, text
+    # older sessions without a fit (every Friday's, from its Saturday record) may be
+    # named before it; the newest session's group is the rejection its record holds
+    said = text[text.index(lead) + len(lead):]
+    assert re.search(rf"(?:^|; )the gate rejected the fit of (?:\d{{4}}-\d\d-\d\d, )*{newest} — "
+                     rf"{re.escape(why)}(?:;|\.)", said), said
+    def run(s, status, why):
+        return {"calibration": {"session": s, "status": status, "reason": why}}
+    assert dash.unfitted_causes(["2026-10-30", "2026-11-02", "2026-11-06"], [
+        run("2026-10-30", "skipped", "no SPX option chain returned"),
+        run("2026-11-02", "rejected", "kappa pinned at bound."),
+        run("2026-11-02", "skipped", "a later slot"),
+        run("2026-11-06", "skipped", "no SPX option chain returned"),
+    ]) == ("the job did not fit 2026-10-30, 2026-11-06 — no SPX option chain returned; "
+           "the gate rejected the fit of 2026-11-02 — kappa pinned at bound")
+    assert dash.unfitted_causes(["2026-10-30"], []) == ""
+    # a later run that found the database a session behind names the older session too;
+    # the session's own run says why it has no fit
+    assert dash.unfitted_causes(["2026-10-30"], [
+        {"expected_session": "2026-10-30", **run("2026-10-30", "skipped", "no SPX option chain returned")},
+        {"expected_session": "2026-11-02", **run("2026-10-30", "skipped", "DB's latest session is stale")},
+    ]) == "the job did not fit 2026-10-30 — no SPX option chain returned"
+
+
+def test_the_inventory_says_what_a_scorecard_without_a_fit_holds(dash, no_fit):
+    """M14 said a session without a fit gets a scorecard that 'has no Heston row and
+    says why'. scorecard.json has the row, marked not available with the producer's
+    reason; it is the page's scorecard table that has none. The inventory now says so,
+    and both halves are checked on the no-fit view."""
+    data, newest = no_fit["data"], no_fit["session"]
+    sc = json.loads((data / "surface" / newest / "scorecard.json").read_text())
+    rows = [m for m in sc["models"] if str(m["model"]).startswith("heston")]
+    assert rows
+    assert all(m.get("available") is False and m.get("reason") for m in rows)
+    heads = [_visible_text("<body>" + r[0]) for r in re.findall(
+        r"<tr[^>]*>\s*<t[hd][^>]*>(.*?)</t[hd]>", re.search(
+            r'id="scorecard-table">(.*?)</table>', no_fit["/surface"], re.DOTALL).group(1), re.DOTALL)]
+    assert heads
+    assert not any("Heston" in h for h in heads), heads
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())["models"]
+    use = next(m["use"] for m in inv if m["id"] == "M14")
+    assert "has no Heston row and says why" not in use
+    assert ("its scorecard.json then marks Heston not available, with the producer's reason, and the "
+            "page's scorecard table has no Heston row") in use
+
+
+def test_the_overview_and_calibration_cite_the_fit_when_the_newest_surface_has_none(dash, no_fit):
+    """The rule for a newest surface session without a fit: the Overview's surface
+    item and key result cite the headline fit's session (so the surface and Heston are
+    scored on one session's quotes) and name the newer session Surface shows;
+    Calibration is about the headline fit: its smiles are its session's surface quotes
+    and its chain badge is the chain the fit was made on, read from the fit. On the copy
+    of the record with 2026-10-30 built without a fit, the Overview
+    printed 2026-10-29's SVI-cal median (1.74) with nothing to say it was not the
+    session Surface shows (1.56)."""
+    data, newest, fit = no_fit["data"], no_fit["session"], no_fit["fit"]
+    assert fit < newest
+    ov = no_fit["/"]
+    works = _tight(" ".join(_visible_text("<body>" + it) for it in _findings(ov)[0][2]))
+    cited = fit if (data / "surface" / fit / "scorecard.json").exists() else newest
+    svi = next(m for m in json.loads((data / "surface" / cited / "scorecard.json").read_text())["models"]
+               if m["model"] == "svi_cal")["metrics"]["out_of_sample"]
+    newer = f", the headline fit’s session (Surface shows the newer {newest})" if cited != newest else ""
+    assert (f"median {svi['median_abs_hs']:.2f} half-spreads from the mid, {svi['inside_spread_pct']:.1f}% "
+            f"inside the bid–ask, on the held-out strikes of {cited}{newer}.") in works
+    assert f"held-out quotes of {cited}{newer};" in _tight(_card(ov, "surface.html#scorecard"))
+    cal = no_fit["/calibration"]
+    smiles = [s_ for cid, s_ in _raw_specs(cal).items()
+              if cid.startswith("chart-smile-") and s_.get("quotes")]
+    fit_sj = data / "surface" / fit / "surface.json"
+    if fit_sj.exists():
+        sj = json.loads(fit_sj.read_text())
+        assert smiles
+        assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
+    else:
+        assert not smiles
+    # the badge names the chain the fit was made on, read from the fit, not its surface's book
+    badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', cal, re.DOTALL)
+    assert badge
+    text = _visible_text("<body>" + badge.group(1))
+    fit_cal = dash._load_pickle(data / "calibrations" / f"joint_cal_{fit}.pkl")
+    for part in _fit_chain_parts(data, fit_cal, fit):
+        assert part in text, (part, text)
+
+
+def test_the_overview_replication_item_cites_the_session_surface_shows(dash, no_fit):
+    """The Overview's 'VIX replicated from the stored chain' item links to Surface's
+    #vix-replication, which shows the newest surface session. It cited the headline
+    fit's session instead, so with the newest session built without a fit it read
+    '+1.32 index pts … on 2026-10-29, … with 6 listed departures (Surface)' beside a
+    Surface page showing 2026-11-02's +1.92 and 3 departures. No Heston figure is
+    paired with the replication, so the item now cites the session Surface shows:
+    its gap, its date, and N counted from the departures that page lists."""
+    data, newest = no_fit["data"], no_fit["session"]
+    rep = json.loads((data / "surface" / newest / "vix_replication.json").read_text())
+    gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
+    works = _tight(" ".join(_visible_text("<body>" + it) for it in _findings(no_fit["/"])[0][2]))
+    if gap is None:
+        assert "VIX replicated from the stored chain" not in works
+        return
+    m = re.search(r"<summary>Where the replication departs from Cboe</summary>(.*?)</details>",
+                  no_fit["/surface"], re.DOTALL)
+    n = len(re.findall(r"<li>", m.group(1))) if m else 0
+    tail = f", with {dash.plural(n, 'listed departure')} (Surface)" if n else ""
+    assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
+            f"{newest}, by the Cboe formula{tail}.") in works, works
+
+
+def _fit_chain_parts(data: Path, cal: dict, session: str) -> list[str]:
+    """What a page must say of the chain a joint fit was made on, read from the fit's
+    chain_diagnostics (vendor, quote or fetch time, where T runs from) and the stored
+    chain it was fitted on (options/spx_<session>.parquet): its rows, the quotes the
+    fit scored (its anchors and its out-of-sample quotes) and its listed expiries."""
+    diag = cal.get("chain_diagnostics") or {}
+    chain = pd.read_parquet(data / "options" / f"spx_{session}.parquet")
+    src = str(diag.get("source") or chain["source"].dropna().iloc[0]).lower()
+    when = str(diag.get("quote_time") or diag.get("fetched_at") or "")
+    stamp = f"{when[:10]} {when[11:16]} UTC"
+    scored = int(cal["n_spx_options"]) + int(cal["oos"]["n_spx_oos"])
+    parts = [f"{len(chain):,} rows → {scored:,} scored", f"{chain['expiry'].nunique()} expiries"]
+    if src not in ("yfinance", "yahoo"):
+        return [*parts, f"quotes at {stamp}"]
+    if not when:
+        return [*parts, "Yahoo Finance close snapshot", "no quote time"]
+    basis = str(diag.get("t_origin_basis") or "")
+    return [*parts, "Yahoo Finance download", f"fetched {stamp}", "Yahoo reports no quote times",
+            *(["T measured from the fetch"] if basis.startswith("quote_time") else
+              ["T from the 16:00 ET close"] if basis.startswith("session close") else [])]
+
+
+def _cboe_surface_store(tmp_path: Path, fit: str) -> Path:
+    """The committed record with the headline fit's session's surface built from a Cboe
+    book, as tier 0.7 builds it whenever that book passes the quote-state gates, while
+    the fit stays on the session's Yahoo download: surface.json names the book (vendor,
+    file, quote time, rows, scored quotes, expiries) and the scorecard's Heston row says
+    it was not scored on its fit's chain, as the producer writes them. The book's
+    record is made up for the view, different from the fit's chain in every figure."""
+    data = tmp_path / "data_store"
+    data.mkdir()
+    for child in SHIPPED.iterdir():
+        if child.name != "surface":
+            (data / child.name).symlink_to(child)
+    (data / "surface").mkdir()
+    for child in (SHIPPED / "surface").iterdir():
+        if child.name != fit:
+            (data / "surface" / child.name).symlink_to(child)
+    d = data / "surface" / fit
+    shutil.copytree(SHIPPED / "surface" / fit, d)
+    sj = json.loads((d / "surface.json").read_text())
+    stamp = f"{fit}T23:49:50Z"
+    book = {"source": "cboe", "quote_time": stamp, "fetched_at": stamp, "book_state": "closing",
+            "t_origin_basis": "session close 16:00 ET"}
+    sj["inputs"] = {**sj["inputs"], **book, "chain": f"data_store/options/cboe/spx_{fit}_234950Z.parquet",
+                    "chain_rows": 4 * int(sj["inputs"].get("chain_rows") or 1) + 7}
+    uni = sj["universe"]
+    sj["universe"] = {**uni, **book, "n_universe": 2 * int(uni.get("n_universe") or 1) + 3,
+                      "n_expiries": int(uni.get("n_expiries") or 1) + 28}
+    (d / "surface.json").write_text(json.dumps(sj))
+    sc = json.loads((d / "scorecard.json").read_text())
+    for m in sc["models"]:
+        if str(m["model"]).startswith("heston") and m.get("available") is not False:
+            m["fit"] = {**(m.get("fit") or {}), "fit_chain_source": "yahoo", "scored_on_fit_chain": False}
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    return data
+
+
+@pytest.fixture(scope="module")
+def cboe_surface(dash, tmp_path_factory):
+    """The Overview, Calibration and Model Risk pages rendered from _cboe_surface_store,
+    with the fit, its session and the data dir."""
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
+    if not (SHIPPED / "surface" / fit / "surface.json").exists():
+        pytest.skip(f"no surface is stored for the headline fit's session {fit}")
+    data = _cboe_surface_store(tmp_path_factory.mktemp("cboe_surface"), fit)
+    out = {"data": data, "fit": fit, "cal": cal}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        out["newest"] = dash.artifacts.surface_sessions(data)[-1]
+        client = dash.app.test_client()
+        for route in ("/", "/calibration", "/model-risk"):
+            r = client.get(route)
+            assert r.status_code == 200, route
+            out[route] = r.get_data(as_text=True)
+    return out
+
+
+def test_calibration_says_same_chain_when_the_surface_is_built_on_the_fits_chain(dash, tmp_path):
+    """The other side of naming the fit's chain: when the fit's session's surface was
+    built on the chain the fit was made on (every committed session before tier 0.7's
+    rebuilds, and any session whose Cboe book fails the quote-state gates), there is no
+    note naming another book beside the smiles, and the out-of-sample note says the
+    half-spreads are 'on the same chain', linking the Surface scorecard when that
+    session is the one Surface shows, else its row of the Surface history. A check of
+    the fix made same_chain always false and the page then said the 2026-10-29 surface
+    was 'not the Yahoo Finance download the fit was made on' with every test passing."""
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
+    if not (SHIPPED / "surface" / fit / "surface.json").exists():
+        pytest.skip(f"no surface is stored for the headline fit's session {fit}")
+    own = dash.fit_chain_record(cal, fit)
+    assert own
+    assert (own.get("inputs") or {}).get("chain"), own
+    data = tmp_path / "data_store"
+    data.mkdir()
+    for child in SHIPPED.iterdir():
+        if child.name != "surface":
+            (data / child.name).symlink_to(child)
+    (data / "surface").mkdir()
+    for child in (SHIPPED / "surface").iterdir():
+        if child.name != fit:
+            (data / "surface" / child.name).symlink_to(child)
+    d = data / "surface" / fit
+    shutil.copytree(SHIPPED / "surface" / fit, d)
+    sj = json.loads((d / "surface.json").read_text())
+    sj["inputs"] = {**(sj.get("inputs") or {}), "chain": own["inputs"]["chain"]}      # the fit's own file
+    (d / "surface.json").write_text(json.dumps(sj))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        assert dash.same_chain(own, sj)
+        newest = dash.artifacts.surface_sessions(data)[-1]
+        html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    assert 'id="smile-book"' not in html
+    oos = _visible_text("<body>" + re.search(r'id="oos".*?<p class="note">(.*?)</p>', html,
+                                             re.DOTALL).group(1))
+    assert "In half-spreads on the same chain, see" in oos, oos
+    assert "not the chain fitted here" not in oos
+    where = "the Surface scorecard" if newest == fit else f"the {fit} row of the Surface history"
+    assert where in oos, oos
+
+
+def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(dash, cboe_surface):
+    """Since tier 0.7 a session's surface is built from its Cboe book while the bot
+    fits the session's Yahoo download. Calibration took the fit's chain from the
+    surface's surface.json, so on the 2026-10-29 fit with its surface rebuilt from the
+    Cboe book it said 'Chain: Cboe · quotes at 2026-10-30 08:36 UTC · 28,734 rows' and
+    'the fit's SPX chain is a Cboe book', of a fit made on a 6,422-row Yahoo download
+    fetched at 08:51. The badge and the VX caption now name the fit's own chain (its
+    chain_diagnostics and stored chain); the smiles, drawn from the surface's quotes,
+    name that book and say the fit was not made on it, and so do the half-spread
+    figures of Heston on the Overview and Model Risk."""
+    data, fit, cal = cboe_surface["data"], cboe_surface["fit"], cboe_surface["cal"]
+    sj = json.loads((data / "surface" / fit / "surface.json").read_text())
+    book = dash.chain_provenance(sj)
+    assert book["vendor"] == "cboe"
+    html = cboe_surface["/calibration"]
+    badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', html, re.DOTALL)
+    assert badge
+    text = _visible_text("<body>" + badge.group(1))
+    parts = _fit_chain_parts(data, cal, fit)
+    for part in parts:
+        assert part in text, (part, text)
+    assert "Cboe" not in text
+    assert book["time"] not in text
+    cap = _visible_text("<body>" + re.search(r'<p class="note" id="vx-caption">(.*?)</p>', html,
+                                             re.DOTALL).group(1))
+    fit_name = next(p for p in parts if p.startswith(("Yahoo", "quotes at")))
+    when = next(p for p in parts if p.startswith(("fetched", "quotes at")))
+    lead = fit_name if fit_name.startswith("Yahoo") else "Cboe book with"
+    assert f"the fit’s SPX chain is a {lead}" in cap, cap
+    assert when in cap
+    assert book["time"] not in cap
+    # the smiles are the surface's quotes: their footnote and a note name that book
+    smiles = [s_ for cid, s_ in _raw_specs(html).items()
+              if cid.startswith("chart-smile-") and s_.get("quotes")]
+    assert smiles
+    assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
+    note = _visible_text("<body>" + re.search(r'<p class="note" id="smile-book">(.*?)</p>', html,
+                                              re.DOTALL).group(1))
+    assert (f"These panels draw the {fit} surface’s quotes, a Cboe book with {book['time']}, not the "
+            f"{fit_name} the fit was made on.") in note
+    oos = _visible_text("<body>" + re.search(r'id="oos".*?<p class="note">(.*?)</p>', html,
+                                             re.DOTALL).group(1))
+    assert "In half-spreads on the session’s Cboe quotes, not the chain fitted here, see" in oos
+    assert "on the same chain" not in oos
+    # Heston's half-spreads on that book, on the Overview (the fit's session) and Model Risk
+    clause = "the fit was made on the session’s Yahoo download, not on this book"
+    assert f"inside ({clause})." in _tight(_card(cboe_surface["/"], "surface.html#scorecard"))
+    mr = _visible_text(cboe_surface["/model-risk"])
+    assert (clause in mr) == (cboe_surface["newest"] == fit)
 
 
 # ── P2.7: no half-empty grid rows, no blank panel bottoms ────────────────────
@@ -6130,7 +8803,8 @@ _LAYOUT_JS = """([maxUnused, maxBlank, exempt]) => {
     if (!vis(p) || exempt.includes(p.id)) return;
     let last = -Infinity;
     p.querySelectorAll('.panel-body *').forEach(el => {
-      if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only') || shut(el)) return;
+      if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only') || shut(el)
+          || el.classList.contains('grow-col')) return;
       last = Math.max(last, el.getBoundingClientRect().bottom);
     });
     if (last !== -Infinity && p.getBoundingClientRect().bottom - last > maxBlank)
@@ -6148,7 +8822,9 @@ def test_browser_grid_rows_are_full_and_panels_end_with_their_content(site_brows
     have their own fixes in flight). The body of a closed <details> is not
     visible content: Chromium keeps a layout box for it, and counting it hid
     the blank below the replication panel's closed disclosure (135 px at 1440)
-    and the scenario grid's (111 px at 1920)."""
+    and the scenario grid's (111 px at 1920). Nor is a .grow-col box itself: it
+    stretches to its panel, so only what it holds is content (counting it hid a
+    440 px smile in a 1,446 px panel)."""
     ctx, page = _page(site_browser, width, 900)
     try:
         for name in ("index.html", "surface.html", "calibration.html", "risk.html", "research.html",
@@ -6207,7 +8883,9 @@ def test_vx_leg_is_each_fits_own_out_of_sample_score(dash, pages):
     settlements of its own session: the RMSE it prints is the fit's recorded
     losses.vx_futures_rmse_oos (to 1e-6), a fit with no settlements on its
     session gets the empty state and no futures series, and nothing is spliced
-    from an earlier session."""
+    from an earlier session. A fit that ran before its session's settlements
+    were stored (the daily job fills the table from its newest session) recorded
+    no score: its leg is drawn from them and the page says the fit recorded none."""
     d = dash.load_page2()
     views = {v["session"]: v for v in d["vx_leg"]["views"]}
     last = _vx_last()
@@ -6220,10 +8898,14 @@ def test_vx_leg_is_each_fits_own_out_of_sample_score(dash, pages):
         panel = html[a:min(i for i in (html.find('<div id="vx-', a + 10), html.find('id="vx-caption"', a))
                            if i > 0)]
         if v["leg"] is not None:
-            assert rec is not None, session
-            assert abs(v["leg"]["rmse"] - rec) <= 1e-6, session
             assert f'id="chart-vx-{session}"' in panel
-            assert f"RMSE {rec:.2f} index pts" in _html_unescape(panel)
+            text = _html_unescape(re.sub(r"<[^>]+>", "", panel))
+            assert f"RMSE {v['leg']['rmse']:.2f} index pts" in text, session
+            if rec is not None:
+                assert abs(v["leg"]["rmse"] - rec) <= 1e-6, session
+                assert "Equal to the fit’s recorded out-of-sample VX RMSE" in text, session
+            else:
+                assert "The fit recorded no VX score." in text, session
         else:
             assert f"chart-vx-{session}" not in html, session
             assert v["empty"] in _html_unescape(re.sub(r"</?span[^>]*>", "", panel))
@@ -6246,20 +8928,275 @@ def test_gated_fits_table_has_the_vx_out_of_sample_column(dash, pages):
     assert got == want
 
 
-def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
-    """P3.1: a Model Risk check on the VX futures table's lag behind the market
-    DB, in NYSE sessions, with the existing label-lag limits (no new threshold)."""
-    d = dash.load_model_risk()
-    row = next(m for m in d["monitors"]
-               if m["check"] == "VX futures table lag behind the market DB (NYSE sessions)")
+def _newest_session() -> str:
+    """The newest session the site has data for: the later of the market database's
+    newest close and the newest rule label (the reference of every age on the site)."""
     with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         db_date = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0][:10]
-    lag = dash.session_age(_vx_last(), db_date)
+    rl = pd.read_parquet(SHIPPED / "signals" / "regime_labels.parquet", columns=["regime"])["regime"].dropna()
+    return max(db_date, str(pd.Timestamp(rl.index[-1]).date()))
+
+
+def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
+    """P3.1: a Model Risk check on the VX futures table's lag behind the newest
+    session, in NYSE sessions, with limits of its own (VALIDATOR-12: it reused
+    label_lag's), equal to label_lag's. The daily job stores each session's
+    settlements, so a lag over them is a live watch or breach, not by design."""
+    d = dash.load_model_risk()
+    row = next(m for m in d["monitors"]
+               if m["check"] == "VX futures table lag behind the newest session (NYSE sessions)")
+    lag = dash.session_age(_vx_last(), _newest_session())
     assert row["model"] == "M5"
     assert row["value"] == str(lag)
-    assert row["status"] == dash._rag(float(lag), dash.MONITOR_LIMITS["label_lag"])
+    assert dash.MONITOR_LIMITS["vx_lag"] == dash.MONITOR_LIMITS["label_lag"]
+    by_limits = dash._rag(float(lag), dash.MONITOR_LIMITS["vx_lag"])
+    assert row["status"] == by_limits
     assert row["limits"] == "OK ≤ 0 · watch ≤ 1 · breach above"
-    assert "VX futures table lag behind the market DB" in _html_unescape(pages["/model-risk"])
+    assert "VX futures table lag behind the newest session" in _html_unescape(pages["/model-risk"])
+
+
+def _write_vx_table(path: Path, sessions: list[str], expiries: tuple[str, ...], seed: int = 5) -> None:
+    """vix_futures_daily (the data layer's DDL) with one monthly row per (session,
+    contract still trading on it), settlements at Cboe's 4 dp."""
+    rng = np.random.default_rng(seed)
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE IF NOT EXISTS vix_futures_daily (date TEXT NOT NULL, "
+                "expiry_date TEXT NOT NULL, expiry_month TEXT NOT NULL, symbol TEXT, "
+                "is_weekly INTEGER NOT NULL DEFAULT 0, open REAL, "
+                "high REAL, low REAL, close REAL, settle REAL, volume INTEGER, open_interest INTEGER, "
+                "days_to_expiry INTEGER, source TEXT, PRIMARY KEY (date, expiry_date))")
+    rows = []
+    for s in sessions:
+        level = 15.0 + float(rng.normal(0.0, 0.5))
+        for i, e in enumerate(expiries):
+            days = (pd.Timestamp(e) - pd.Timestamp(s)).days
+            if days <= 0:
+                continue
+            px = round(level + 0.6 * i + float(rng.normal(0.0, 0.05)), 4)
+            rows.append((s, e, e[:7], None, 0, None, None, None, None, px, None, None, days, "cboe"))
+    con.executemany("INSERT INTO vix_futures_daily VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    con.commit()
+    con.close()
+
+
+# the 2024 VX monthly final settlement dates (Cboe; June moved to Tuesday by Juneteenth)
+VX_EXPIRIES_2024 = ("2024-06-18", "2024-07-17", "2024-08-21", "2024-09-18", "2024-10-16", "2024-11-20",
+                    "2024-12-18")
+
+
+def test_vx_lag_is_one_number_on_every_page_when_labels_lead_the_db(dash, synth):
+    """CODE-10 / VALIDATOR-18: the Overview's VX age was counted to the later of the
+    market DB's close and the rule labels' date and called 'the market
+    database's', while Model Risk M5 counted to the DB's own close: 12 and 11 on
+    one build. With the labels one session ahead of the DB, the Overview, M5 and
+    the footer's freshness table give one age (to the newest session, the rule
+    labels' date here), and the Overview names that date for what it is."""
+    data, dates = synth["data"], synth["dates"]
+    extra = _sessions(dash, str((dates[-1] + pd.Timedelta(days=1)).date()),
+                      str((dates[-1] + pd.Timedelta(days=10)).date()))[0]
+    _write_labels(data / "signals" / "regime_labels.parquet", dates.append(pd.DatetimeIndex([extra])))
+    db_date, lab_date = str(dates[-1].date()), str(pd.Timestamp(extra).date())
+    vx_last = str(dates[-4].date())
+    _write_vx_table(data / "vol_system.db", [str(d.date()) for d in dates[-30:-3]], VX_EXPIRIES_2024)
+    age = dash.session_age(vx_last, lab_date)
+    assert age == dash.session_age(vx_last, db_date) + 1            # the case the two definitions split
+    ov = dash.load_overview()["vx_curve"]
+    assert (ov["date"], ov["age"], ov["ref"]) == (vx_last, age, lab_date)
+    m5 = next(m for m in dash.load_model_risk()["monitors"] if m["key"] == "vx_lag")
+    assert m5["value"] == str(age)
+    assert f"newest session {lab_date}" in m5["note"]
+    assert f"market database ends {db_date}" in m5["note"]
+    foot = next(s for s in dash.load_chrome()["sources"] if s["short"] == "VX")
+    assert (foot["date"], foot["age"]) == (vx_last, age)
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-curve-age">(.*?)</p>',
+                                                            html, re.DOTALL).group(1)))
+    assert f"{age} NYSE sessions before the newest session, {lab_date}" in line
+    assert f"market database ends {db_date}" in line
+    assert f"market database’s {lab_date}" not in line
+
+
+def _vx_table_rows(html: str) -> list[list[str]]:
+    """The cells of the Overview VX curve's data table, row by row (tags stripped)."""
+    tbl = re.search(r'id="chart-vx-curve-data">.*?<tbody>(.*?)</tbody>', html, re.DOTALL)
+    assert tbl is not None
+    return [[_html_unescape(re.sub(r"<[^>]+>", "", c))
+             for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.DOTALL)]
+            for tr in re.findall(r"<tr>(.*?)</tr>", tbl.group(1), re.DOTALL)]
+
+
+def test_vx_curve_leaves_out_contracts_settled_by_the_newest_session(dash, synth):
+    """CIO-15: the Overview's VX curve led with the 2026-10 contract on a page whose
+    newest session was 2026-10-27, after that contract's final settlement
+    (2026-10-21). Read on the newest session, the curve, its table and M1 → M2
+    leave out every contract settled on or before it, and the panel names them."""
+    dates = synth["dates"]
+    newest = str(dates[-1].date())
+    vx_sessions = [str(d.date()) for d in dates[-40:-12]]
+    vx_last = vx_sessions[-1]
+    _write_vx_table(synth["data"] / "vol_system.db", vx_sessions, VX_EXPIRIES_2024)
+    gone = [e for e in VX_EXPIRIES_2024 if vx_last < e <= newest]
+    assert gone                          # the case: a contract trading on the table's date has settled since
+    with sqlite3.connect(synth["data"] / "vol_system.db") as con:
+        live = con.execute("SELECT expiry_date, settle FROM vix_futures_daily WHERE date = ? "
+                           "AND expiry_date > ? ORDER BY expiry_date", (vx_last, newest)).fetchall()
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    spec = _spec(html, "chart-vx-curve")
+    assert spec["x"]["categories"] == [e for e, _ in live]
+    assert spec["series"][0]["data"] == pytest.approx([p for _, p in live])
+    assert [r[1] for r in _vx_table_rows(html)] == [e for e, _ in live]
+    m1m2 = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-m1m2">(.*?)</p>', html,
+                                                            re.DOTALL).group(1)))
+    assert m1m2.startswith(f"M1 → M2 {_signed2((live[1][1] / live[0][1] - 1) * 100)}%")
+    note = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-settled">(.*?)</p>', html,
+                                                           re.DOTALL).group(1)))
+    assert note == ("Left out: " + " and ".join(f"{e[:7]} (final settlement {e})" for e in gone)
+                    + f", settled by {newest}; M1 is the first contract still trading on it.")
+    assert f"{len(live)} monthly contracts on {vx_last} still trading on {newest}" in spec["describe"]
+
+
+def _dec(cell: str) -> Decimal:
+    return Decimal(cell.replace("−", "-").replace("+", ""))
+
+
+def _assert_vx_changes_add_up(html: str, con: sqlite3.Connection) -> int:
+    """Every row of the VX curve's data table prints its two stored settlements to
+    the four decimals Cboe publishes, and its change equals the difference of the
+    two printed values exactly. Returns the number of rows with a change."""
+    caption = re.search(r'id="chart-vx-curve-data">.*?<caption>VX monthly settlements, ([\d-]+) and ([\d-]+)'
+                        r"</caption>", html, re.DOTALL)
+    assert caption is not None
+    last, prev = caption.groups()
+    n = 0
+    for month, expiry, _days, new, old, chg in _vx_table_rows(html):
+        want = dict(con.execute("SELECT date, COALESCE(settle, close) FROM vix_futures_daily "
+                                "WHERE expiry_date = ? AND date IN (?, ?)", (expiry, last, prev)).fetchall())
+        assert _dec(new) == Decimal(f"{want[last]:.4f}"), (expiry, new)
+        assert _dec(old) == Decimal(f"{want[prev]:.4f}"), (expiry, old)
+        assert _dec(chg) == _dec(new) - _dec(old), (month, new, old, chg)
+        n += 1
+    return n
+
+
+def test_vx_table_change_is_the_difference_of_the_printed_settlements(dash, synth):
+    """QUANT-11 / CODE-13: the VX table printed settlements to 2 dp and the change
+    from the unrounded 4-dp values, so 20.00 → 20.00 showed +0.01. Cboe publishes
+    the settlements to 4 dp: printed in full, each change is their exact difference."""
+    dates = synth["dates"]
+    _write_vx_table(synth["data"] / "vol_system.db", [str(d.date()) for d in dates[-12:]], VX_EXPIRIES_2024)
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    with sqlite3.connect(synth["data"] / "vol_system.db") as con:
+        assert _assert_vx_changes_add_up(html, con) >= 4
+    line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-m1m2">(.*?)</p>', html,
+                                                            re.DOTALL).group(1)))
+    m = re.match(r"M1 → M2 ([+−]\d+\.\d\d)% \((\d+\.\d{4}) → (\d+\.\d{4})\)", line)
+    assert m, line                     # M1 → M2 reproduces from the two settlements it prints
+    assert _signed2(float((Decimal(m.group(3)) / Decimal(m.group(2)) - 1) * 100)) == m.group(1)
+
+
+def test_record_db_renders_the_vx_settlements_the_bot_recorded(dash, synth):
+    """FUND_GRADE_PLAN 1.12: the bot records each session's VX settlements under
+    market/vix_futures_daily/ and never commits the cache. Rendering from the
+    record (app.record_db, as freeze_site and the bot do) puts the recorded
+    session's curve on the Overview, with its age counted from it."""
+    dates = synth["dates"]
+    data = synth["data"]
+    _write_vx_table(data / "vol_system.db", [str(d.date()) for d in dates[-30:-10]], VX_EXPIRIES_2024)
+    newest = str(dates[-1].date())
+    rows = _vx_curve_rows(newest, VX_EXPIRIES_2024)
+    part = data / "market" / "vix_futures_daily" / f"vix_futures_daily_{newest[:4]}.parquet"
+    part.parent.mkdir(parents=True)
+    rows.to_parquet(part, index=False)
+    assert dash.load_overview()["vx_curve"]["date"] == str(dates[-11].date())     # the cache alone
+    with dash.record_db() as counts:
+        assert counts["vix_futures_daily"] == len(rows)
+        ov = dash.load_overview()["vx_curve"]
+        html = dash.app.test_client().get("/").get_data(as_text=True)
+    assert (ov["date"], ov["age"]) == (newest, 0)
+    assert [r["settle"] for r in ov["rows"]] == pytest.approx(rows.loc[rows["expiry_date"] > newest,
+                                                                       "settle"].tolist())
+    line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-curve-age">(.*?)</p>',
+                                                            html, re.DOTALL).group(1)))
+    assert line == (f"Settlements of {newest}, the newest session; the daily job stores each session’s "
+                    "Cboe settlements after its close.")
+
+
+def _vx_basis_line(html: str) -> str:
+    m = re.search(r'<p class="note" id="vx-basis">(.*?)</p>', html, re.DOTALL)
+    assert m is not None, "no #vx-basis line"
+    return _html_unescape(re.sub(r"<[^>]+>", "", m.group(1)))
+
+
+def test_overview_vx_curve_and_basis_are_of_the_newest_session(dash, synth):
+    """FUND_GRADE_PLAN 1.12, item 3: with the futures table current, the Overview's
+    VX panel is of the newest session the site has data for (a session the table
+    holds beyond it is not drawn), with M1 → M2 and the front basis VX1 − VIX:
+    VX1's settlement less VIX's close of that session (2 dp, as Cboe prints it),
+    every number derived here from the tables."""
+    dates, data = synth["dates"], synth["data"]
+    newest = str(dates[-1].date())
+    ahead = str(pd.bdate_range(dates[-1] + pd.Timedelta(days=1), periods=1)[0].date())
+    _write_vx_table(data / "vol_system.db", [str(d.date()) for d in dates[-25:]] + [ahead], VX_EXPIRIES_2024)
+    with sqlite3.connect(data / "vol_system.db") as con:
+        live = con.execute("SELECT expiry_date, settle, days_to_expiry FROM vix_futures_daily WHERE date = ? "
+                           "AND expiry_date > ? AND is_weekly = 0 ORDER BY expiry_date",
+                           (newest, newest)).fetchall()
+        vix = round(con.execute("SELECT close FROM vix_daily WHERE date = ?", (newest,)).fetchone()[0], 2)
+    ov = dash.load_overview()["vx_curve"]
+    assert (ov["date"], ov["age"], ov["cut"]) == (newest, 0, newest)
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    assert _spec(html, "chart-vx-curve")["x"]["categories"] == [e for e, _, _ in live]
+    m1m2 = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-m1m2">(.*?)</p>', html,
+                                                            re.DOTALL).group(1)))
+    assert m1m2.startswith(f"M1 → M2 {_signed2((live[1][1] / live[0][1] - 1) * 100)}% "
+                           f"({live[0][1]:.4f} → {live[1][1]:.4f})")
+    exp, settle, days = live[0]
+    assert _vx_basis_line(html) == (
+        f"VX1 − VIX {_signed2(settle - vix)} index pts ({settle:.4f} − {vix:.2f}): the front contract’s "
+        f"settlement (15:00 Chicago time) less VIX’s 16:15 ET close, both of {newest}; positive: the "
+        f"future prices VIX above its spot level. VX1 settles on VIX’s special opening quotation of "
+        f"{exp}, {days} calendar days later.")
+    assert unit_lint(html) == []          # an index-point difference says so (house style, P1.6)
+
+
+def test_overview_vx_basis_waits_for_a_current_futures_table(dash, synth):
+    """A curve older than the newest session gets no basis: its VX1 (the first
+    contract still trading on the newest session) need not be its own front
+    month, and VIX has moved since. The panel says so and of which session the curve is."""
+    dates = synth["dates"]
+    vx_last = str(dates[-3].date())
+    _write_vx_table(synth["data"] / "vol_system.db", [str(d.date()) for d in dates[-20:-2]], VX_EXPIRIES_2024)
+    assert dash.load_overview()["vx_curve"]["basis"] is None
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    assert _vx_basis_line(html) == (f"VX1 − VIX is shown for a curve of the newest session; "
+                                    f"this one is of {vx_last}.")
+
+
+def test_overview_vx_basis_says_when_the_sessions_vix_close_is_missing(dash, synth):
+    """A current curve whose session has no VIX close in the market database gets
+    no basis from a nearby close: the panel says which close is missing."""
+    dates, data = synth["dates"], synth["data"]
+    newest = str(dates[-1].date())
+    _write_vx_table(data / "vol_system.db", [str(d.date()) for d in dates[-5:]], VX_EXPIRIES_2024)
+    with sqlite3.connect(data / "vol_system.db") as con:
+        assert con.execute("DELETE FROM vix_daily WHERE substr(date, 1, 10) = ?", (newest,)).rowcount == 1
+    assert dash.load_overview()["vx_curve"]["date"] == newest
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    assert _vx_basis_line(html) == f"VX1 − VIX: the market database has no VIX close of {newest}."
+
+
+def _vx_curve_rows(session: str, expiries: tuple[str, ...]) -> pd.DataFrame:
+    """One session's monthly VX rows as the bot records them (the settlement file:
+    symbol and settle, no OHLC), in contango at 4 dp."""
+    live = [e for e in expiries if e >= session]
+    return pd.DataFrame({"date": session, "expiry_date": live, "expiry_month": [e[:7] for e in live],
+                         "symbol": None, "is_weekly": 0, "open": np.nan, "high": np.nan, "low": np.nan,
+                         "close": np.nan,
+                         "settle": [round(16.0 + 0.55 * i + 0.0123, 4) for i in range(len(live))],
+                         "volume": pd.array([None] * len(live), dtype="Int64"),
+                         "open_interest": pd.array([None] * len(live), dtype="Int64"),
+                         "days_to_expiry": [(pd.Timestamp(e) - pd.Timestamp(session)).days for e in live],
+                         "source": "cboe_settlement"})
 
 
 def test_freshness_table_lists_vx_futures_on_their_own_date(dash, pages):
@@ -6454,7 +9391,7 @@ def test_browser_resolves_compact_specs_as_the_server_does(site_browser):
 
 # ── P3.3: Model Risk as an exceptions view ────────────────────────────────────
 
-_SEVERITY = ("breach", "watch", "ok", "info", "na")
+_SEVERITY = ("breach", "watch", "ok", "info", "design", "na")
 
 
 def _monitor_rows(html: str) -> list[tuple[str, str, str]]:
@@ -6577,7 +9514,7 @@ def test_model_risk_values_link_to_their_evidence_and_the_evidence_links_back(da
         chip = re.search(rf'<a class="chip chip-\w+ mon-link" href="model-risk.html#{rid}"([^>]*)>(.+?)</a>',
                          target)
         assert chip, (rid, page)
-        word = {"ok": "OK", "na": "N/A"}.get(st, st.upper())
+        word = {"ok": "OK", "na": "N/A", "design": "BY DESIGN"}.get(st, st.upper())
         short = dash.CHECK_SHORT[d[rid]["key"]]
         text = _html_unescape(re.sub(r"<[^>]+>", "", chip.group(2)))
         assert text == f"{d[rid]['model']} {short} · {word}", rid
@@ -6715,11 +9652,13 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     sessions is shown in the stale styling of that age, and the curve is not on
     the spot chart."""
     with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
-        last = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
+        # the table's newest session, but never one after the newest session the site has
+        last = con.execute("SELECT MAX(date) FROM vix_futures_daily WHERE date <= ?",
+                           (_newest_session(),)).fetchone()[0]
+        cut = max(last, _newest_session())     # CIO-15: only contracts still trading on the newest session
         px = [r[0] for r in con.execute(
             "SELECT COALESCE(settle, close) FROM vix_futures_daily WHERE date = ? AND expiry_date > ? "
-            "AND is_weekly = 0 AND days_to_expiry > 0 ORDER BY expiry_date", (last, last))]
-        db_last = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0][:10]
+            "AND is_weekly = 0 AND days_to_expiry > 0 ORDER BY expiry_date", (last, cut))]
     html = pages["/"]
     line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-m1m2">(.*?)</p>', html,
                                                             re.DOTALL).group(1)))
@@ -6728,13 +9667,26 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     spec = _spec(html, "chart-vx-curve")
     assert spec["series"][0]["name"] == f"{last} settlements"
     assert spec["series"][0]["data"] == pytest.approx(px)
-    age = dash.session_age(last, db_last)
+    age = dash.session_age(last, _newest_session())
     badge = re.search(r'<p class="note" id="vx-curve-age"><span class="age-(\w+)">(.*?)</span>;', html,
                       re.DOTALL)
     assert badge.group(1) == dash.stale_level(age)
-    assert f"{age} NYSE session" in _html_unescape(re.sub(r"<[^>]+>", "", badge.group(2)))
+    said = _html_unescape(re.sub(r"<[^>]+>", "", badge.group(2)))
+    if age:
+        assert f"{age} NYSE session" in said
+    else:                                            # a current table (the bot's close slot) names no count
+        assert said.startswith(f"Settlements of {last}, the newest session"), said
     ts = _spec(html, "chart-ts")
     assert not any("settlement" in s["name"] for s in ts["series"])
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
+        _assert_vx_changes_add_up(html, con)
+        vix = con.execute("SELECT close FROM vix_daily WHERE date = ?", (last,)).fetchone()
+    basis = _vx_basis_line(html)                     # VX1 − VIX: only on a curve of the newest session
+    if age:
+        assert basis == f"VX1 − VIX is shown for a curve of the newest session; this one is of {last}."
+    else:
+        assert basis.startswith(f"VX1 − VIX {_signed2(px[0] - round(vix[0], 2))} index pts "
+                                f"({px[0]:.4f} − {round(vix[0], 2):.2f})")
 
 
 def test_overview_vix_over_vix3m_share_and_percentile(dash, pages):
@@ -6951,8 +9903,16 @@ def _producer_delta(p) -> float:
     return float(norm.cdf(-p.k / np.sqrt(w) + np.sqrt(w) / 2)) - (1.0 if p.right == "P" else 0.0)
 
 
+def _smile_chain(dash, route: str) -> Path:
+    """The surface session directory a page's smiles are drawn from: Surface's the
+    newest surface session, Calibration's the headline fit's own session."""
+    if route == "/surface":
+        return _surface_file("surface.json").parent
+    return SHIPPED / "surface" / _fit_session(dash)
+
+
 def _smile_specs(pages) -> list[tuple[str, dict]]:
-    out = [("/surface", _raw_specs(pages["/surface"])["chart-slices"])]
+    out = [("/surface", _with_book(_raw_specs(pages["/surface"])["chart-slices"]))]
     cal = _raw_specs(pages["/calibration"])
     out += [("/calibration", s) for cid, s in cal.items()
             if cid.startswith("chart-smile-") and s.get("quotes")]
@@ -6966,11 +9926,11 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
     own spec, give residuals.parquet's strike (exactly), right, the producer's
     forward delta (1e-6) and each model's error_hs (±0.01), in_sample and
     inside_spread."""
-    res = pd.read_parquet(_surface_file("residuals.parquet"))
     specs = _smile_specs(pages)
     assert len(specs) >= 2, [r for r, _ in specs]
     n = 0
     for route, spec in specs:
+        res = pd.read_parquet(_smile_chain(dash, route) / "residuals.parquet")
         groups = spec["quotes"]["groups"]
         assert groups, route
         for e, g in groups.items():
@@ -6995,13 +9955,15 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
 
 def test_quote_inspector_footnote_names_the_chain_and_its_quote_time(dash, pages):
     """The tooltip's footnote is the chain's own source and quote time (surface.json),
-    'Yahoo close, no quote time' for a Yahoo snapshot without one."""
-    sj = json.loads(_surface_file("surface.json").read_text())
-    want = dash.quote_source_note(sj)
-    inp = sj.get("inputs") or {}
-    if str(inp.get("source")).lower() in ("yfinance", "yahoo") and not inp.get("quote_time"):
-        assert want == "Yahoo close, no quote time"
+    'Yahoo close, no quote time' for a Yahoo snapshot without one. Each smile's chain
+    is its page's: the newest surface session's on Surface, the headline fit's on
+    Calibration (a newer session without a fit has another book and quote time)."""
     for route, spec in _smile_specs(pages):
+        sj = json.loads((_smile_chain(dash, route) / "surface.json").read_text())
+        want = dash.quote_source_note(sj)
+        inp = sj.get("inputs") or {}
+        if str(inp.get("source")).lower() in ("yfinance", "yahoo") and not inp.get("quote_time"):
+            assert want == "Yahoo close, no quote time"
         assert spec["quotes"]["source"] == want, route
     assert dash.quote_source_note({"inputs": {"source": "cboe", "quote_time": "2026-10-16T15:45:00"}}) \
         == "Cboe, quotes at 2026-10-16 15:45:00"
@@ -7102,8 +10064,10 @@ def test_browser_quote_inspector_hover_keyboard_and_delta_axis(site_browser):
     assert page.evaluate("Desk.filters['chart-slices']") == exp
     assert "x=delta" in page.url
     assert q["k"] < 0 or q["x_delta"] > 0                       # (the quote exists on the delta axis too)
+    page.evaluate("Desk.quotesReady('chart-slices')")          # every expiry's quotes, from the data file
     csv = page.evaluate("Desk.specCsv(Desk.charts['chart-slices'].spec)")
-    assert len(csv.strip().split("\n")) == 1 + sum(len(g["mid"]) for g in spec["quotes"]["groups"].values())
+    book = _with_book(spec, sb["site"])["quotes"]["groups"]
+    assert len(csv.strip().split("\n")) == 1 + sum(len(g["mid"]) for g in book.values())
     ctx.close()
 
 
@@ -7153,39 +10117,40 @@ def test_browser_smile_axis_labels_clear_the_residual_strip_labels(site_browser)
 def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_only(site_browser):
     """P4.2: every expiry-tab click re-parsed the 250 KB smile spec and rebuilt all
     17 × 12 series (64–112 ms, 304–448 ms at 4× CPU). A switch now keeps the parsed
-    spec, draws the shown expiry's series only (a model toggled off carries no
-    data), keeps the forward line on a drawn series of that expiry, draws the strip's
-    clipped points as triangles and leaves no earlier expiry marked shown in the
-    legend. (The timing itself is the interact.mjs gate.)"""
+    spec and fills one dateless set of series (D2: the spec's template) with the
+    shown expiry's quotes, every quote of it (a model toggled off carries no data),
+    keeps the forward line on a drawn series and draws the strip's clipped points as
+    triangles. (The timing itself is the interact.mjs gate.)"""
     sb = site_browser
     html = (sb["site"] / "surface.html").read_text()
-    spec = _raw_specs(html)["chart-slices"]
+    spec = _with_book(_raw_specs(html)["chart-slices"], sb["site"])
     exps = list(spec["quotes"]["groups"])
     ctx, page = _page(sb)
     page.goto(sb["base"] + "surface.html", wait_until="load")
     page.locator("#chart-slices").scroll_into_view_if_needed()
     _wait_for_chart(page, "chart-slices")
+    page.evaluate("Desk.quotesReady('chart-slices')")
     page.evaluate("Desk.charts['chart-slices'].spec.__kept = true")
     first = page.evaluate("Desk.filters['chart-slices']")
     state_js = """(exp) => {
-      const c = Desk.charts['chart-slices'], o = c.chart.getOption(), sel = o.legend[0].selected;
+      const c = Desk.charts['chart-slices'], o = c.chart.getOption(), rows = Desk.rowsOf(c.spec, exp);
       const off = [...document.querySelectorAll('[data-legend-for="chart-slices"][aria-pressed="false"]')]
         .map(b => b.dataset.series);
       const keyOf = n => (c.spec.series.find(x => x.name === n || x.name + ' beyond the clip' === n) || {});
-      const drawn = o.series.filter(s => s.id !== 'zband');
+      const drawn = o.series.filter(s => s && s.id !== 'zband');
       const clip = c.spec.quotes.zClip || 10;
+      const len = n => ((drawn.find(s => s.name === n) || {}).data || []).length, g = o.grid[0];
       return {
         kept: c.spec.__kept === true, filter: Desk.filters['chart-slices'],
-        names: drawn.map(s => s.name),
+        plotW: c.chart.getWidth() - g.left - g.right,
+        names: drawn.map(s => s.name), template: c.spec.series.map(s => s.name),
         marked: drawn.filter(s => s.markLine && (s.markLine.data || []).length).map(s => s.name),
-        shownElsewhere: Object.keys(sel).filter(k => sel[k] && !k.startsWith(exp + ' ')),
         offWithData: drawn.filter(s => (s.data || []).length).map(s => s.name)
           .filter(n => off.includes(keyOf(n).legendKey || keyOf(n).name)),
-        rows: c.spec._rows[exp].length,
-        bars: ((o.series.find(s => s.name === exp + ' bid–ask') || {}).data || []).length,
-        clipped: c.spec._rows[exp].filter(q => Object.values(q.models)
+        rows: rows.length, mids: len('mid'), bars: len('bid–ask'),
+        clipped: rows.filter(q => Object.values(q.models)
           .some(m => m.z !== null && Math.abs(m.z) > clip)).length,
-        triangles: o.series.filter(s => / beyond the clip$/.test(s.name))
+        triangles: drawn.filter(s => / beyond the clip$/.test(s.name))
           .reduce((n, s) => n + (s.data || []).filter(p => p.symbol === 'triangle').length, 0) }; }"""
     for exp in [*[e for e in exps if e != first][:3], first]:
         page.click(f"[data-chart-filter='chart-slices'] [data-value='{exp}']")
@@ -7194,13 +10159,14 @@ def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_on
         assert st["kept"], "the spec was parsed again"
         assert st["filter"] == exp
         assert st["names"], st
-        assert all(n.startswith(exp + " ") for n in st["names"]), st["names"]
+        assert set(st["names"]) <= set(st["template"]) | {n + " beyond the clip" for n in st["template"]}, st
+        assert not any(re.match(r"\d{4}-\d{2}-\d{2} ", n) for n in st["template"]), st["template"]
         assert st["marked"], st
-        assert all(n.startswith(exp + " ") for n in st["marked"]), st["marked"]
-        assert not st["shownElsewhere"], st["shownElsewhere"]
         assert not st["offWithData"], st["offWithData"]
-        # one bar per quote: lower cap, the bar, upper cap and a break (7 points)
-        assert st["bars"] == 7 * st["rows"]
+        assert st["mids"] == st["rows"] == len(spec["quotes"]["groups"][exp]["mid"]), st
+        # one bar per quote: lower cap, the bar, upper cap and a break (7 points); no caps
+        # under 8 px a quote (3 points)
+        assert st["bars"] == (7 if st["plotW"] >= 8 * st["rows"] else 3) * st["rows"]
         assert st["triangles"] <= st["clipped"] * len(spec["quotes"]["models"])
     ctx.close()
 
@@ -7210,10 +10176,12 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
     click on an IV-heatmap row head selects that expiry's smile tab, writes exp=
     into the hash, marks its rows aria-current in the IV heatmap, every residual
     heatmap and the delta grid (only those), draws a line at its category on
-    #chart-by-expiry and names it in the readout; ']' and '[' step to the next
-    and previous expiry; a click on a by-expiry category selects it. Without
-    JavaScript the row heads stay plain text. Expiries are read from the page:
-    the daily bot replaces them."""
+    #chart-by-expiry and names it once, in the status line under the smile's tabs
+    (D3: it was written into the readout of every heatmap and the delta grid, six
+    live regions announcing one switch); ']' and '[' step to the next and previous
+    expiry; a click on a by-expiry category selects it. Without JavaScript the row
+    heads stay plain text. Expiries are read from the page: the daily bot replaces
+    them."""
     sb = site_browser
     ctx, page = _page(sb)
     page.goto(sb["base"] + "surface.html", wait_until="load")
@@ -7229,6 +10197,9 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
     page.wait_for_timeout(300)
     page.locator("#chart-by-expiry").scroll_into_view_if_needed()
     _wait_for_chart(page, "chart-by-expiry")
+    # a chart drawn off screen before the pick moves its line when it comes into view
+    # (an IntersectionObserver entry, delivered after a frame or two)
+    page.wait_for_timeout(500)
     st = page.evaluate("""() => ({
       sel: [...document.querySelectorAll('[data-chart-filter="chart-slices"] [aria-selected=true]')]
         .map(t => t.dataset.value),
@@ -7238,7 +10209,8 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
       tables: [...new Set([...document.querySelectorAll('tr[data-exp]')].map(r => r.closest('table').id))],
       lines: Desk.charts['chart-by-expiry'].chart.getOption().series
         .flatMap(s => ((s.markLine || {}).data || []).map(d => d.xAxis)).filter(x => x !== undefined),
-      readout: document.getElementById('iv-heatmap-readout').textContent })""")
+      readout: document.getElementById('iv-heatmap-readout').textContent,
+      status: document.getElementById('slices-status').textContent })""")
     assert st["sel"] == [exp]
     assert f"exp={exp}" in st["hash"]
     assert "iv-heatmap" in st["tables"]
@@ -7247,7 +10219,8 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
     assert sorted(c[0] for c in st["current"]) == sorted(st["tables"])     # one row per table
     assert all(c[1] == exp and c[2] == "true" for c in st["current"]), st["current"]
     assert st["lines"] == [label], st["lines"]
-    assert exp in st["readout"]
+    assert re.match(rf"Expiry \d+ of \d+ · {exp} · ", st["status"]), st["status"]
+    assert exp not in st["readout"], st["readout"]
     # ']' steps to the next expiry, '[' back
     page.keyboard.press("]")
     page.wait_for_timeout(200)
@@ -7441,7 +10414,8 @@ def test_browser_calibration_smiles_are_small_multiples(site_browser):
     page.click(f"#smile-group-tools [data-series='{hk}']")
     page.wait_for_timeout(400)
     left = page.evaluate("""([ids, hk]) => ids.map(id => Desk.charts[id].chart.getOption().series
-        .filter(s => s.name.endsWith(' ' + hk)).reduce((n, s) => n + (s.data || []).length, 0))""", [ids, hk])
+        .filter(s => s && s.name.endsWith(' ' + hk))
+        .reduce((n, s) => n + (s.data || []).length, 0))""", [ids, hk])
     assert left == [0] * len(ids), left
     with page.expect_download() as dl:
         page.click("[data-csv-group]")
@@ -7719,9 +10693,12 @@ def test_heat_ramps_one_meaning_numeric_keys_and_no_small_text(dash, pages, site
     heatmap is under 10.5 px (the vomma cells' second line was 9.5 px)."""
     pnl_tables = {"scenario-grid", "monthly-grid"}
     n = collections.Counter()
+    by = {c: bg for bg, c in dash.HEAT_CLASSES.items()}
     for route, html in pages.items():
         for tid, body in re.findall(r'<table class="heat" id="([^"]+)"[^>]*>(.*?)</table>', html, re.DOTALL):
-            for bg in re.findall(r'<td[^>]*style="background:(#[0-9a-fA-F]{6})', body):
+            # a cell on cividis or the diverging ramp takes its step's class (D2), a P&L one its style
+            steps = [by[k] for c in re.findall(r'<td class="([^"]+)"', body) for k in c.split() if k in by]
+            for bg in re.findall(r'<td[^>]*style="background:(#[0-9a-fA-F]{6})', body) + steps:
                 if tid in pnl_tables or tid.startswith("scenario"):
                     n["pnl"] += 1
                     assert _on_ramp(bg, dash.PNL_DIV), (route, tid, bg)
@@ -8839,6 +11816,174 @@ def test_the_recompute_audit_fails_on_one_wrong_digit(recompute_audit, frozen_si
     assert ("ticker", "1M ATMF (SVI-cal, 30 days), %") in failed
 
 
+def test_the_audit_leaves_out_a_scorecard_model_the_producer_marks_unavailable(recompute_audit, tmp_path):
+    """A session whose Heston fit was rejected stores Heston in its scorecard as
+    {available: false, reason} with no metrics (the Cboe-rebuilt 2026-10-20 does).
+    The page leaves that row out (desk_artifacts.scorecard_rows); the audit read its
+    metrics, raised KeyError and so ran no Overview check on such a store. Its
+    scorecard history now holds the session's scored models only."""
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    session = sc["session"]
+    gone = sc["models"][-1]["model"]
+    sc["models"][-1] = {"available": False, "model": gone, "reason": "no accepted fit is stored"}
+    sc["ranking_by_oos_median_abs_hs"] = [r for r in sc.get("ranking_by_oos_median_abs_hs") or []
+                                          if r.get("model") != gone]
+    d = tmp_path / "surface" / session
+    d.mkdir(parents=True)
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    rows = recompute_audit.overview.scorecards(recompute_audit.Store(tmp_path), [session])
+    assert sorted(r["model"] for r in rows) == sorted(m["model"] for m in sc["models"][:-1])
+    assert all(r["session"] == session and r["n"] > 0 for r in rows)
+
+
+def test_the_audit_fails_a_wrong_number_in_an_expiry_tab_or_the_status_line(recompute_audit, frozen_site,
+                                                                            tmp_path):
+    """D3: the audit reads every smile tab ('Nov 25 · 30d') and the status line under
+    the tabs from the residual table: one day more on a tab, the forward moved by a
+    cent or the expiry's place among the tabs off by one on the status line, in a
+    copy of the frozen page is a mismatch."""
+    site = tmp_path / "site"
+    shutil.copytree(frozen_site, site)
+    page = site / "surface.html"
+    html = page.read_text(encoding="utf-8")
+    m = re.search(r'aria-controls="slices-panel" data-value="(\d{4}-\d{2}-\d{2})"[^>]*>'
+                  r'[A-Z][a-z]{2} \d+ · <i>(\d+)</i>', html)
+    assert m
+    html = html[:m.start(2)] + str(int(m.group(2)) + 1) + html[m.end(2):]
+    f = re.search(r'id="slices-status"[^>]*>Expiry (\d+) of \d+ · [^<]* · F [\d,]+\.(\d\d) ', html)
+    assert f
+    html = (html[:f.start(1)] + str(int(f.group(1)) + 1) + html[f.end(1):f.start(2)]
+            + f"{(int(f.group(2)) + 1) % 100:02d}" + html[f.end(2):])
+    page.write_text(html, encoding="utf-8")
+    res = recompute_audit.run(site, SHIPPED)
+    failed = {c.label for c in res["checks"] if not c.ok and c.page == "Surface"}
+    assert f"tab {m.group(1)}: day of the month, year, days [1]" in failed
+    assert f"tab {m.group(1)}: days (<i>) [0]" in failed
+    assert "status line: place among the tabs, days, F, quotes, median half-spread [0]" in failed
+    assert "status line: place among the tabs, days, F, quotes, median half-spread [3]" in failed
+
+
+def test_the_audit_reads_the_smile_quotes_from_the_session_data_file(recompute_audit, frozen_site, tmp_path):
+    """D2: the smile's quotes are in a session data file; the audit reads it (under
+    data/, its sha384 against the page's integrity value, its sha256 against its name)
+    and checks every expiry in it against the residual table. In a copy of the frozen
+    site each of these is a mismatch: one packed mid IV a unit off (the file renamed
+    and the page's hashes updated, so only the number is wrong); the file's bytes
+    changed under the old hashes; the file deleted, and a stray file under data/."""
+    import base64
+
+    html = (frozen_site / "surface.html").read_text(encoding="utf-8")
+    q = _raw_specs(html)["chart-slices"]["quotes"]
+    src, sri = q["src"], q["integrity"]
+    body = (frozen_site / src).read_bytes()
+
+    def failed(name, change) -> set[tuple[str, str]]:
+        site = tmp_path / name
+        shutil.copytree(frozen_site, site)
+        change(site)
+        return {(c.page, c.label) for c in recompute_audit.run(site, SHIPPED)["checks"] if not c.ok}
+
+    def one_mid(site):
+        book = json.loads(body)
+        book["quotes"]["groups"][next(e for e in q["order"] if e not in q["groups"])]["mid"][0] += 1
+        new = json.dumps(book, separators=(",", ":"), sort_keys=True).encode()
+        new_src = src[:-21] + hashlib.sha256(new).hexdigest()[:16] + ".json"
+        (site / src).unlink()
+        (site / new_src).write_bytes(new)
+        new_sri = "sha384-" + base64.b64encode(hashlib.sha384(new).digest()).decode()
+        (site / "surface.html").write_text(html.replace(src, new_src).replace(sri, new_sri), encoding="utf-8")
+
+    bad = failed("mid", one_mid)
+    assert ("Surface", "packed quotes: mid IV = residual table, every expiry") in bad
+    assert not [x for x in bad if "data file" in x[1]], bad
+    bad = failed("bytes", lambda site: (site / src).write_bytes(body.replace(b'"mid":[', b'"mid":[1', 1)))
+    assert ("Surface", f"data file {src}: sha384 = the page's integrity value") in bad
+    assert ("Surface", f"data file {src}: name = its sha256") in bad
+
+    def gone_and_stray(site):
+        (site / src).unlink()
+        (site / "data" / "surface-2000-01-03-0123456789abcdef.json").write_bytes(b"{}")
+
+    bad = failed("gone", gone_and_stray)
+    assert ("Surface", f"data file {src}") in bad
+    assert ("data", "every file under data/ read by an audited page") in bad
+
+    def one_point(site):                    # C5: the 3D view's points are in the same file
+        book = json.loads(body)
+        p = next(p for p in book["surface3d"]["points"] if p[2] is not None)
+        p[2] += 0.01
+        new = json.dumps(book, separators=(",", ":"), sort_keys=True).encode()
+        new_src = src[:-21] + hashlib.sha256(new).hexdigest()[:16] + ".json"
+        (site / src).unlink()
+        (site / new_src).write_bytes(new)
+        new_sri = "sha384-" + base64.b64encode(hashlib.sha384(new).digest()).decode()
+        (site / "surface.html").write_text(html.replace(src, new_src).replace(sri, new_sri), encoding="utf-8")
+
+    bad = failed("point", one_point)
+    assert ("Surface", "3D view points: median mid IV % (3 decimals)") in bad
+    assert not [x for x in bad if "data file" in x[1] or "packed" in x[1]], bad
+
+    def one_heat(site):                     # C6: so are the heatmap cells' readout numbers
+        book = json.loads(body)
+        row = next(r for r in book["heat"]["iv-heatmap"]["cells"] if any(r))
+        next(v for v in row if v)[2] += 0.01
+        new = json.dumps(book, separators=(",", ":"), sort_keys=True).encode()
+        new_src = src[:-21] + hashlib.sha256(new).hexdigest()[:16] + ".json"
+        (site / src).unlink()
+        (site / new_src).write_bytes(new)
+        new_sri = "sha384-" + base64.b64encode(hashlib.sha384(new).digest()).decode()
+        (site / "surface.html").write_text(html.replace(src, new_src).replace(sri, new_sri), encoding="utf-8")
+
+    bad = failed("heat", one_heat)
+    assert ("Surface", "mid IV readout number 3 (data file) = recompute, every cell") in bad
+    assert not [x for x in bad if "data file" in x[1] and "readout" not in x[1]], bad
+
+
+def test_the_audit_checks_the_data_file_for_every_reader_and_typed_readout_numbers(recompute_audit,
+                                                                                  frozen_site, tmp_path):
+    """D2 review: the audit checked the session data file's schema and session for
+    the smile only, and passed a heatmap readout number written as a string or a
+    boolean (float() took it; desk.js prints a quote count as it is, so "37" or
+    true would show). In copies of the frozen site, the file re-hashed with the page
+    updated so only the content is wrong: another session's file fails its schema
+    and session check in every panel that reads it; a quote count written "37" and a
+    mid IV written as text each fail their readout check."""
+    import base64
+
+    html = (frozen_site / "surface.html").read_text(encoding="utf-8")
+    q = _raw_specs(html)["chart-slices"]["quotes"]
+    src, sri = q["src"], q["integrity"]
+    body = (frozen_site / src).read_bytes()
+
+    def failed(name, change) -> set[tuple[str, str]]:
+        site = tmp_path / name
+        shutil.copytree(frozen_site, site)
+        book = json.loads(body)
+        change(book)
+        new = json.dumps(book, separators=(",", ":"), sort_keys=True).encode()
+        new_src = src[:-21] + hashlib.sha256(new).hexdigest()[:16] + ".json"
+        (site / src).unlink()
+        (site / new_src).write_bytes(new)
+        new_sri = "sha384-" + base64.b64encode(hashlib.sha384(new).digest()).decode()
+        (site / "surface.html").write_text(html.replace(src, new_src).replace(sri, new_sri), encoding="utf-8")
+        checks = recompute_audit.run(site, SHIPPED)["checks"]
+        return {(c.panel, c.label.replace(new_src, "<file>")) for c in checks
+                if not c.ok and c.page == "Surface"}
+
+    bad = failed("session", lambda book: book.update(session="2000-01-03"))
+    panels = {p for p, label in bad if label == "data file <file>: schema 1, this session"}
+    assert {"#iv-heat", "#slices"} <= panels, bad
+    assert len(panels) >= 3, panels                       # the residual grid's panel too
+
+    def cell(book):
+        return next(v for r in book["heat"]["iv-heatmap"]["cells"] for v in r if v)
+
+    bad = failed("count", lambda book: cell(book).__setitem__(1, str(cell(book)[1])))
+    assert ("#iv-heat", "mid IV readout number 2 (data file) = recompute, every cell") in bad
+    bad = failed("text", lambda book: cell(book).__setitem__(0, str(cell(book)[0])))
+    assert ("#iv-heat", "mid IV readout number 1 (data file) = recompute, every cell") in bad
+
+
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):
     """T11: every dot of the VIX-replication check's history is the signed gap
     (replicated − Cboe close) of its session's vix_replication.json, not |gap|;
@@ -8969,7 +12114,7 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
                           "t_origin_basis": "quote_time (Cboe GTH book)"}}
     pv = dash.chain_provenance(fetched)
     assert pv["vendor"] == "yahoo"
-    assert pv["fetched_as_quote_time"]
+    assert pv["download"]
     for text in (" · ".join(dash.chain_source(fetched)), dash.quote_source_note(fetched),
                  dash.chain_sentence(fetched)):
         assert "quotes at" not in text
@@ -8978,15 +12123,26 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
         assert "T measured from the fetch" in text
     # the badge sets each part unbroken: every part fits a 320 px phone (at most 40 characters)
     assert all(len(p) <= 40 for p in dash.chain_source(fetched)), dash.chain_source(fetched)
+    # the producer now keeps the fetch instant in fetched_at and runs T from the close
+    later = {"inputs": {"source": "yfinance", "quote_time": None, "fetched_at": "2026-10-28T08:50:33Z",
+                        "t_origin_basis": "session close 16:00 ET"}}
+    assert dash.chain_source(later) == ["Yahoo Finance download", "fetched 2026-10-28 08:50 UTC",
+                                        "Yahoo reports no quote times", "T from the 16:00 ET close"]
+    assert dash.chain_sentence(later) == ("a Yahoo Finance download fetched 2026-10-28 08:50 UTC "
+                                          "(Yahoo reports no quote times; T from the 16:00 ET close)")
+    assert dash.chain_source({"inputs": {"source": "yfinance", "t_origin_basis": "session close 16:00 ET"}}) \
+        == ["Yahoo Finance close snapshot", "no quote time"]
     cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z"}}
     assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC"]
-    # every page that names the newest surface session's chain says what it is
-    sj = json.loads(_surface_file("surface.json").read_text())
-    want = dash.chain_provenance(sj)
+    # every page that names a surface session's chain says what it is (the Overview's
+    # surface result is the headline fit's session's, the others the newest session's)
     for route in ("/", "/surface", "/model-risk"):
+        sj = json.loads((_overview_surface_file(dash, "surface.json") if route == "/"
+                         else _surface_file("surface.json")).read_text())
+        want = dash.chain_provenance(sj)
         text = _visible_text(pages[route])
         assert "Quotes as of" not in text, route
-        if want and want["fetched_as_quote_time"]:
+        if want and want["download"]:
             assert "close snapshot · quotes at" not in text, route
             assert want["time"].split(";")[0] in text, route
 

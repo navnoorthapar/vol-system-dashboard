@@ -31,7 +31,7 @@ from scipy.stats import norm as _norm
 DATE_FMT = "%Y-%m-%d"
 # the market tables the record holds, with their keys
 RECORD_KEYS = {"spx_ohlcv": ("date",), "vix_daily": ("date",), "vix_term_structure": ("date", "ticker"),
-               "tbill_rates": ("date",)}
+               "tbill_rates": ("date",), "vix_futures_daily": ("date", "expiry_date")}
 # a cached value may differ from the record by float32 noise (Yahoo's provisional print kept
 # until Cboe's official one replaces it in the record), never by a printed digit
 CACHE_ATOL = 1e-4
@@ -121,9 +121,11 @@ def _utc_minutes(ts: Any) -> str:
 def chain_words(inputs: dict, universe: dict | None = None) -> tuple[str, str, list[str]] | None:
     """(name, time clause, the clause's badge parts) a page must use for a stored
     chain, from surface.json inputs:
-    a Yahoo chain has no quote times, so one whose quote_time holds the job's fetch
-    instant is a download 'fetched …' (with 'T measured from the fetch' when its T
-    origin was that instant), one without is a close snapshot with 'no quote time';
+    a Yahoo chain has no quote times, so one with a known fetch instant (the
+    job's fetch instant in quote_time before 2026-10-27, in fetched_at after) is
+    a download 'fetched …', with where its T runs from ('T measured from the
+    fetch' when its T origin was that instant, 'T from the 16:00 ET close' when
+    it was the close); one without is a close snapshot with 'no quote time';
     a Cboe book prints 'quotes at …' its recorded quote time."""
     uni = universe or {}
     src = str(inputs.get("source") or uni.get("source") or "").strip().lower()
@@ -131,11 +133,15 @@ def chain_words(inputs: dict, universe: dict | None = None) -> tuple[str, str, l
         return None
     qt = inputs.get("quote_time") or uni.get("quote_time")
     if src in ("yfinance", "yahoo"):
-        if not qt:
+        fetched = qt or inputs.get("fetched_at") or uni.get("fetched_at")
+        if not fetched:
             return "Yahoo Finance close snapshot", "no quote time", ["no quote time"]
-        parts = [f"fetched {_utc_minutes(qt)}", "Yahoo reports no quote times"]
-        if str(inputs.get("t_origin_basis") or "").startswith("quote_time"):
+        parts = [f"fetched {_utc_minutes(fetched)}", "Yahoo reports no quote times"]
+        basis = str(inputs.get("t_origin_basis") or uni.get("t_origin_basis") or "")
+        if qt and basis.startswith("quote_time"):
             parts.append("T measured from the fetch")
+        elif basis.startswith("session close"):
+            parts.append("T from the 16:00 ET close")
         return "Yahoo Finance download", f"{parts[0]}; {', '.join(parts[1:])}", parts
     name = "Cboe" if src == "cboe" else src
     clause = f"quotes at {_utc_minutes(qt)}" if qt else "no quote time"
@@ -268,6 +274,15 @@ def nyse_closures(year: int) -> frozenset[dt.date]:
 
 def is_session(d: dt.date) -> bool:
     return d.weekday() < 5 and d not in nyse_closures(d.year)
+
+
+@cache
+def nyse_early_closes(year: int) -> frozenset[dt.date]:
+    """The NYSE sessions that close at 13:00 ET (SPX options and the VIX index at 13:15):
+    the day after Thanksgiving, and July 3 and December 24 on a Monday to Thursday (on a
+    Friday each is the observed holiday, a closure)."""
+    days = [_nth(year, 11, 3, 4) + dt.timedelta(days=1), dt.date(year, 7, 3), dt.date(year, 12, 24)]
+    return frozenset(d for d in days if is_session(d) and (d.month == 11 or d.weekday() <= 3))
 
 
 def sessions_between(a: str, b: str) -> int:

@@ -247,6 +247,29 @@ def heston_anchor_mask(quotes: pd.DataFrame, session: str) -> np.ndarray:
     return mask
 
 
+def _vendor(source) -> str:
+    s = str(source or "").strip().lower()
+    return "yahoo" if s in oc.NO_QUOTE_TIME_SOURCES else s
+
+
+def _fit_book_note(cal: dict, ctx: ScoreContext) -> str:
+    """'' when the fit was made on the book scored here; otherwise what it was
+    made on (the bot fits the session's Yahoo download; the surface layer
+    scores its Cboe capture when that passes the quote-state gates)."""
+    diag = cal.get("chain_diagnostics") or {}
+    fit_src = _vendor(diag.get("source") or "yfinance")   # every committed fit is a Yahoo download
+    here = _vendor(ctx.sq.diagnostics.get("source"))
+    if not here or here == fit_src:
+        return ""
+    name = {"yahoo": "Yahoo", "cboe": "Cboe"}
+    return (f". The fit was made on the session's {name.get(fit_src, fit_src)} chain "
+            f"(data_store/options/spx_{ctx.sq.session}.parquet, T from its "
+            f"{diag.get('t_origin_basis') or 'recorded origin'}), not on the "
+            f"{name.get(here, here)} book scored here: its anchors are re-selected on this book "
+            "by the calibrator's rule, so its in-sample and out-of-sample errors here are not the "
+            "fit's stored RMSEs")
+
+
 def heston_v2_factory(ctx: ScoreContext) -> ModelSpec | None:
     cal = load_v2_calibration(ctx.sq.session, ctx.calibrations_dir)
     if cal is None:
@@ -255,14 +278,36 @@ def heston_v2_factory(ctx: ScoreContext) -> ModelSpec | None:
     return ModelSpec(
         "heston_v2", heston_iv_function(p), heston_anchor_mask(ctx.quotes, ctx.sq.session), 5,
         "Heston at the stored model_version-2 joint SPX/VIX-index fit (DE + L-BFGS-B on "
-        "53 z-grid anchors and 4 VIX indices; repo Lewis engine)",
+        "53 z-grid anchors and 4 VIX indices; repo Lewis engine)" + _fit_book_note(cal, ctx),
         params={"model": "Heston", **{k: float(v) for k, v in p.items()},
                 "pinned_params": list(cal.get("pinned_params", [])),
                 "feller_margin": cal.get("feller_margin"),
                 "stored_oos_rmse_vp": cal.get("leg_losses", {}).get("spx_oos_iv_rmse"),
                 "stored_in_sample_rmse_vp": cal.get("leg_losses", {}).get("spx_iv_rmse_exact"),
                 "run_utc": cal.get("run_utc")},
-        fit={"source": f"joint_cal_{ctx.sq.session}.pkl", "n_anchors_stored": cal.get("n_spx_options")})
+        fit={"source": f"joint_cal_{ctx.sq.session}.pkl", "n_anchors_stored": cal.get("n_spx_options"),
+             "fit_chain_source": _vendor((cal.get("chain_diagnostics") or {}).get("source") or "yfinance"),
+             "scored_on_fit_chain": not _fit_book_note(cal, ctx)})
+
+
+def heston_v2_unavailable_reason(ctx: ScoreContext) -> str:
+    """Why heston_v2_factory scores nothing on ``ctx``'s session: the surface
+    is built from the session's book whatever the Heston fit did (CITSEC-05),
+    so a session can have a surface and no fit."""
+    s = ctx.sq.session
+    path = Path(ctx.calibrations_dir) / f"joint_cal_{s}.pkl"
+    if not path.exists():
+        return (f"no joint SPX/VIX Heston fit is stored for {s} (data_store/calibrations/"
+                f"{path.name}): the calibration was rejected by its gate or not run on this "
+                "session. The surface, the arbitrage screen and the VIX replication are built "
+                "from the session's book and do not depend on it.")
+    return (f"the stored fit {path.name} is not a model_version-2 fit of {s}'s own quotes, so it "
+            "is not scored here.")
+
+
+# Why a model the registry names scores nothing on a session (the scorecard's
+# row says so instead of leaving a bare 'available: false').
+UNAVAILABLE_REASONS: dict = {"heston_v2": heston_v2_unavailable_reason}
 
 
 MODEL_REGISTRY: dict = {
@@ -306,7 +351,9 @@ def score_models(ctx: ScoreContext, models: list | None = None) -> tuple:
     rows, frames = [], []
     for name, spec in specs:
         if spec is None:
-            rows.append({"model": name, "available": False})
+            why = UNAVAILABLE_REASONS.get(name)
+            rows.append({"model": name, "available": False,
+                         **({"reason": why(ctx)} if why is not None else {})})
             continue
         miv = model_ivs(spec, q)
         res = mt.residual_frame(q, miv, model=spec.name, in_sample=spec.in_sample,

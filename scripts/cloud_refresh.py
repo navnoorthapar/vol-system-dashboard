@@ -7,7 +7,9 @@ Steps (run all, or a subset with --steps):
              last CLOSED NYSE session (never an in-progress bar): SPX and ^IRX
              from Yahoo; the VIX index family from Cboe's official files (Yahoo
              only as the provisional row of a session Cboe has not posted);
-             the Treasury bill/par files and NY Fed SOFR (the discount curve)
+             the Treasury bill/par files and NY Fed SOFR (the discount curve);
+             Cboe's VX futures settlements of each session since the newest
+             stored (refresh_vx_futures; fail-soft)
   labels     Extend regime_labels.parquet with new trading days (rule labels),
              as of the last closed session
   calibrate  Download the SPX option chain for the last CLOSED NYSE session,
@@ -37,9 +39,12 @@ fail-soft: a failure is reported (exit 1) but never undoes what was captured,
 and the workflow commits captures and derived artifacts behind separate test
 gates (refresh_session_artifacts). Every run with the calibrate step then
 backfills what an earlier run failed to build or commit: a committed accepted
-fit without its surface report or diagnostics, or a Greeks surface / scenario
-grid built from another fit than the headline (backfill_session_artifacts, at
-most MAX_BACKFILL_SESSIONS sessions a run).
+fit without its surface report or diagnostics, a session whose stored Cboe
+book passes the quote-state gates and has no surface report (fit accepted or
+not: the market surface does not wait for the Heston gate), a surface report written
+under an older method (surface.report.REPORT_VERSION), or a Greeks surface /
+scenario grid built from another fit than the headline
+(backfill_session_artifacts, at most MAX_BACKFILL_SESSIONS sessions a run).
 
 Persistence (unless --no-persist): the SQLite DB is a rebuildable cache and
 is not what the bot commits. At the start of every run (freeze-only
@@ -80,7 +85,12 @@ Every run writes a machine-readable status JSON (--status-file, default
 .refresh-status.json at the repo root) with the session, the steps run, the
 calibration outcome and reason, the headline calibration's date and age and
 the publishable flag; a Markdown summary goes to $GITHUB_STEP_SUMMARY and
-key=value pairs to $GITHUB_OUTPUT when those are set.
+key=value pairs to $GITHUB_OUTPUT when those are set. When the workflow names
+the slot ($REFRESH_SLOT: close, book or manual), the run also writes its record,
+committed with the captures: data_store/runs/run_<run_utc>_<slot>.json (what
+ran, what the calibration did and why, the chain's quote state, the captures,
+the forward ledger, the exit code, publishable and its blockers, step timings,
+GITHUB_SHA and GITHUB_RUN_ID; run_record).
 
 Importing this module has no side effects (no chdir, no logging setup, no
 frozen date): everything happens in main().
@@ -94,7 +104,7 @@ import pickle
 import subprocess
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -166,17 +176,24 @@ def _annotate(level: str, title: str, message: str) -> None:
 
 
 class _Group:
-    """::group:: / ::endgroup:: around one step's log lines."""
+    """::group:: / ::endgroup:: around one step's log lines; with ``timings``,
+    the step's wall time in seconds goes to ``timings[key]`` (the run record)."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, timings: "dict | None" = None, key: "str | None" = None):
         self.name = name
+        self.timings = timings
+        self.key = key or name
+        self.t0 = 0.0
 
     def __enter__(self):
+        self.t0 = time.monotonic()
         if os.environ.get("GITHUB_ACTIONS"):
             print(f"::group::{self.name}", flush=True)
         return self
 
     def __exit__(self, *exc):
+        if self.timings is not None:
+            self.timings[self.key] = round(time.monotonic() - self.t0, 1)
         if os.environ.get("GITHUB_ACTIONS"):
             print("::endgroup::", flush=True)
         return False
@@ -220,11 +237,14 @@ def refresh_market_data(today: "date | None" = None, end: "date | None" = None) 
                                surface layer read (rates.get_zero_curve refuses
                                a curve more than 7 days old, so a feed outage
                                shows up as a fallback to ^IRX, recorded).
+      vix_futures_daily        Cboe's VX daily settlements, monthly contracts,
+                               of every session after the newest stored one
+                               (refresh_vx_futures).
 
     Returns {"ok", "hard_failure", "reason", "rows", "start", "vix_family",
-    "rates"}; an empty or failed SPX download is a hard failure (the run must
-    not publish the committed DB's stale close as current). VIX-family and
-    rate failures are warnings (main() annotates them).
+    "rates", "vx_futures"}; an empty or failed SPX download is a hard failure
+    (the run must not publish the committed DB's stale close as current).
+    VIX-family, rate and VX failures are warnings (main() annotates them).
     """
     from joint_vol_calibration.data import yf_downloader as dl
     from joint_vol_calibration.data.database import (
@@ -268,6 +288,97 @@ def refresh_market_data(today: "date | None" = None, end: "date | None" = None) 
     rows.update(fam["rows"])
     out["vix_family"] = fam
     out["rates"] = refresh_discount_curve(end_d)
+    out["vx_futures"] = vx = refresh_vx_futures(end_d)
+    rows["vix_futures_daily"] = vx["rows"]
+    return out
+
+
+# A longer gap than this is a backfill (pipeline.py, the per-contract files), not
+# the daily job's: the settlement file is one request per session.
+VX_MAX_SESSIONS = 30
+
+
+def refresh_vx_futures(end: date) -> dict:
+    """VX futures (FUND_GRADE_PLAN 1.12): Cboe's daily settlements of every NYSE
+    session after the newest one stored, through ``end`` (at most VX_MAX_SESSIONS),
+    into vix_futures_daily; persist_captures exports them to data_store/market/
+    vix_futures_daily/, so the record, not only the cache, holds them.
+
+    Source: the session's CFE settlement file (cboe_downloader.download_vx_settlements,
+    which refuses a file Cboe names for another session); a session it does not
+    give is looked for in the monthly contracts' own files (cdn.cboe.com, one per
+    contract, dated by row; they trail the settlement file by a session or more).
+    Each session is checked before anything is stored (cboe_downloader.check_vx_session:
+    monthly contracts, standard expiries, settlements in bounds, at least two still
+    trading, not a repeat of the session before).
+
+    Never raises. The VX leg is reference data (the Overview's VX panel, the fits'
+    out-of-sample VX score), so a failed or late download is reported (``errors``,
+    ``missing``; main() annotates it) and the slot's other steps carry on; the next
+    slot retries from the newest stored session. ``ok``: the table holds ``end``."""
+    import pandas as pd
+
+    from joint_vol_calibration.data import cboe_downloader as cboe
+    from joint_vol_calibration.data import database as dbm
+
+    out: dict[str, Any] = {"ok": False, "sessions": [], "stored": [], "rows": 0, "missing": [],
+                           "rejected": {}, "errors": [], "last": None, "source": {}}
+    try:
+        last = dbm.get_latest_date("vix_futures_daily")
+        last = str(last)[:10] if last else None
+        first = date.fromisoformat(last) + timedelta(days=1) if last else end
+        todo = [str(t.date()) for t in dbm.nyse_sessions(first, end)]
+        if len(todo) > VX_MAX_SESSIONS:
+            out["errors"].append(f"the VX table ends {last}, {len(todo)} sessions before {end}; only the "
+                                 f"newest {VX_MAX_SESSIONS} are fetched (backfill the rest: pipeline.py)")
+            todo = todo[-VX_MAX_SESSIONS:]
+        out["sessions"] = todo
+        prev = dbm.get_vix_futures_curve(last) if last else None
+        good: dict[str, pd.DataFrame] = {}
+        for s in todo:
+            try:
+                rows = cboe.download_vx_settlements(s)
+            except Exception as e:  # noqa: BLE001 (fail-soft: reported, the next source is tried)
+                out["errors"].append(f"{s} settlement file: {type(e).__name__}: {e}")
+                continue
+            if rows.empty:                          # not posted (or another session's file)
+                continue
+            kept, why = cboe.check_vx_session(rows, s, previous=prev)
+            if why:
+                out["rejected"][s] = why
+            if not kept.empty:
+                good[s], prev = kept, kept
+                out["source"][s] = "settlement file"
+        missing = [s for s in todo if s not in good]
+        if missing:
+            try:
+                hist = cboe.download_vix_futures_daily_history(start=missing[0], end=end.isoformat())
+            except Exception as e:  # noqa: BLE001 (fail-soft)
+                hist = pd.DataFrame()
+                out["errors"].append(f"contract files: {type(e).__name__}: {e}")
+            for s in missing:
+                rows = hist[hist["date"] == s] if not hist.empty else hist
+                if rows.empty:
+                    continue
+                kept, why = cboe.check_vx_session(rows, s)
+                if why:
+                    out["rejected"].setdefault(s, []).extend(why)
+                if not kept.empty:
+                    good[s] = kept
+                    out["source"][s] = "contract files"
+        if good:
+            out["rows"] = dbm.insert_vix_futures_daily(pd.concat([good[s] for s in sorted(good)],
+                                                                 ignore_index=True))
+        out["stored"] = sorted(good)
+        out["missing"] = [s for s in todo if s not in good]
+        newest = dbm.get_latest_date("vix_futures_daily")
+        out["last"] = str(newest)[:10] if newest else None
+        out["ok"] = out["last"] is not None and out["last"] >= end.isoformat()
+    except Exception as e:  # noqa: BLE001 (fail-soft: the slot's other steps must run)
+        log.warning("  VX futures refresh failed: %s", e)
+        out["errors"].append(f"VX futures refresh failed: {type(e).__name__}: {e}")
+    log.info("  VX futures: stored %s (%d rows); missing %s; table ends %s", out["stored"] or "nothing",
+             out["rows"], out["missing"] or "none", out["last"])
     return out
 
 
@@ -343,6 +454,18 @@ def market_warnings(m: dict) -> list:
                     f"{'; '.join(fam['errors'])}"
                     + ("" if fam.get("ok") else " -- Yahoo's rows stored as provisional (source "
                        "'yfinance') until Cboe's files carry those sessions")))
+    vx = m.get("vx_futures") or {}
+    if vx and not vx.get("ok"):
+        why = "; ".join([*vx.get("errors", []),
+                         *(f"{s}: {', '.join(w)}" for s, w in (vx.get("rejected") or {}).items())])
+        out.append(("VX settlements",
+                    f"the VX futures table ends {vx.get('last') or 'nowhere'}"
+                    + (f"; not stored: {', '.join(vx['missing'])}" if vx.get("missing") else "")
+                    + (f" ({why})" if why else " (Cboe has not posted them yet)")
+                    + "; the next slot retries"))
+    elif vx.get("rejected"):
+        out.append(("VX settlements", "rows left out: " + "; ".join(
+            f"{s}: {', '.join(w)}" for s, w in vx["rejected"].items())))
     rt = m.get("rates") or {}
     if rt.get("errors"):
         out.append(("Rates download", "; ".join(rt["errors"])))
@@ -597,9 +720,15 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
         return st
     from joint_vol_calibration.data import cboe_downloader as cboe
     for und in CAPTURE_UNDERLYINGS:
-        have = sorted(d.glob(f"{und.lower()}_{expected}_*.parquet"))
-        if have:
-            st["captures"][und] = {"status": "exists", "file": str(have[-1])}
+        # stored here, in the private store (CBOE_BOOKS_DIR) or recorded by a
+        # manifest of a book moved there: the retry slot does not capture it again
+        if out_dir is None:
+            found = cboe.book_captured(und, expected, data_dir=DATA)
+        else:
+            have = sorted(d.glob(f"{und.lower()}_{expected}_*.parquet"))
+            found = str(have[-1]) if have else None
+        if found:
+            st["captures"][und] = {"status": "exists", "file": found}
             continue
         try:
             cap = cboe.capture_option_chain(und)
@@ -661,11 +790,14 @@ def _discard_partial_capture(d: pathlib.Path, cap, cboe) -> None:
 def _ledger_books(session: str, yahoo: "dict | None"):
     """Candidate books for the session's forward ledger, best first: every
     stored Cboe SPX capture of the session (the full listing: each expiry an
-    open straddle can have), oldest first, then the Yahoo chain the calibrate
-    step downloaded (``yahoo``: recalibrate_heston's ``book_out``)."""
+    open straddle can have), oldest first, wherever it is stored
+    (cboe_downloader.find_books: the private store named by CBOE_BOOKS_DIR,
+    then data_store/options/cboe), then the Yahoo chain the calibrate step
+    downloaded (``yahoo``: recalibrate_heston's ``book_out``)."""
     import pandas as pd
 
-    for pq_path in sorted(capture_dir().glob(f"spx_{session}_*.parquet")):
+    from joint_vol_calibration.data import cboe_downloader as cboe
+    for pq_path in cboe.find_books("SPX", session, data_dir=DATA):
         js = pq_path.with_suffix(".json")
         side = json.loads(js.read_text()) if js.exists() else {}
         raw = pd.read_parquet(pq_path)
@@ -678,7 +810,8 @@ def _ledger_books(session: str, yahoo: "dict | None"):
                         "rows": len(raw)}}
     if yahoo and yahoo.get("raw") is not None and len(yahoo["raw"]):
         yield {"raw": yahoo["raw"], "quote_time": yahoo.get("quote_time"), "symbol": yahoo.get("symbol"),
-               "meta": {"source": "yahoo", "symbol": yahoo.get("symbol"), "rows": len(yahoo["raw"])}}
+               "meta": {"source": "yahoo", "symbol": yahoo.get("symbol"), "rows": len(yahoo["raw"]),
+                        "fetched_at": yahoo.get("fetched_at")}}
 
 
 def _with_open_expiries(raw, expiries, symbol, ticker_factory, attempts: int = 3, pause: float = 2.0):
@@ -716,6 +849,7 @@ def _with_open_expiries(raw, expiries, symbol, ticker_factory, attempts: int = 3
             part = legs.copy()
             part["expiration"] = exp
             part["option_type"] = side
+            part["source"] = "yfinance"        # as option_chain.fetch_spx_chain labels it
             frames.append(part)
         info["extra_expiries"].append(exp)
     return pd.concat(frames, ignore_index=True), info
@@ -730,7 +864,8 @@ def record_forward_ledger(session: str, yahoo: "dict | None" = None, directory=N
 
     The book is the first of _ledger_books (the session's full Cboe capture,
     else the Yahoo chain plus the open positions' expiries) that is quoted at
-    or after the 16:00 ET close and passes the calibration's own quote-state
+    or after the 16:00 ET close (a Yahoo chain records no quote time: it must
+    have been downloaded after the close) and passes the calibration's own quote-state
     gate (near-ATM two-sided share >= option_chain.MIN_TWO_SIDED_SHARE). The
     caller has checked that ``session`` is the last closed session and that
     the DB holds it; the capture and the calibrate step only store or hand on
@@ -762,21 +897,23 @@ def record_forward_ledger(session: str, yahoo: "dict | None" = None, directory=N
         for cand in _ledger_books(session, yahoo):
             meta, raw = dict(cand["meta"]), cand["raw"]
             label = meta.get("file") or meta["source"]
-            try:
-                fl.quote_after_close(session, cand["quote_time"])
-            except ValueError as e:
-                refused.append(f"{label}: {e}")
+            # the quote-state gates (forward_ledger.book_time_refusal and
+            # book_share_refusal), which the session's surface applies alike
+            why = fl.book_time_refusal(session, cand["quote_time"], meta.get("fetched_at"))
+            if why:
+                refused.append(f"{label}: {why}")
                 continue
             if meta["source"] == "yahoo":
                 raw, extra = _with_open_expiries(raw, open_exps, cand["symbol"], ticker_factory)
                 meta.update(extra)
             clean = oc.clean_option_chain(raw, session, spot, r_ref=ref.for_clean(),
-                                          quote_time=cand["quote_time"])
-            share = float(clean.diagnostics.get("near_atm_two_sided_share") or 0.0)
-            if share < oc.MIN_TWO_SIDED_SHARE:
-                refused.append(f"{label}: not a live book ({share:.0%} of near-ATM lines two-sided)")
+                                          quote_time=cand["quote_time"],
+                                          fetched_at=meta.get("fetched_at"))
+            why = fl.book_share_refusal(clean)
+            if why:
+                refused.append(f"{label}: {why}")
                 continue
-            meta["near_atm_two_sided_share"] = share
+            meta["near_atm_two_sided_share"] = float(clean.diagnostics["near_atm_two_sided_share"])
             out = fl.record_session(session, raw, clean=clean, spot=spot, r_ref=ref.r_91d,
                                     quote_time=cand["quote_time"], directory=d, book_meta=meta)
             led = fl.load_ledger(out)
@@ -813,7 +950,8 @@ def refresh_session_artifacts(session: str, headline_path: "str | None",
                               diagnostics_timeout: float = DIAGNOSTICS_TIMEOUT_S,
                               parts=ARTIFACT_PARTS) -> dict:
     """Rebuild what derives from an accepted session's fit (``parts``, default
-    all four, in this order), each part fail-soft:
+    all four, in this order; the surface alone for a session with a stored Cboe
+    book and no accepted fit, artifact_gaps), each part fail-soft:
 
       surface      data_store/surface/<session>/ (residuals, surface, scorecard,
                    VIX replication) and index.json (surface.report)
@@ -917,12 +1055,30 @@ def _artifact_source(path: pathlib.Path, key: bytes) -> "str | None":
         return None
 
 
+def _stale_surface(sess: str) -> bool:
+    """True when data_store/surface/<sess>/ was written under an older method
+    than surface.report.REPORT_VERSION (or its surface.json or
+    vix_replication.json cannot be read): the backfill rebuilds it."""
+    from joint_vol_calibration.surface import report
+    for name in ("surface.json", "vix_replication.json"):
+        try:
+            doc = json.loads((DATA / "surface" / sess / name).read_text())
+        except (OSError, ValueError):
+            return True
+        if report.stored_report_version(doc) < report.REPORT_VERSION:
+            return True
+    return False
+
+
 def artifact_gaps(headline_path: "str | None") -> dict:
     """What is missing or stale among the artifacts derived from the committed
     accepted fits: {session: [parts]}, newest session first.
 
-      surface      data_store/surface/<s>/surface.json missing, or index.json
-                   does not list <s>
+      surface      data_store/surface/<s>/surface.json missing, index.json
+                   does not list <s>, or its surface.json / vix_replication.json
+                   was written under an older report_version than
+                   surface.report.REPORT_VERSION (a method change: the
+                   backfill rebuilds the committed record over its next runs)
       diagnostics  data_store/calibrations/diagnostics/<s>.json missing
       greeks,      (the headline session) the parquet is missing, unreadable,
       scenario     or its provenance names another calibration than the
@@ -930,7 +1086,14 @@ def artifact_gaps(headline_path: "str | None") -> dict:
                    previous headline next to a new one)
 
     Only sessions whose SPX chain is stored (data_store/options/spx_<s>.parquet)
-    are checked: the surface report and the diagnostics are built from it."""
+    are checked: the surface report and the diagnostics are built from it.
+
+    The surface does not wait for the Heston fit (CITSEC-05): a session with a
+    stored Cboe SPX capture that passes the quote-state gates
+    (surface.quotes.cboe_book_refusal) needs 'surface' when its report is
+    missing or stale, accepted fit or not (its scorecard then has no Heston
+    row and says why). Diagnostics need a fit and are asked for only for
+    accepted ones."""
     from joint_vol_calibration.data import database as dbm
     gaps: dict = {}
     idx = DATA / "surface" / "index.json"
@@ -943,12 +1106,28 @@ def artifact_gaps(headline_path: "str | None") -> dict:
         if not dbm.options_snapshot_path(sess, "SPX").exists():
             continue
         need = []
-        if sess not in listed or not (DATA / "surface" / sess / "surface.json").exists():
+        if (sess not in listed or not (DATA / "surface" / sess / "surface.json").exists()
+                or _stale_surface(sess)):
             need.append("surface")
         if not (DATA / "calibrations" / "diagnostics" / f"{sess}.json").exists():
             need.append("diagnostics")
         if need:
             gaps[sess] = need
+    from joint_vol_calibration.surface import quotes as sqm
+    for sess in sqm.captured_sessions():
+        if sess in gaps or (sess in acc and dbm.options_snapshot_path(sess, "SPX").exists()):
+            continue                          # checked above, with its diagnostics
+        if (sess in listed and (DATA / "surface" / sess / "surface.json").exists()
+                and not _stale_surface(sess)):
+            continue
+        try:
+            why = sqm.cboe_book_refusal(sess)
+        except Exception as e:  # noqa: BLE001 (a session whose book cannot be checked is no gap; logged)
+            why = f"{type(e).__name__}: {e}"
+        if why is None:
+            gaps[sess] = ["surface"]
+        else:
+            log.info("  %s: no surface report (%s)", sess, why)
     if headline_path:
         head = pathlib.Path(headline_path)
         sess = next((s_ for s_, p_ in acc.items() if pathlib.Path(p_).name == head.name), None)
@@ -1009,7 +1188,11 @@ def _persist_snapshot(raw, clean, session: str, spot: float,
     stored for the session in one transaction (re-runs never duplicate).
     ``quote_time`` (ISO UTC, database.utc_iso) is stored with every row: it
     sets the T origin when the snapshot is cleaned again (option_chain.t_origin),
-    so it must be the exact value the live clean used.
+    so it must be the exact value the live clean used. A Yahoo chain has none
+    (None, the default): its download instant is ``fetched_at`` in the fit's
+    chain_diagnostics and the run status, and no T is measured from it.
+    (options_snapshots has no fetched_at column: adding one migrates the
+    shipped database, which the bot never commits.)
     """
     from joint_vol_calibration.data import database as dbm
     from joint_vol_calibration.data import option_chain as oc
@@ -1040,7 +1223,8 @@ def _save_rejected_chain(raw, session: str, reason: str) -> "str | None":
 
 
 def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
-                       calibrate_kwargs: "dict | None" = None, book_out: "dict | None" = None) -> dict:
+                       calibrate_kwargs: "dict | None" = None, book_out: "dict | None" = None,
+                       clock=None) -> dict:
     """Download the SPX chain for the last closed session and fit the joint model.
 
     Returns a status dict: {"status": accepted|rejected|skipped|exists|failed,
@@ -1051,8 +1235,17 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
 
     ``book_out`` (a dict), when given, receives the downloaded chain as soon
     as it is in hand, whatever the fit then does: {"source": "yahoo", "raw",
-    "quote_time", "symbol"} — the forward ledger's fallback book
-    (record_forward_ledger), which does not depend on the calibration.
+    "quote_time" (None: Yahoo records none), "fetched_at", "symbol"} — the
+    forward ledger's fallback book (record_forward_ledger), which does not
+    depend on the calibration.
+
+    ``clock`` () -> datetime: the run's clock, read when the download
+    returns (``fetched_at``); default ``now_utc``. A Yahoo chain carries no
+    quote time, so its T runs from the session's 16:00 ET close
+    (option_chain.t_origin) and the download instant is recorded as
+    ``fetched_at`` (status, the fit's chain_diagnostics), never stored as
+    ``quote_time`` (the 2026-10-26 chain carried the run's start as its quote
+    time and was labelled a GTH book).
     """
     import pandas as pd
 
@@ -1096,29 +1289,30 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     # The calibrator's default reference: the Treasury zero curve r(T) of the
     # session (^IRX when the curve is missing or stale; recorded in the fit).
     ref = reference_rate(spot_date)
-    # One string for the live clean and the stored snapshot, so a refit from
-    # the stored chain measures T from exactly the same origin.
-    quote_time = utc_iso(now_utc)
 
     try:
         raw, meta = oc.fetch_spx_chain(spot_date, ticker_factory=ticker_factory)
     except Exception as e:
         st.update(status="failed", reason=f"option chain download failed: {e}")
         return st
+    # One string for the live clean and the stored snapshot. Yahoo records no
+    # quote time: T runs from the close, and this is when the chain arrived.
+    fetched_at = utc_iso((clock or (lambda: now_utc))())
     st["chain"] = {"symbol": meta.get("symbol"), "n_listed": len(meta.get("listed", [])),
                    "requested": meta.get("requested", []), "failed": meta.get("failed", [])}
     if raw.empty:
         st["reason"] = "no SPX option chain returned"
         return st
     if book_out is not None:
-        book_out.update(source="yahoo", raw=raw, quote_time=quote_time, symbol=meta.get("symbol"))
+        book_out.update(source="yahoo", raw=raw, quote_time=None, fetched_at=fetched_at,
+                        symbol=meta.get("symbol"))
 
-    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=ref.for_clean(), quote_time=quote_time)
+    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=ref.for_clean(), fetched_at=fetched_at)
     d = clean.diagnostics
     st["chain"].update({k: d.get(k) for k in ("n_raw", "n_two_sided", "n_near_atm",
                                               "near_atm_two_sided_share", "n_clean",
-                                              "n_expiries_with_carry", "quote_time",
-                                              "t_origin", "t_origin_basis")})
+                                              "n_expiries_with_carry", "source", "quote_time",
+                                              "fetched_at", "t_origin", "t_origin_basis")})
     log.info("  Chain hygiene: %s raw -> %s two-sided -> %s clean rows; near-ATM two-sided "
              "share %.0f%%; T from %s (%s)", d.get("n_raw"), d.get("n_two_sided"),
              d.get("n_clean", 0), 100 * (d.get("near_atm_two_sided_share") or 0),
@@ -1171,7 +1365,7 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     with open(out, "wb") as f:
         pickle.dump(result, f)
     try:
-        n_opt = _persist_snapshot(raw, clean, spot_date, S, quote_time)
+        n_opt = _persist_snapshot(raw, clean, spot_date, S)       # Yahoo: no quote time
         log.info("  Saved %d observed two-sided quotes as the %s SPX snapshot", n_opt, spot_date)
     except Exception as e:     # the fit stands, but its input record is missing
         st["snapshot_error"] = f"could not store the accepted {spot_date} chain: {e}"
@@ -1202,14 +1396,21 @@ def persist_captures(market_since: "str | None", chain_sessions=()) -> list:
 
     Market partitions (MARKET_TABLES, plus rates_daily: the Treasury/NY Fed
     quotes the discount curve is built from) are merged for every year >=
-    ``market_since`` (None: skip); each session in ``chain_sessions`` gets its
+    ``market_since`` (None: skip), every year of a MARKET_TABLES table with no
+    partition yet; each session in ``chain_sessions`` gets its
     stored SPX chain written to data_store/options/spx_<session>.parquet.
     Returns the paths that changed.
     """
     from joint_vol_calibration.data import database as dbm
     written = []
     if market_since:
+        # a market table the record holds no partition of yet (vix_futures_daily on
+        # the first run after FUND_GRADE_PLAN 1.12) is exported whole, once: the
+        # record then holds its history, not only the download window's years
+        new = [t for t in dbm.MARKET_TABLES if not any((dbm.MARKET_DIR / t).glob(f"{t}_*.parquet"))]
         written += dbm.export_market_partitions(since=market_since)
+        if new:
+            written += dbm.export_market_partitions(tables=new)
         written += dbm.export_market_partitions(since=market_since, tables=("rates_daily",))
     for s in chain_sessions:
         p = dbm.export_options_snapshot(s, "SPX")
@@ -1274,6 +1475,131 @@ def freeze_site() -> dict:
     return {"ok": True, "reason": "ok"}
 
 
+# -- The run record (data_store/runs/) -----------------------------------------
+#
+# The status JSON above went only to a gitignored file and a 30-day artifact, so
+# the bot's history of what it attempted and why the gate said no lived in
+# Actions logs that expire (FUND_GRADE_PLAN 0.9, VALIDATOR-15). Each workflow
+# run (REFRESH_SLOT set by daily_refresh.yml's "Choose steps") now writes one
+# record, committed with the captures: data_store/runs/run_<run_utc>_<slot>.json.
+# It is written twice: before the freeze (so the site rendered by this run
+# already reads it: app.calibration_stale_cause) and at the end, complete. The
+# gates, the commits and the deploy come after this script in the workflow and
+# are not in it (the deploy is in gh-pages history: scripts/ci/deploy_streak.py).
+
+RUN_SCHEMA = "run_ledger/1"
+RUN_SLOTS = ("close", "book", "manual")
+_CHAIN_KEYS = ("symbol", "n_listed", "n_raw", "n_two_sided", "n_near_atm", "near_atm_two_sided_share",
+               "n_clean", "n_expiries_with_carry", "quote_time", "t_origin", "t_origin_basis")
+_CAPTURE_KEYS = ("status", "reason", "rows", "two_sided_rows", "expiries", "book_state", "quote_time",
+                 "sha256")
+_GITHUB_KEYS = {"sha": "GITHUB_SHA", "run_id": "GITHUB_RUN_ID", "run_attempt": "GITHUB_RUN_ATTEMPT",
+                "event": "GITHUB_EVENT_NAME", "ref": "GITHUB_REF"}
+
+
+def runs_dir() -> pathlib.Path:
+    return DATA / "runs"
+
+
+def run_record_name(run_utc: str, slot: str) -> str:
+    """run_<YYYYmmddTHHMMSSZ>_<slot>.json for a run started at ``run_utc``."""
+    t = datetime.fromisoformat(run_utc).astimezone(UTC)
+    return f"run_{t:%Y%m%dT%H%M%SZ}_{slot}.json"
+
+
+def _first_line(x) -> "str | None":
+    return str(x).splitlines()[0] if x not in (None, "") else None
+
+
+def run_record(status: dict, slot: str, env=None, complete: bool = True) -> dict:
+    """The committed record of one run, from main()'s status dict: what ran,
+    what the calibration did and why, the quote state of the chain it fitted,
+    the captures, the forward ledger, the derived artifacts, the exit code,
+    whether the site was publishable and what blocked it, the step timings and
+    the GitHub commit and run that produced it."""
+    env = os.environ if env is None else env
+    cal = status.get("calibration") or {}
+    capt = status.get("capture") or {}
+    led = status.get("forward_ledger") or {}
+    head = status.get("headline_calibration") or {}
+    bf = status.get("artifact_backfill") or {}
+    rec: dict[str, Any] = {
+        "schema": RUN_SCHEMA,
+        "run_utc": status["run_utc"],
+        "slot": slot,
+        "complete": complete,
+        "steps": list(status.get("steps") or []),
+        "expected_session": status.get("expected_session"),
+        "session": status.get("session"),
+        "calibration": None,
+        "capture": None,
+        "forward_ledger": None,
+        "artifacts": {name: {"ok": bool(r.get("ok")), "error": _first_line(r.get("error"))}
+                      for name, r in (status.get("artifacts") or {}).items()},
+        "backfill": {"rebuilt": {s: {n: bool(r.get("ok")) for n, r in arts.items()}
+                                 for s, arts in (bf.get("rebuilt") or {}).items()},
+                     "deferred": list(bf.get("deferred") or [])} if bf else None,
+        "headline_calibration": {"session": head.get("date"), "age_sessions": head.get("age_sessions")},
+        "freeze": status.get("freeze"),
+        "exit_code": status.get("exit_code"),
+        "publishable": status.get("publishable"),
+        "publish_blockers": list(status.get("publish_blockers") or []),
+        "errors": [str(e) for e in status.get("errors") or []],
+        "warnings": [str(w) for w in status.get("warnings") or []],
+        "timings_s": dict(status.get("timings_s") or {}),
+        "github": {k: env.get(v) or None for k, v in _GITHUB_KEYS.items()},
+    }
+    if cal:
+        ch = cal.get("chain") or {}
+        rec["calibration"] = {"status": cal.get("status"), "reason": _first_line(cal.get("reason")),
+                              "session": cal.get("session"),
+                              "chain": {k: ch[k] for k in _CHAIN_KEYS if k in ch}}
+    if capt:
+        caps = {}
+        for u, c in (capt.get("captures") or {}).items():
+            caps[u] = {k: c[k] for k in _CAPTURE_KEYS if k in c}
+            if c.get("file"):
+                caps[u]["file"] = pathlib.Path(c["file"]).name
+        rec["capture"] = {"status": capt.get("status"), "reason": capt.get("reason"),
+                          "session": capt.get("session"), "captures": caps}
+    if led:
+        rec["forward_ledger"] = {"status": led.get("status"),
+                                 "reason": _first_line(led.get("reason") or led.get("error")),
+                                 "file": pathlib.Path(led["path"]).name if led.get("path") else None,
+                                 "book": led.get("book_file") or led.get("book")}
+    return rec
+
+
+def _json_default(x):
+    item = getattr(x, "item", None)                  # numpy scalars
+    return item() if callable(item) else str(x)
+
+
+def write_run_record(status: dict, slot: str, complete: bool = True, directory=None) -> pathlib.Path:
+    """Write (or rewrite) this run's record; returns its path."""
+    d = pathlib.Path(directory) if directory is not None else runs_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / run_record_name(status["run_utc"], slot)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(run_record(status, slot, complete=complete), indent=2, sort_keys=True,
+                              default=_json_default) + "\n")
+    tmp.replace(path)
+    return path
+
+
+def _record_run(status: dict, slot: "str | None", complete: bool) -> None:
+    """write_run_record for main(): reported, never fatal (the record must not cost the data)."""
+    if not slot:
+        return
+    try:
+        path = write_run_record(status, slot, complete=complete)
+        status["run_record"] = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+    except Exception as e:  # noqa: BLE001 (record-keeping must never fail the run)
+        msg = f"could not write the run record: {type(e).__name__}: {e}"
+        status["warnings"].append(msg)
+        _annotate("warning", "Run record", msg)
+
+
 # -- Reporting -----------------------------------------------------------------
 
 def _fmt(x, spec: str = ".3f", none: str = "—") -> str:
@@ -1323,6 +1649,12 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
                if status.get("publish_blockers") else "") + " |",
             f"| market rows | {status.get('market', {}).get('rows', {})} |",
         ]
+        vx = (status.get("market") or {}).get("vx_futures")
+        if vx:
+            lines.append(f"| VX futures | table ends {vx.get('last') or '—'}; stored "
+                         f"{', '.join(vx.get('stored') or []) or 'nothing'}"
+                         + (f"; **not stored** {', '.join(vx['missing'])}" if vx.get("missing") else "")
+                         + " |")
         fam = (status.get("market") or {}).get("vix_family")
         if fam:
             lines.append(f"| VIX family | Cboe primary; {fam.get('n_provisional', 0)} provisional "
@@ -1474,6 +1806,14 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # calibration is NOT one of them: it fails the job (exit 1) but the site
     # still deploys, with the dashboard's staleness banner on the old fit.
     blockers = []
+    # The run record (data_store/runs/): written when the workflow names the
+    # slot, so a local run leaves the store as it was.
+    timings: dict = {}
+    status["timings_s"] = timings
+    slot = os.environ.get("REFRESH_SLOT", "").strip() or None
+    if slot and slot not in RUN_SLOTS:
+        status["warnings"].append(f"REFRESH_SLOT {slot!r} is not one of {RUN_SLOTS}: no run record")
+        slot = None
     log.info("=" * 60)
     log.info("Daily auto-refresh -- %s UTC -- steps: %s", status["run_utc"], ",".join(steps))
     log.info("=" * 60)
@@ -1482,7 +1822,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # history, not the stale committed DB); export only what a step captured.
     persist = not args.no_persist
     if persist:
-        with _Group("restore committed captures"):
+        with _Group("restore committed captures", timings, "restore"):
             try:
                 status["restored"] = restore_captures()
             except Exception as e:
@@ -1496,7 +1836,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # First, before anything slower: the Cboe book can only be fetched while it is
     # live, and it is captured whatever the Yahoo chain or the fit do later.
     if "capture" in steps:
-        with _Group("Cboe option-chain capture"):
+        with _Group("Cboe option-chain capture", timings, "capture"):
             try:
                 capt = capture_cboe_chains(now_utc, closed.isoformat())
             except Exception as e:  # it should not raise; the market and fit steps must run
@@ -1511,7 +1851,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
 
     market_ok = True
     if "market" in steps:
-        with _Group("market data"):
+        with _Group("market data", timings, "market"):
             m = refresh_market_data(today, end=closed)
             status["market"] = m
             if m["hard_failure"]:
@@ -1538,7 +1878,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
             _annotate("error", "Missing session", chk["reason"])
 
     if "labels" in steps:
-        with _Group("regime labels"):
+        with _Group("regime labels", timings, "labels"):
             if market_ok:
                 try:
                     if args.rebuild_labels:
@@ -1558,11 +1898,14 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
 
     yahoo_book: dict = {}
     if "calibrate" in steps:
-        with _Group("option chain + joint calibration"):
+        with _Group("option chain + joint calibration", timings, "calibrate"):
             if market_ok:
                 try:
+                    run_start = now_utc
                     cal = recalibrate_heston(now_utc, ticker_factory, calibrate_kwargs,
-                                             book_out=yahoo_book)
+                                             book_out=yahoo_book,
+                                             clock=lambda: run_start + timedelta(
+                                                 seconds=time.monotonic() - run_t0))
                 except Exception as e:
                     cal = {"status": "failed", "reason": f"calibrate step crashed: {e}"}
                     log.exception("calibrate step crashed")
@@ -1593,7 +1936,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # depend on whether a Heston fit was accepted. A failure is loud but costs
     # neither the fit nor the captures.
     if any(s in steps for s in ("capture", "calibrate")):
-        with _Group("forward ledger"):
+        with _Group("forward ledger", timings, "forward_ledger"):
             expected = closed.isoformat()
             if market_ok and sess == expected:
                 led = record_forward_ledger(expected, yahoo_book or None, ticker_factory=ticker_factory)
@@ -1614,7 +1957,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
 
     accepted = (status.get("calibration") or {}).get("status") == "accepted"
     if persist and any(s in steps for s in ("market", "calibrate")):
-        with _Group("persist captures"):
+        with _Group("persist captures", timings, "persist"):
             since = status.get("market", {}).get("start") if "market" in steps else None
             chains = [status["calibration"]["session"]] if accepted else []
             try:
@@ -1633,7 +1976,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # reads the stored chain). Fail-soft: exit 1 and an annotation, but the site
     # still publishes and the workflow still commits the captures.
     if accepted:
-        with _Group("session artifacts"):
+        with _Group("session artifacts", timings, "artifacts"):
             head = status.get("headline_calibration") or {}
             arts = refresh_session_artifacts(status["calibration"]["session"], head.get("path"))
             status["artifacts"] = arts
@@ -1648,7 +1991,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # missing or stale (a part that failed, or an artifact commit the gate dropped,
     # on an earlier run). Without this the retry slot found the pickle and stopped.
     if "calibrate" in steps:
-        with _Group("artifact backfill"):
+        with _Group("artifact backfill", timings, "backfill"):
             try:
                 head = status.get("headline_calibration") or {}
                 done = [status["calibration"]["session"]] if accepted else []
@@ -1673,7 +2016,9 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                          bf["deferred"])
 
     if "freeze" in steps:
-        with _Group("freeze site"):
+        # the site this run renders reads this run's record too (the stale banner)
+        _record_run(status, slot, complete=False)
+        with _Group("freeze site", timings, "freeze"):
             fz = freeze_site()
             status["freeze"] = fz
             if not fz["ok"]:
@@ -1691,6 +2036,8 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     status["publishable"] = bool("freeze" in steps and (status.get("freeze") or {}).get("ok")
                                  and not blockers)
     status["exit_code"] = 1 if hard_fail else 0
+    timings["total"] = round(time.monotonic() - run_t0, 1)
+    _record_run(status, slot, complete=True)
     _write_reports(status, pathlib.Path(args.status_file) if args.status_file else None)
     log.info("=" * 60)
     log.info("Refresh %s (exit %d; site %s)", "FAILED" if hard_fail else "complete",

@@ -33,7 +33,9 @@
     .chart { display: none !important; }
     .chart-data.sr-only { position: static !important; width: auto; max-width: 100%; height: auto; margin: 6px 0 0; overflow-x: auto; overflow-y: visible; clip: auto; white-space: normal; }
     .js-only { display: none !important; }
-    [role="tabpanel"][hidden], .chart-data [data-group][hidden] { display: block !important; }   /* no tabs: every panel in turn */
+    [role="tabpanel"][hidden], .chart-data div[data-group][hidden] { display: block !important; }   /* no tabs: every panel in turn */
+    .chart-data tbody[data-group][hidden] { display: table-row-group !important; }
+    .chart-groups { max-height: 60vh; overflow: auto; }   /* every expiry's rows, in a region that scrolls */
     .banner-body.fold-body { display: block !important; } .find-list.fold-body { display: flex !important; }   /* nothing folds (Q20) */
   </style></noscript>
   {% block head %}{% endblock %}

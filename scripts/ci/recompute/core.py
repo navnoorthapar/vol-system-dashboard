@@ -14,10 +14,14 @@ code it audits would only check that the code agrees with itself.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -27,6 +31,8 @@ _SPACES = {"\u2009": " ", "\u202f": " ", "\u00a0": " ", "\u200b": ""}
 # a printed number: optional sign, digits with thousands commas, optional decimals
 NUM = re.compile(r"(?<![\w.])([+\-−]?)(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?=(?:st|nd|rd|th)\b|\W|$)")
 DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+# a session data file a page fetches (app.publish_json): data/<kind>-<session>-<sha256[:16]>.json
+DATA_FILE = re.compile(r"data/[\w.-]+-([0-9a-f]{16})\.json")
 
 
 def norm(text: str) -> str:
@@ -100,8 +106,10 @@ class Audit:
     count can say which printed numbers no check looked at."""
     page: str
     soup: BeautifulSoup
+    site: Path | None = None              # the frozen site (its data/ files)
     checks: list[Check] = field(default_factory=list)
     covered: set[int] = field(default_factory=set)
+    data_read: set[str] = field(default_factory=set)
 
     # ── locating ──────────────────────────────────────────────────────────────
     def one(self, selector: str, root: Tag | None = None) -> Tag | None:
@@ -118,6 +126,35 @@ class Audit:
     def cover(self, el: Tag | None) -> None:
         if el is not None:
             self.covered.add(id(el))
+
+    def data_file(self, panel: str, src: Any, integrity: Any, session: str) -> Any:
+        """A session data file the page names (``src``, under the site's data/) and the
+        integrity value it fetches it with, parsed; None, with a failed check, when it
+        is missing, outside data/, its sha384 or the sha256 in its name disagree with
+        its bytes, or it is not schema 1 of ``session`` (checked for every reader, as
+        desk.js checks it on every fetch). A file the audit cannot read fails, it is
+        never skipped."""
+        label = f"data file {src}"
+        m = DATA_FILE.fullmatch(src) if isinstance(src, str) else None
+        if self.site is None or m is None:
+            self.fail(panel, label, "data/<kind>-<session>-<sha256[:16]>.json in the site", str(src))
+            return None
+        root = (self.site / "data").resolve()
+        path = (self.site / src).resolve()
+        if root not in path.parents or not path.is_file():
+            self.fail(panel, label, "a file under data/", "missing")
+            return None
+        body = path.read_bytes()
+        self.data_read.add(src)
+        sri = "sha384-" + base64.b64encode(hashlib.sha384(body).digest()).decode()
+        ok = self.equal(panel, f"{label}: sha384 = the page's integrity value", sri, integrity)
+        sha = hashlib.sha256(body).hexdigest()[:16]
+        ok &= self.equal(panel, f"{label}: name = its sha256", m.group(1), sha)
+        if not ok:
+            return None
+        obj = json.loads(body)
+        head = [obj.get("schema"), obj.get("session")] if isinstance(obj, dict) else [None, None]
+        return obj if self.equal(panel, f"{label}: schema 1, this session", head, [1, session]) else None
 
     # ── recording ─────────────────────────────────────────────────────────────
     def fail(self, panel: str, label: str, expected: str, printed: str, note: str = "") -> None:

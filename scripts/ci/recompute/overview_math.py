@@ -497,14 +497,8 @@ def forward_ledger(store: Store) -> dict | None:
 
 
 def vix_departures(rep: dict) -> int:
-    """The lines Surface lists where the replication departs from Cboe: the
-    deviations, the gap notes without the producer's gap-attribution sentence, and
-    one rebuilt attribution line when the VIX gap splits exactly into its parts."""
-    notes = [n for n in rep.get("gap_notes") or [] if not str(n).startswith("Gap attribution (")]
-    ix = (rep.get("indices") or {}).get("VIX") or {}
-    ga: dict = ix["gap_attribution"] if isinstance(ix.get("gap_attribution"), dict) else {}
-    gap, tr, rs = (finite(ix.get("gap_vs_official")), finite(ga.get("truncation_pts")),
-                   finite(ga.get("residual_pts")))
-    split = (finite(ix.get("replicated")) is not None and bool(ga.get("available"))
-             and gap is not None and tr is not None and rs is not None and abs(-tr - rs - gap) <= 1e-6)
-    return len(rep.get("deviations") or []) + len(notes) + int(split)
+    """The departures from Cboe's methodology the replication lists: its deviations
+    (Surface's 'Where the replication departs from Cboe'). Its gap notes describe the
+    replication (strip coverage, model variance swaps, the gap attribution) and depart
+    from nothing; Surface lists them apart and they are not counted."""
+    return len(rep.get("deviations") or [])

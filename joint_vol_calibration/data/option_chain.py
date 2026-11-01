@@ -40,6 +40,11 @@ What this module does instead:
      before it to 09:15 ET on it); measuring T from the 16:00 close there
      overstated T by 5.5-8.5 hours (14-day expiry: 1.6%, short-dated IVs ~1%
      low). A stored chain without a quote time keeps the session close.
+     Only a vendor that records quote times has one: a Yahoo chain
+     (NO_QUOTE_TIME_SOURCES) never does. Its download instant is
+     ``fetched_at``; the bot stamped that instant into ``quote_time`` until
+     2026-10-27 (the 2026-10-26 chain), and such a stored value is read as
+     the fetch time it is, so a Yahoo chain's T always runs from the close.
 """
 
 from __future__ import annotations
@@ -93,6 +98,16 @@ SESSION_CLOSED_AFTER_ET = time(16, 15) # daily bar treated as final after this
 GTH_OPEN_ET = time(20, 15)             # Cboe Global Trading Hours open (evening before a session)
 GTH_CLOSE_ET = time(9, 15)             # ... and close (morning of that session)
 _MINUTES_PER_YEAR = 365.0 * 24.0 * 60.0
+
+# Vendors whose chains carry no quote time (a chain's ``source`` column, as
+# database.canonical_source spells it, plus observed_quotes' default). A time
+# stored with such a chain is when it was downloaded, not when it was quoted.
+NO_QUOTE_TIME_SOURCES = frozenset({"yfinance", "yahoo"})
+# t_origin_basis when T runs from a recorded quote time (a GTH book). The
+# "quote_time" prefix is what JointCalibrator._t_methods and
+# forward_ledger.record_session test for.
+GTH_BASIS = "quote_time (GTH book)"
+CLOSE_BASIS = "session close 16:00 ET"
 
 
 # ── NYSE calendar ─────────────────────────────────────────────────────────────
@@ -221,13 +236,47 @@ def t_origin(quote_time: QuoteTimeLike, session: DateLike) -> datetime:
     return qt if lo <= qt < hi else close
 
 
-def _chain_quote_time(raw: Optional[pd.DataFrame]) -> Optional[datetime]:
-    """The quote time a stored chain records (options_snapshots.quote_time,
-    ISO UTC): the latest non-empty value, or None (legacy snapshots)."""
-    if raw is None or "quote_time" not in raw.columns:
+def chain_source(raw: pd.DataFrame | None) -> str | None:
+    """The vendor a chain names in its ``source`` column (lower case, the
+    first non-empty value), or None when it names none."""
+    if raw is None or "source" not in raw.columns:
         return None
-    vals = [t for t in (_as_instant(v) for v in raw["quote_time"].unique()) if t is not None]
+    vals = raw["source"].dropna().astype(str).str.strip().str.lower()
+    vals = vals[vals != ""]
+    return str(vals.iloc[0]) if len(vals) else None
+
+
+def records_quote_time(source: str | None) -> bool:
+    """False for a vendor that publishes no quote time (Yahoo). A chain that
+    names no source is taken at its word: a quote_time it carries is one."""
+    return source is None or str(source).strip().lower() not in NO_QUOTE_TIME_SOURCES
+
+
+def _latest_instant(raw: pd.DataFrame | None, column: str) -> datetime | None:
+    if raw is None or column not in raw.columns:
+        return None
+    vals = [t for t in (_as_instant(v) for v in raw[column].unique()) if t is not None]
     return max(vals) if vals else None
+
+
+def _chain_quote_time(raw: pd.DataFrame | None) -> datetime | None:
+    """The quote time a stored chain records (options_snapshots.quote_time,
+    ISO UTC): the latest non-empty value, or None (legacy snapshots, and every
+    chain of a vendor that records no quote time: what a Yahoo chain stored
+    there is its download instant, see _chain_fetched_at)."""
+    if not records_quote_time(chain_source(raw)):
+        return None
+    return _latest_instant(raw, "quote_time")
+
+
+def _chain_fetched_at(raw: pd.DataFrame | None) -> datetime | None:
+    """When a stored chain was downloaded: its fetched_at column, else, for a
+    vendor that records no quote time, the instant a pre-2026-10-27 bot
+    stored in quote_time (its download instant)."""
+    got = _latest_instant(raw, "fetched_at")
+    if got is None and not records_quote_time(chain_source(raw)):
+        got = _latest_instant(raw, "quote_time")
+    return got
 
 
 def year_fraction(session: DateLike, expiry: DateLike, settlement: str = "PM",
@@ -551,8 +600,9 @@ class CleanChain:
                   volume, open_interest, snapshot_date)
     carry       : one row per usable expiry (expiry, T, forward, discount,
                   r, q, method, n_pairs, resid_rmse)
-    diagnostics : counts, the quote-state gate inputs and the T origin
-                  (quote_time, t_origin, t_origin_basis)
+    diagnostics : counts, the quote-state gate inputs, the vendor and when
+                  the chain was quoted and downloaded (source, quote_time,
+                  fetched_at) and the T origin (t_origin, t_origin_basis)
     ok, reason  : False (with a reason) when the chain must not be used
     """
     quotes: pd.DataFrame
@@ -578,6 +628,7 @@ def clean_option_chain(
     atm_band: float = ATM_GATE_BAND,
     min_days: int = CAL_MIN_EXPIRY_DAYS,
     quote_time: QuoteTimeLike = None,
+    fetched_at: QuoteTimeLike = None,
 ) -> CleanChain:
     """Clean a raw SPX chain into quotes the calibrator can trust.
 
@@ -596,23 +647,31 @@ def clean_option_chain(
                    expiry's T in years (a term curve, e.g.
                    rates.ZeroCurve.zero_rate), evaluated at each expiry
     quote_time   : when the quotes were observed (UTC; ISO string or
-                   datetime). None: the frame's ``quote_time`` column if it
-                   has one (stored snapshots), else unknown. It sets the T
+                   datetime): the caller vouches for it. None: the frame's
+                   ``quote_time`` column if it has one and its ``source``
+                   records quote times (a Cboe capture; never a Yahoo chain,
+                   see _chain_quote_time), else unknown. It sets the T
                    origin (``t_origin``): the quote time for a Global Trading
                    Hours book, the session's 16:00 ET close otherwise.
+    fetched_at   : when the chain was downloaded (recorded in the
+                   diagnostics, never used for T). None: the frame's
+                   ``fetched_at`` column (see _chain_fetched_at).
     """
     sess = _as_date(session_date)
     if quote_time is None:
         quote_time = _chain_quote_time(raw)
     qt = _as_instant(quote_time)
+    got = _as_instant(fetched_at) if fetched_at is not None else _chain_fetched_at(raw)
     origin = t_origin(qt, sess)
     gth = origin != session_close(sess)
     diag = {"session": str(sess), "n_raw": 0 if raw is None else int(len(raw)),
             "r_ref": (None if r_ref is None else "r(T) per expiry" if callable(r_ref)
                       else float(r_ref)),
+            "source": chain_source(raw),
             "quote_time": None if qt is None else _db.utc_iso(qt),
+            "fetched_at": None if got is None else _db.utc_iso(got),
             "t_origin": origin.isoformat(timespec="seconds"),
-            "t_origin_basis": "quote_time (Cboe GTH book)" if gth else "session close 16:00 ET"}
+            "t_origin_basis": GTH_BASIS if gth else CLOSE_BASIS}
     empty = CleanChain(pd.DataFrame(columns=_QUOTE_COLS),
                        pd.DataFrame(columns=["expiry", "T", "forward", "discount",
                                              "r", "q", "method", "n_pairs",
@@ -778,7 +837,8 @@ def fetch_spx_chain(
 
     Returns (raw DataFrame, meta dict with 'listed', 'requested', 'failed',
     'symbol'). The DataFrame keeps contractSymbol (for the AM/PM root) and
-    adds 'expiration' and 'option_type'. lastPrice is downloaded by Yahoo but
+    adds 'expiration', 'option_type' and source='yfinance' (Yahoo records no
+    quote time, so the cleaner measures T from the close). lastPrice is downloaded by Yahoo but
     never used. The listing and each expiry get up to ``attempts`` tries (a
     run makes ~18 requests; one transient failure must not cost a slice).
     """
@@ -816,6 +876,7 @@ def fetch_spx_chain(
             part = part.copy()
             part["expiration"] = exp
             part["option_type"] = side
+            part["source"] = "yfinance"          # a vendor that records no quote time
             frames.append(part)
     if not frames:
         return pd.DataFrame(), meta

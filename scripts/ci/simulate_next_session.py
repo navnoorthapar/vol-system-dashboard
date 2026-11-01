@@ -18,7 +18,10 @@ committed. Here a new session happens before merge:
        market     Yahoo, Cboe and Treasury return the stored window plus one
                   row per series for the new session (the last value carried
                   forward; the VIX indices are the model values of the
-                  session's parameters below, so the joint fit is consistent)
+                  session's parameters below, so the joint fit is consistent);
+                  Cboe's VX settlement file of each session the futures table
+                  lacks, up to the new one, prices the nine monthly contracts
+                  at the model's E^Q[VIX_T] for those parameters (vx_file)
        capture    the newest committed Cboe books, re-dated to the new session
        calibrate  a Yahoo-format book priced at the new spot by Heston with
                   the session's parameters: the headline fit's moved by a
@@ -35,15 +38,30 @@ committed. Here a new session happens before merge:
                   only (Greeks nodes, scenario P&L, the model VIX term),
                   passed here and failed in the bot. The run fails unless
                   every parameter of the new fit moved by MIN_PARAM_MOVE.
+     Each slot writes its run record (data_store/runs/, REFRESH_SLOT close and
+     book), which must be complete and agree with the slot's status, and the
+     capture commit's integrity check (scripts/ci/check_captures.py) must pass
+     on everything the two runs wrote.
   3. The three gates of .github/workflows/daily_refresh.yml (their test lists
      are read from the workflow) run in the copy, and with --full the whole
      suite as the weekly tests.yml run would see main after the bot.
 
-    python scripts/ci/simulate_next_session.py [--out DIR] [--full] [--keep]
+With --no-fit the book slot finds Yahoo's book empty, as the Saturday slot
+does after every Friday session, so the calibration is skipped and no fit is
+stored. The session's surface is still built from its Cboe book (the
+backfill: tier 0.7 item 4), and the gates then run on a newest surface
+session whose scorecard marks Heston not available, beside an older headline fit. The
+run must skip the fit, record the forward ledger from the Cboe book, build
+that surface with Heston marked not scored, stay publishable and exit 0. A
+Friday session built that way failed ten presentation tests (pages and tests
+that assumed a Heston row, and pages that cited different sessions), so the
+site would not have deployed on any weekend.
 
-Exit 1 when the simulated run does not accept and record the session, or when
-any gate fails. Nothing outside --out is written. About 10 minutes (+9 with
---full) on 4 CPUs; the diagnostics take about 4.
+    python scripts/ci/simulate_next_session.py [--out DIR] [--full] [--keep] [--no-fit]
+
+Exit 1 when the simulated run does not accept (with --no-fit: skip) the fit and
+record the session, or when any gate fails. Nothing outside --out is written.
+About 10 minutes (+9 with --full) on 4 CPUs; the diagnostics take about 4.
 """
 from __future__ import annotations
 
@@ -188,7 +206,7 @@ def _patch(module, **functions) -> None:
 
 # ── the driver: runs INSIDE the copy (python <copy>/scripts/ci/simulate_next_session.py --drive) ──
 
-def drive(status_file: Path) -> int:
+def drive(status_file: Path, no_fit: bool = False) -> int:
     root = ROOT
     sys.path.insert(0, str(root))
     import importlib.util
@@ -293,6 +311,26 @@ def drive(status_file: Path) -> int:
     _patch(rates, download_treasury_year=treasury,
            download_nyfed_sofr=lambda start=None, end=None: quotes[quotes["source"] == "nyfed"].copy())
 
+    from joint_vol_calibration.models.heston import heston_vix_future_exact
+    codes = "FGHJKMNQUVXZ"
+
+    def vx_file(trade_date):
+        """The CFE settlement file of ``trade_date`` (the close slot asks for every
+        session the VX table lacks): the nine monthly contracts from its month on,
+        at the model's E^Q[VIX_T] for the session's parameters, to Cboe's 4 dp."""
+        if trade_date > session:
+            raise OSError(f"no VX settlements after the simulated session ({trade_date})")
+        y, m = int(trade_date[:4]), int(trade_date[5:7])
+        exps = [e for e in (dbm.vx_monthly_expiry(y + (m - 1 + k) // 12, (m - 1 + k) % 12 + 1)
+                            for k in range(11)) if e >= trade_date][:9]
+        T = np.array([(pd.Timestamp(e) - pd.Timestamp(trade_date)).days / 365.0 for e in exps])
+        px = heston_vix_future_exact(p["kappa"], p["theta"], p["sigma"], p["v0"], T)
+        lines = ["Product,Symbol,Expiration Date,Price"] + [
+            f"VX,VX/{codes[int(e[5:7]) - 1]}{e[3]},{e},{v:.4f}" for e, v in zip(exps, px)]
+        return cboe.parse_vx_settlement_csv("\n".join(lines) + "\n", trade_date)
+    _patch(cboe, download_vx_settlements=vx_file,
+           download_vix_futures_daily_history=lambda start=None, end=None, expiries=None: pd.DataFrame())
+
     cap_dir = root / "data_store" / "options" / "cboe"
     replay = {}
     for und in ("SPX", "VIX"):
@@ -315,8 +353,10 @@ def drive(status_file: Path) -> int:
 
     class Ticker:
         def __init__(self, symbol):
-            self.options = tuple((start + timedelta(days=i)).isoformat() for i in range(1, 420)
-                                 if (start + timedelta(days=i)).weekday() < 5)
+            # --no-fit: Yahoo lists no expiry, as on the Saturday slot after a Friday
+            self.options = () if no_fit else tuple(
+                (start + timedelta(days=i)).isoformat() for i in range(1, 420)
+                if (start + timedelta(days=i)).weekday() < 5)
 
         def option_chain(self, exp):
             import zlib
@@ -337,14 +377,17 @@ def drive(status_file: Path) -> int:
     # session's market data and label, then the book slot (02:30 UTC).
     close = datetime.combine(oc.next_session(last), datetime.min.time()).replace(
         hour=18, minute=7, tzinfo=oc.NY_TZ).astimezone(UTC)
+    # Each slot writes its run record (data_store/runs/) as the workflow's slots do.
+    os.environ["REFRESH_SLOT"] = "close"
     code_close = cr.main(["--steps", "market,labels", "--status-file", str(status_file.with_name(
         "status_close.json"))], now_utc=close)
     print(f"close slot exit {code_close}", flush=True)
+    os.environ["REFRESH_SLOT"] = "book"
     code = cr.main(["--steps", "market,capture,calibrate,freeze", "--status-file", str(status_file)],
                    now_utc=now, ticker_factory=Ticker)
     code = max(code, code_close)
     st = json.loads(status_file.read_text())
-    st["simulated"] = {"session": session, "after": last, "now_utc": now.isoformat(),
+    st["simulated"] = {"session": session, "after": last, "now_utc": now.isoformat(), "no_fit": no_fit,
                        "headline_before": head["date"], "headline_params": cal["params"],
                        "book_params": p, "noise_vp": NOISE_VP,
                        "seconds": round(time.perf_counter() - t0, 1)}
@@ -354,6 +397,85 @@ def drive(status_file: Path) -> int:
 
 
 # ── the outer run ─────────────────────────────────────────────────────────────
+
+def run_record_problems(tree: Path, statuses: dict) -> list[str]:
+    """The simulated slots' run records (data_store/runs/, FUND_GRADE_PLAN 0.9):
+    for each slot's status ({slot: status dict}), one complete record of that
+    run whose calibration outcome and exit code are the run's."""
+    recs = [json.loads(p.read_text()) for p in sorted((tree / "data_store" / "runs").glob("run_*.json"))]
+    problems = []
+    for slot, st in statuses.items():
+        mine = [r for r in recs if r.get("slot") == slot and r.get("run_utc") == st.get("run_utc")]
+        if len(mine) != 1:
+            problems.append(f"{len(mine)} {slot} run record(s) for run {st.get('run_utc')}, expected 1")
+            continue
+        r = mine[0]
+        want = (st.get("calibration") or {}).get("status")
+        got = (r.get("calibration") or {}).get("status")
+        if not r.get("complete") or r.get("exit_code") != st.get("exit_code") or got != want:
+            problems.append(f"the {slot} run record (complete {r.get('complete')}, exit "
+                            f"{r.get('exit_code')}, calibration {got}) is not the run's "
+                            f"(exit {st.get('exit_code')}, calibration {want})")
+    return problems
+
+
+def outcome_problems(st: dict, tree: Path, no_fit: bool = False) -> list[str]:
+    """What the simulated book slot's status (``st``) must show. A new fit: the fit
+    accepted, every parameter moved off the headline, the session's artifacts built.
+    --no-fit: the fit skipped (Yahoo's book empty) and the headline left as it was,
+    while the session's surface is built from its Cboe book by the backfill, with a
+    scorecard that lists Heston as not scored and gives the reason. Both: the forward
+    ledger recorded, the capture made, the session's VX settlements stored, every
+    artifact built and the run publishable."""
+    problems = []
+    sim = st.get("simulated", {})
+    session = sim.get("session")
+    cal = st.get("calibration") or {}
+    if no_fit:
+        if cal.get("status") != "skipped":
+            problems.append(f"the empty Yahoo book was not skipped: calibration {cal.get('status')} "
+                            f"{cal.get('reason')}")
+        head = (st.get("headline_calibration") or {}).get("date")
+        if head != sim.get("headline_before"):
+            problems.append(f"the headline fit moved to {head} without a fit "
+                            f"(was {sim.get('headline_before')})")
+        built = ((st.get("artifact_backfill") or {}).get("rebuilt") or {}).get(session) or {}
+        if not (built.get("surface") or {}).get("ok"):
+            problems.append(f"the backfill did not build {session}'s surface from its book: {built}")
+        sc_path = tree / "data_store" / "surface" / str(session) / "scorecard.json"
+        rows = json.loads(sc_path.read_text())["models"] if sc_path.exists() else []
+        heston = [m for m in rows if str(m.get("model", "")).startswith("heston")]
+        if not heston or any(m.get("available") is not False or not m.get("reason") for m in heston):
+            problems.append(f"{session}'s scorecard does not list Heston as not scored, with its reason: "
+                            f"{heston}")
+    else:
+        if cal.get("status") != "accepted":
+            problems.append(f"the simulated fit was not accepted: {cal.get('status')} {cal.get('reason')}")
+        fit = (cal.get("summary") or {}).get("params")
+        moves = param_moves(fit, sim["headline_params"]) if fit and sim.get("headline_params") else {}
+        still = sorted(k for k, m in moves.items() if m < MIN_PARAM_MOVE)
+        if fit and still:
+            problems.append(f"the new fit did not move off the headline in {still} (relative moves "
+                            f"{ {k: round(m, 4) for k, m in moves.items()} } < {MIN_PARAM_MOVE}): "
+                            "a test pinning the headline would not be caught")
+    if (st.get("forward_ledger") or {}).get("status") != "recorded":
+        problems.append(f"forward ledger: {st.get('forward_ledger')}")
+    if (st.get("capture") or {}).get("status") != "captured":
+        problems.append(f"capture: {st.get('capture')}")
+    vx = (st.get("market") or {}).get("vx_futures") or {}
+    if vx.get("last") != session or not any(
+            (tree / "data_store" / "market" / "vix_futures_daily").glob("vix_futures_daily_*.parquet")):
+        problems.append(f"VX settlements of the session not stored and persisted: {vx}")
+    arts = {**(st.get("artifacts") or {}),
+            **{f"{s} {k}": v for s, a in ((st.get("artifact_backfill") or {}).get("rebuilt") or {}).items()
+               for k, v in a.items()}}
+    for name, res in arts.items():
+        if not res.get("ok"):
+            problems.append(f"artifact {name}: {res.get('error')}")
+    if not st.get("publishable"):
+        problems.append(f"not publishable: {st.get('publish_blockers')}")
+    return problems
+
 
 def _pytest(cwd: Path, files: list, log: Path) -> tuple:
     t0 = time.perf_counter()
@@ -369,10 +491,12 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, default=None, help="scratch directory (default: a temp dir)")
     ap.add_argument("--full", action="store_true", help="also run the whole suite in the copy")
     ap.add_argument("--keep", action="store_true", help="keep the copy")
+    ap.add_argument("--no-fit", action="store_true",
+                    help="Yahoo's book empty (the Saturday slot): no fit, the surface from the Cboe book")
     ap.add_argument("--drive", type=Path, default=None, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if args.drive:
-        return drive(args.drive)
+        return drive(args.drive, no_fit=args.no_fit)
 
     out = Path(args.out or tempfile.mkdtemp(prefix="sim-next-session-")).resolve()
     tree = out / "tree"
@@ -387,36 +511,34 @@ def main(argv=None) -> int:
     status_file = out / "status.json"
     with open(out / "logs" / "bot.log", "w") as fh:
         r = subprocess.run([sys.executable, str(tree / "scripts" / "ci" / "simulate_next_session.py"),
-                            "--drive", str(status_file)], cwd=tree, env=env, stdout=fh,
-                           stderr=subprocess.STDOUT, check=False)
+                            "--drive", str(status_file), *(["--no-fit"] if args.no_fit else [])],
+                           cwd=tree, env=env, stdout=fh, stderr=subprocess.STDOUT, check=False)
     problems = []
     st = json.loads(status_file.read_text()) if status_file.exists() else {}
     sim = st.get("simulated", {})
     cal = st.get("calibration") or {}
     if r.returncode != 0:
         problems.append(f"cloud_refresh exited {r.returncode}: {st.get('errors')}")
-    if cal.get("status") != "accepted":
-        problems.append(f"the simulated fit was not accepted: {cal.get('status')} {cal.get('reason')}")
+    problems += outcome_problems(st, tree, no_fit=args.no_fit)
     fit = (cal.get("summary") or {}).get("params")
     moves = param_moves(fit, sim["headline_params"]) if fit and sim.get("headline_params") else {}
-    still = sorted(k for k, m in moves.items() if m < MIN_PARAM_MOVE)
-    if fit and still:
-        problems.append(f"the new fit did not move off the headline in {still} (relative moves "
-                        f"{ {k: round(m, 4) for k, m in moves.items()} } < {MIN_PARAM_MOVE}): "
-                        "a test pinning the headline would not be caught")
-    if (st.get("forward_ledger") or {}).get("status") != "recorded":
-        problems.append(f"forward ledger: {st.get('forward_ledger')}")
-    if (st.get("capture") or {}).get("status") != "captured":
-        problems.append(f"capture: {st.get('capture')}")
-    for name, res in (st.get("artifacts") or {}).items():
-        if not res.get("ok"):
-            problems.append(f"artifact {name}: {res.get('error')}")
-    if not st.get("publishable"):
-        problems.append(f"not publishable: {st.get('publish_blockers')}")
-    ok_arts = sorted(k for k, v in (st.get("artifacts") or {}).items() if v.get("ok"))
+    close_file = status_file.with_name("status_close.json")
+    close_st = json.loads(close_file.read_text()) if close_file.exists() else {}
+    problems += run_record_problems(tree, {"close": close_st, "book": st})
+    # the capture commit's integrity gate, on what the simulated runs wrote
+    ok_list = out / "captures.ok"
+    with open(out / "logs" / "check_captures.log", "w") as fh:
+        rc = subprocess.run([sys.executable, str(tree / "scripts" / "ci" / "check_captures.py"), "--out",
+                             str(ok_list), "--root", str(tree)], cwd=tree, env=env, stdout=fh,
+                            stderr=subprocess.STDOUT, check=False).returncode
+    if rc != 0:
+        problems.append(f"check_captures.py exited {rc} on the simulated captures (logs/check_captures.log)")
+    ok_arts = sorted(k for k, v in (st.get("artifacts") or {}).items() if v.get("ok")) + sorted(
+        f"{k} (backfill)" for k, v in (((st.get("artifact_backfill") or {}).get("rebuilt") or {})
+                                       .get(sim.get("session")) or {}).items() if v.get("ok"))
     rmse = (cal.get("summary") or {}).get("spx_iv_rmse")
-    rows = [("bot run", r.returncode, sim.get("seconds"),
-             f"session {sim.get('session')}: calibration {cal.get('status')}"
+    rows = [("bot run" + (" (no fit: Yahoo's book empty)" if args.no_fit else ""), r.returncode,
+             sim.get("seconds"), f"session {sim.get('session')}: calibration {cal.get('status')}"
              + (f" (SPX RMSE {rmse:.2f} vp; parameters moved "
                 + ", ".join(f"{k} {m:.0%}" for k, m in moves.items()) + ")" if moves and rmse else "")
              + f", artifacts {ok_arts}")]

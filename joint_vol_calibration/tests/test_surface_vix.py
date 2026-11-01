@@ -339,3 +339,162 @@ def test_headline_method_refuses_an_extrapolated_bracket():
     assert "2026-10-30 (14.0d) / 2026-11-13 (28.0d)" in why
     assert "1.357" in why
     assert vix.headline_method({"cboe_rules": _rep(ok=False), "parity_forward": _rep(ok=False)})[0] is None
+
+
+# ── the VIX bracket against Cboe's 23-37 day window (CITSEC-03, QUANT-02, VALIDATOR-05)
+
+def _window_terms(expiries, calc):
+    """term_tables-like rows for ``expiries`` (all candidates) at ``calc``."""
+    out = []
+    for e in expiries:
+        sett = "AM" if vix.is_spx_am_settlement_date(e) else "PM"
+        m = vix.minutes_to_settlement(calc, e, sett)
+        out.append({"expiry": e, "settlement": sett, "minutes": m, "candidate": True})
+    return out
+
+
+def test_a_bracket_outside_cboes_term_window_is_a_listed_deviation():
+    """A chain without the candidates 23-37 days out (the 2026-10-26 Yahoo
+    chain bracketed 10.6 d / 31.6 d): the window check says so, names the
+    missing candidates with their days, and the deviation line carries both
+    terms' days. With the full listing the bracket is Cboe's and no line is
+    written."""
+    calc = datetime(2026, 10, 26, 16, 0, tzinfo=oc.NY_TZ).replace(tzinfo=None)   # naive NY, as the report
+    full = ["2026-11-06", "2026-11-13", "2026-11-20", "2026-11-27", "2026-12-04"]
+    terms = _window_terms(full, calc)
+    rep = {"ok": True, "near": None, "next": None}
+    near, nxt = vix.bracket(terms, 30 * 1440.0)
+    rep.update(near={"expiry": near["expiry"], "days": near["minutes"] / 1440.0},
+               next={"expiry": nxt["expiry"], "days": nxt["minutes"] / 1440.0})
+    win = vix.cboe_term_window(rep, terms, calc)
+    assert (win["near"]["expiry"], win["next"]["expiry"]) == ("2026-11-20", "2026-11-27")
+    assert win["inside"]
+    assert win["missing_candidates"] == []
+    assert vix.term_window_deviation(win) is None
+    sparse = _window_terms(["2026-11-06", "2026-11-27", "2026-12-18"], calc)
+    near, nxt = vix.bracket(sparse, 30 * 1440.0)
+    rep = {"ok": True, "near": {"expiry": near["expiry"], "days": near["minutes"] / 1440.0},
+           "next": {"expiry": nxt["expiry"], "days": nxt["minutes"] / 1440.0}}
+    win = vix.cboe_term_window(rep, sparse, calc)
+    assert not win["inside"]
+    # the SPX monthly 24.7 d out; 2026-11-13 (18 d) and 2026-12-04 (39 d) are outside the window
+    assert [m["expiry"] for m in win["missing_candidates"]] == ["2026-11-20"]
+    assert win["missing_candidates"][0]["settlement"] == "AM"            # the SPX monthly
+    for m in win["missing_candidates"]:
+        assert 23.0 < m["days"] < 37.0
+    line = vix.term_window_deviation(win)
+    assert line.startswith(f"VIX bracket 2026-11-06 ({rep['near']['days']:.1f} d) / 2026-11-27 "
+                           f"({rep['next']['days']:.1f} d) is not Cboe's")
+    days = win["missing_candidates"][0]["days"]
+    assert line.endswith(f"and the stored chain lacks the candidate expiry 2026-11-20 ({days:.1f} d); "
+                         "the level interpolates a wider bracket.")
+    assert vix.cboe_term_window({"ok": False}, sparse, calc) is None
+    assert vix.term_window_deviation(None) is None
+
+
+# ── the rate per term: Cboe's bounded spline on the CMT yields (plan 0.5) ──────
+
+# The sample calculation's CMT yields, the curve of 2022-09-26 (percent), at
+# Cboe's tenors in days; the sample computes on 2022-09-27 and publishes
+# R1 = 0.031664% (SPX AM 2022-10-21) and R2 = 0.028797% (SPXW PM 2022-10-28).
+SAMPLE_CMT_DAYS = (30, 60, 91, 182, 365, 730, 1095, 1825, 2555, 3650, 7300, 10950)
+SAMPLE_CMT_PCT = (0.03, 0.02, 0.04, 0.05, 0.08, 0.11, 0.22, 0.59, 1.00, 1.37, 2.03, 2.21)
+
+
+def _sample_rates():
+    return vix.CMTRates("2022-09-26", tuple(float(d) for d in SAMPLE_CMT_DAYS),
+                        tuple(y / 100.0 for y in SAMPLE_CMT_PCT))
+
+
+def test_sample_rates_are_cboes_spline_of_the_sample_curve(sample):
+    """The replication used one rate for both terms (the zero curve's 91-day
+    rate); Cboe interpolates the CMT yields at each term's expiration. Its
+    bounded spline reproduces the sample's published R1 and R2 to their six
+    decimals of a percent, and with them the sample's variances: the near
+    term's spline value lies above the line through the 1-month and 2-month
+    points, so its rate is that bound; the next term's is the spline itself."""
+    rates = _sample_rates()
+    assert (rates.t_days("2022-10-21"), rates.t_days("2022-10-28")) == (25, 32)
+    r1, r2 = rates("2022-10-21"), rates("2022-10-28")
+    assert round(100.0 * r1, 6) == round(100.0 * R1, 6)
+    assert round(100.0 * r2, 6) == round(100.0 * R2, 6)
+    near = _term(sample, "near", 34484, r1)
+    nxt = _term(sample, "next", 44954, r2)
+    assert (near["R"], nxt["R"]) == (r1, r2)
+    assert near["sigma2"] == pytest.approx(0.019233906, abs=5e-10)
+    assert nxt["sigma2"] == pytest.approx(0.019423884, abs=5e-10)
+    # the bound binds on the near term: the unbounded spline would give a higher rate
+    from scipy.interpolate import CubicSpline
+    free = float(CubicSpline(np.array(SAMPLE_CMT_DAYS, float), np.array(SAMPLE_CMT_PCT) / 100.0,
+                             bc_type="natural")(25.0))
+    assert vix.bey_to_cc(free) > r1
+
+
+def test_bounded_spline_rules():
+    """Between two tenors the yield stays between theirs; before the first
+    tenor it stays between Cboe's two lines through the first point (flat
+    where no later tenor is on that side); past the last tenor it is held;
+    the conversion is BEY -> APY -> continuous compounding."""
+    days = (30.0, 60.0, 91.0, 182.0)
+    kinked = (0.040, 0.040, 0.020, 0.020)               # the natural spline overshoots both flats
+    from scipy.interpolate import CubicSpline
+    cs = CubicSpline(np.array(days), np.array(kinked), bc_type="natural")
+    t_over = next(t for t in np.arange(31.0, 60.0) if cs(t) > 0.040)
+    assert vix.cboe_bounded_spline_bey(days, kinked, t_over) == pytest.approx(0.040, abs=1e-15)
+    t_under = next(t for t in np.arange(92.0, 182.0) if cs(t) < 0.020)
+    assert vix.cboe_bounded_spline_bey(days, kinked, t_under) == pytest.approx(0.020, abs=1e-15)
+    for t in days:                                      # a tenor's own yield
+        assert vix.cboe_bounded_spline_bey(days, kinked, t) == pytest.approx(kinked[days.index(t)])
+    # before the first tenor, an upward curve: from below the line to the first higher point,
+    # from above flat at the first yield (no later tenor at or below it)
+    up = (0.030, 0.035, 0.040, 0.045)
+    y = vix.cboe_bounded_spline_bey(days, up, 10.0)
+    assert 0.030 - 0.005 / 30.0 * 20.0 - 1e-15 <= y <= 0.030 + 1e-15
+    # a fully inverted curve: flat at the first yield from below
+    down = (0.050, 0.045, 0.040, 0.035)
+    y = vix.cboe_bounded_spline_bey(days, down, 10.0)
+    assert 0.050 - 1e-15 <= y <= 0.050 + 0.005 / 30.0 * 20.0 + 1e-15
+    assert vix.cboe_bounded_spline_bey(days, up, 400.0) == 0.045
+    with pytest.raises(ValueError, match="at least two CMT points"):
+        vix.cboe_bounded_spline_bey((30.0,), (0.04,), 20.0)
+    assert vix.bey_to_cc(0.04) == pytest.approx(np.log((1.0 + 0.02) ** 2), rel=1e-15)
+
+
+def test_each_term_is_discounted_at_its_own_rate():
+    """A rate per term (a function of the expiry): each term's variance uses
+    its own e^{RT} and records its R; one number still means both terms."""
+    terms = _flat_terms(0.20, 5000.0, 0.70, 1.30)
+    near_e, next_e = terms[0]["expiry"], terms[1]["expiry"]
+    per_term = {near_e: 0.03, next_e: 0.05}
+    rep = vix.replicate_index(terms, per_term.__getitem__, 30)
+    assert (rep["near"]["R"], rep["next"]["R"]) == (0.03, 0.05)
+    for lab, t in (("near", terms[0]), ("next", terms[1])):
+        tab = t["table"]
+        own = vix.single_term_variance(tab.index.to_numpy(float), tab["bid_c"], tab["ask_c"],
+                                       tab["bid_p"], tab["ask_p"], t["T"], per_term[t["expiry"]])
+        assert rep[lab]["sigma2"] == own["sigma2"]
+    flat = vix.replicate_index(terms, 0.04, 30)
+    assert (flat["near"]["R"], flat["next"]["R"]) == (0.04, 0.04)
+    strip = vix.variance_swap_strip(terms, per_term.__getitem__)
+    assert [r["R"] for r in strip] == [0.03, 0.05]
+
+
+def test_a_sessions_cmt_curve_is_the_newest_before_it():
+    """cmt_rates reads the stored Treasury par yields of the newest date
+    strictly before the session (the session's own curve is not used, as in
+    Cboe's sample), at Cboe's tenors only."""
+    from joint_vol_calibration.data import rates
+    q = rates.load_rate_quotes()
+    par = q[q["series"].astype(str).str.startswith("UST_PAR_")]
+    session = "2026-10-16"
+    assert session in set(par["date"])                      # the session has its own curve ...
+    want = str(par.loc[par["date"] < session, "date"].max())
+    got = vix.cmt_rates(session)
+    assert got.curve_date == want                           # ... and it is not the one read
+    day = par[par["date"] == want].set_index("series")["value"]
+    assert dict(zip(got.days, got.bey)) == {float(vix.CBOE_CMT_DAYS[s]): float(v)
+                                             for s, v in day.items() if s in vix.CBOE_CMT_DAYS}
+    assert "UST_PAR_4M" in set(day.index)
+    assert 120.0 not in got.days                            # not one of Cboe's tenors
+    with pytest.raises(LookupError):
+        vix.cmt_rates("2009-06-01")                         # before the stored record

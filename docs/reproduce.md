@@ -78,5 +78,10 @@ Provenance differences, reported and not failed:
   (7,583 lines); the stored chain holds the 6,191 two-sided lines of that download, which reproduce the same clean
   quotes and the same fit.
 
-CI runs `make reproduce` weekly and on demand on GitHub's runners (job `reproduce` in tests.yml), which tests the same
-claim on a different CPU; there the 1e-10 and 1e-6 tolerances, not bit equality, are the claim.
+CI runs `make reproduce` weekly (Monday 06:41 UTC) and on demand on GitHub's runners
+(`.github/workflows/reproduce.yml`), which tests the same claim on a different CPU; there the 1e-10 and 1e-6
+tolerances, not bit equality, are the claim. The workflow commits the result as `data_store/reproduce/status.json`
+(`reproduce.py --status`: commit, run, `finished_utc`, `n_checks`, `n_ok`, `n_exact` (deviation exactly 0),
+`max_deviation`, `failed`), the Model Risk page prints "Last reproduced <date>: k of n artifacts within tolerance (b
+exact)" from it ("Not yet reproduced" before the first run), and a failure opens or comments on one issue labelled
+`reproduce-failure`. It runs in its own concurrency group, so a push to main no longer cancels it.

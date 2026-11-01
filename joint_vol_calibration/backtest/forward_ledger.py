@@ -465,6 +465,44 @@ def quote_after_close(session: str, quote_time) -> bool | None:
     return True
 
 
+def book_time_refusal(session: str, quote_time, fetched_at=None) -> str | None:
+    """Why a captured book cannot hold ``session``'s closing or later quotes
+    (None: it can): quoted before the 16:00 ET close (quote_after_close), or,
+    for a book that records no quote time (Yahoo), downloaded before it.
+    With book_share_refusal, the quote-state gates a book must pass to be the
+    forward ledger's (scripts/cloud_refresh.record_forward_ledger) or the
+    session's surface (surface.quotes.load_session_quotes)."""
+    try:
+        quote_after_close(session, quote_time)
+    except ValueError as e:
+        return str(e)
+    if _as_iso(quote_time) is None and fetched_at:
+        try:
+            quote_after_close(session, fetched_at)
+        except ValueError:
+            return f"downloaded at {fetched_at}, before the {session} close that the session's signals use"
+    return None
+
+
+def book_share_refusal(clean) -> str | None:
+    """Why a cleaned book (option_chain.CleanChain) is not a live book (None:
+    it is): fewer than option_chain.MIN_TWO_SIDED_SHARE of its near-ATM lines
+    are two-sided, the calibration's own quote-state gate."""
+    from joint_vol_calibration.data.option_chain import MIN_TWO_SIDED_SHARE
+
+    share = float((getattr(clean, "diagnostics", None) or {}).get("near_atm_two_sided_share") or 0.0)
+    if share < MIN_TWO_SIDED_SHARE:
+        return f"not a live book ({share:.0%} of near-ATM lines two-sided)"
+    return None
+
+
+def _as_iso(when) -> str | None:
+    from joint_vol_calibration.data.option_chain import _as_instant
+
+    q = _as_instant(when)
+    return None if q is None else q.isoformat()
+
+
 def _opt_float(x: Any) -> float | None:
     return None if x is None else float(x)
 

@@ -94,7 +94,7 @@
   <div class="banner banner-warn s12">
     <div class="banner-icon" aria-hidden="true">!</div>
     <div><div class="banner-title">ρ = {{ d.rho|fmt(".4f") }} — AT THE LOWER BOUNDARY ({{ d.rho_bound|fmt(".2f") }})</div>
-      <div class="banner-body">A one-factor diffusion cannot reproduce this snapshot's SPX skew; it needs jumps or rough volatility (e.g. rough Heston, an affine Volterra model). The one Bates SVJ fit did not converge, so it is not a result.</div></div>
+      <div class="banner-body">A one-factor diffusion cannot reproduce this snapshot's SPX skew; it needs jumps or rough volatility (e.g. rough Heston, an affine Volterra model). {{ d.bates_note }}</div></div>
   </div>
   {% endif %}
 </div>
@@ -102,7 +102,7 @@
 <div class="g">
   {% call m.panel('oos', 'Out-of-sample error by expiry', 's12', (d.n_oos|fmt(',')) ~ ' quotes') %}
     {% if d.charts.oos %}{{ m.chart(d.charts.oos, 'h260') }}
-    <p class="note">Bars: RMSE of the quotes the fit did not use, per expiry; dashed line: the in-sample RMSE on the {{ d.n_spx_options|fmt }} anchors. The short end is where a one-factor model with σ on its box ceiling fails; in half-spreads on the same chain, see {{ m.cite('the Surface scorecard', 'surface.html#scorecard') }}.</p>
+    <p class="note">Bars: RMSE of the quotes the fit did not use, per expiry; dashed line: the in-sample RMSE on the {{ d.n_spx_options|fmt }} anchors.{% if d.oos_short_end %} <span id="oos-short-end">{{ d.oos_short_end }}</span>{% endif %} {% set oh = d.oos_hs %}{% if oh %} In half-spreads{% if oh.same %} on the same chain{% else %} on the session’s {{ oh.book }} quotes, not the chain fitted here{% endif %}, see {% if oh.shown %}{{ m.cite('the Surface scorecard', 'surface.html#scorecard') }}{% else %}the {{ d.session|fmt }} row of {{ m.cite('the Surface history', 'surface.html#surface-history') }}{% endif %}.{% endif %}</p>
     {% else %}<p class="note">This fit stores no out-of-sample errors by expiry.</p>{% endif %}
   {% endcall %}
 </div>
@@ -137,7 +137,7 @@
       </div>
     </div>
     {% if (d.vx_leg or {}).views %}{% set vl = d.vx_leg %}
-    <p class="note" id="vx-caption">Not in the objective: the loss has no VX-futures term (weight 0), so this is a test on prices the fit never saw. Model: E<sup>Q</sup>[VIX<sub>T</sub>] of the fitted Heston parameters, exact under the CIR law of v<sub>T</sub>, T = days to expiry / 365; market: Cboe’s daily settlement of each monthly contract (weeklies excluded), set at 15:00 Chicago time, while the fit’s SPX chain is {{ d.chain_sentence or 'a chain with no surface report to name its source' }} and its VIX indices are the 16:15 ET closes. Labels: model − settlement, index pts. {{ vl.n_with }} of {{ vl.views|length }} gated fits have settlements stored on their session{% if vl.last %}; the futures table ends {{ vl.last }}{% endif %}.</p>
+    <p class="note" id="vx-caption">Not in the objective: the loss has no VX-futures term (weight 0), so this is a test on prices the fit never saw. Model: E<sup>Q</sup>[VIX<sub>T</sub>] of the fitted Heston parameters, exact under the CIR law of v<sub>T</sub>, T = days to expiry / 365; market: Cboe’s daily settlement of each monthly contract (weeklies excluded), set at 15:00 Chicago time, while the fit’s SPX chain is {{ d.chain_sentence or 'a chain whose source the fit does not record' }} and its VIX indices are the 16:15 ET closes. Labels: model − settlement, index pts. {{ vl.n_with }} of {{ vl.views|length }} gated fits have settlements stored on their session{% if vl.last %}; the futures table ends {{ vl.last }}{% endif %}.</p>
     {% endif %}
   {% endcall %}
 </div>
@@ -177,6 +177,7 @@
 <h2 class="section-title">Smiles by anchor expiry</h2>
 {% set src = d.smile_source or {} %}
 {% if src.state != 'ok' %}{{ m.missing(src, 'Market bid–ask quotes and the model at the quoted strikes need the per-quote residual table for ' ~ (d.session or 'this session') ~ '; until it exists each panel shows the model smile only.') }}{% endif %}
+{% if d.smile_book and src.state == 'ok' %}<p class="note" id="smile-book">These panels draw the {{ d.session|fmt }} surface’s quotes, {{ d.smile_book.book }}, not the {{ d.smile_book.fit or 'chain' }} the fit was made on. The diamonds are the strikes the fit’s anchor rule picks on that book, so the errors here are not the fit’s stored RMSEs.</p>{% endif %}
 {% set sg = d.smile_group %}
 {% if sg %}
 {# one legend and one Table / CSV for the six panels (small multiples: one
@@ -192,7 +193,7 @@
 </div>
 {{ m.data_table(sg.table, 'smile-group-data') }}
 {% endif %}
-<div class="g evenfill" style="margin-top:8px;">
+<div class="g evenfill top" style="margin-top:8px;">
   {% for s in d.smiles %}
   {% call m.panel('smile-' ~ s.expiry, s.expiry ~ ' · ' ~ (s.T_days|fmt('.0f')) ~ ' d', 's4', (s.badge if sg and s.badge else (((s.n|fmt) ~ ' anchors') if s.n else None))) %}
     {{ m.chart(s.spec, 'h300', tools=not sg) }}
@@ -273,14 +274,14 @@
   {% call m.panel('rough-vs-heston', 'Heston vs rough Heston · joint fit, every diagnosed session', 's12', 'diagnostics/summary.json') %}
     {% set rv = d.rough_vs_heston or {} %}
     {% if rv.state == 'ok' %}{% set jr = rv.result %}
-    {% if jr %}<p class="note" id="rough-verdict">Rough Heston (lifted, 20 factors) is fitted with the same anchors, VIX leg, weights and parameter box as the production Heston fit, plus H ∈ [0.02, ½], by multi-start trust-region least squares. Its out-of-sample SPX error is lower on <strong>{{ jr.n_lower }} of {{ jr.n_sessions }}</strong> sessions; on {{ jr.n_same }} it returns H = ½, which is Heston. H is weakly identified{% if jr.rough_H_side == 'floor' %} and sits on its {{ jr.rough_H_floor|fmt('g') }} floor on {{ jr.session }}{% elif jr.rough_H_side == 'ceiling' %} and on {{ jr.session }} the fit returns H = ½, which is Heston{% endif %}, so no Hurst exponent is read from these fits (compare arXiv:2401.03345).</p>{% endif %}
+    {% if jr %}<p class="note" id="rough-verdict">Rough Heston (lifted, 20 factors) is fitted with the same anchors, VIX leg, weights and parameter box as the production Heston fit, plus H ∈ [{{ d.boxes.h_lo|fmt('g') }}, {{ '½' if d.boxes.h_hi == 0.5 else d.boxes.h_hi|fmt('g') }}], by multi-start trust-region least squares. Its out-of-sample SPX error is lower on <strong>{{ jr.n_lower }} of {{ jr.n_sessions }}</strong> sessions; on {{ jr.n_same }} it returns H = ½, which is Heston. H is weakly identified{% if jr.rough_H_side == 'floor' %} and sits on its {{ jr.rough_H_floor|fmt('g') }} floor on {{ jr.session }}{% elif jr.rough_H_side == 'ceiling' %} and on {{ jr.session }} the fit returns H = ½, which is Heston{% endif %}, so no Hurst exponent is read from these fits (compare arXiv:2401.03345).</p>{% endif %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Heston versus rough Heston by session (scrollable)">
     <table class="tbl dense" id="rough-heston-table"><caption>Joint SPX/VIX fits by session: out-of-sample SPX IV RMSE (vol pts) on the same quotes, VIX-index RMSE (index pts), model VVIX against the market</caption>
       <thead><tr><th scope="col">Session</th><th scope="col" class="num">Heston OOS</th><th scope="col" class="num">Rough OOS</th><th scope="col" class="num">Rough − Heston</th><th scope="col" class="num">H</th><th scope="col" class="num">Heston VIX</th><th scope="col" class="num">Rough VIX</th><th scope="col" class="num">Lifting error (vol pts)</th><th scope="col" class="num">{{ 'Free-σ OOS'|sym }}</th><th scope="col" class="num">VVIX model / market</th></tr></thead>
       <tbody>{% for r in rv.rows %}<tr{% if r.session == d.session %} class="em"{% endif %}><td><span class="nowrap">{{ r.session }}</span>{% if 'sigma' in r.on_bound %} {{ m.chip('σ at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.sigma_cap2_oos|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_oos|fmt('.2f') }}</td><td class="num">{{ r.rough_minus_heston|signed('.2f') }}</td><td class="num">{{ r.joint_rough_H|fmt('.2f') }}{% if 'H' in r.joint_rough_on_bound %} {{ m.chip('on bound', 'watch') }}{% endif %}</td><td class="num">{{ r.joint_heston_vix_index|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_vix_index|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_lifting_error_estimate_max_vp|fmt('.3f') }}</td><td class="num">{{ r.sigma_free_oos|fmt('.2f') }}</td><td class="num">{{ r.vvix_model_cap2|fmt('.0f') }} / {{ r.vvix_market|fmt('.0f') }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
-    <p class="note">Heston OOS is the production fit (σ ≤ 2); free-σ OOS refits it with σ ≤ 10 and κ ≤ 60 (the σ profile above). The lifting error is the numerics check of the 20-factor approximation at the fitted point. VVIX is the model's 30-day vol of VIX at the boxed optimum against the ^VVIX close; what a wider σ box does to it, session by session, is in the <a href="#sigma-tradeoff">σ-profile panel</a> above. {{ rv.rows|length }} sessions with a stored chain: a range, not a statistic.{% if d.skew_term %} The market’s ATM skew against maturity on the same sessions, and Heston’s, is in the <a href="#skew-term">ATM-skew panel</a>.{% endif %}</p>
+    <p class="note" id="rough-vs-heston-note">Heston OOS is the production fit (σ ≤ {{ d.boxes.sigma_hi|fmt('g') }}); free-σ OOS refits it with σ ≤ {{ d.boxes.free_sigma|fmt('g') }} and κ ≤ {{ d.boxes.free_kappa|fmt('g') }} (the σ profile above). The lifting error is the numerics check of the 20-factor approximation at the fitted point. VVIX is the model's 30-day vol of VIX at the boxed optimum against the ^VVIX close; what a wider σ box does to it, session by session, is in the <a href="#sigma-tradeoff">σ-profile panel</a> above. {{ rv.rows|length }} sessions with a stored chain: a range, not a statistic.{% if d.skew_term %} The market’s ATM skew against maturity on the same sessions, and Heston’s, is in the <a href="#skew-term">ATM-skew panel</a>.{% endif %}</p>
     {% elif rv.state == 'absent' %}
     {{ m.missing(rv, 'The joint Heston and rough Heston fits of every diagnosed session.') }}
     {% else %}
@@ -348,7 +349,7 @@
     {% if not h.gate_ok %}That Heston fit fails today's quality gate ({{ h.gate_reason }}), so it is not the page headline.{% endif %}</p>
     {% else %}<p class="note">No Heston fit exists for the Quintic session ({{ q.as_of|fmt }}), so no like-for-like comparison is shown.</p>{% endif %}
     {% call m.method('Reading this honestly') %}
-    <p class="prose">{% if q.converged == false %}The Quintic optimiser stopped at its iteration limits without meeting its tolerance. {% endif %}{% if q.at_bound %}Parameters on a search bound: <code>{{ q.at_bound|join(', ') }}</code>{% if q.eps_saturated %} (ε at −0.99: the skew wants more leverage than the bound allows){% endif %}. {% endif %}ξ₀ is bootstrapped from the VIX indices, so the Quintic reproduces them by construction; that is an input check, not a fit metric. The VIX-forward and VIX-options legs are where the models differ: they are in the Quintic's objective and not in Heston's. Fit time {{ q.fit_time|fmt(",.1f") }} s, {{ q.n_evals|fmt(",") }} evaluations; SPX RMSE on fresh MC paths {{ q.spx_rmse_fresh|fmt(".3f") }} vol pts.</p>
+    <p class="prose">{% if q.converged == false %}The Quintic optimiser stopped without meeting its tolerance{% if q.stop_reason %} ({{ q.stop_reason }}){% endif %}. {% endif %}{% if q.at_bound %}Parameters on a search bound: <code>{{ q.at_bound|join(', ') }}</code>{% if q.eps_saturated %} (ε at {{ q.eps_lo|signed('g') }}: the skew wants more leverage than the bound allows){% endif %}. {% endif %}ξ₀ is bootstrapped from the VIX indices, so the Quintic reproduces them by construction; that is an input check, not a fit metric. The VIX-forward and VIX-options legs are where the models differ: they are in the Quintic's objective and not in Heston's. Fit time {{ q.fit_time|fmt(",.1f") }} s, {{ q.n_evals|fmt(",") }} evaluations; SPX RMSE on fresh MC paths {{ q.spx_rmse_fresh|fmt(".3f") }} vol pts.</p>
     {% endcall %}
   {% endcall %}
 </div>

@@ -971,14 +971,19 @@ def recorded_rate_reference(result: dict) -> str:
 
 def recorded_inputs(result: dict) -> dict:
     """JointCalibrator keyword arguments that rebuild a stored fit's
-    objective: its recorded VIX targets and its rate reference (or the rate
-    it was given as an argument)."""
+    objective: its recorded VIX targets, its rate reference (or the rate it
+    was given as an argument) and, when the fit measured T from a quote time,
+    that time (the 2026-10-26 fit used its Yahoo download instant; the
+    cleaner no longer reads a Yahoo chain's stored time as a quote time)."""
     rec = result.get("rate_reference")
     out: dict[str, Any] = {"vix_targets": recorded_vix_targets(result)}
     if isinstance(rec, dict) and rec.get("kind") == "argument":
         out["r"] = float(rec["r_91d"])
     else:
         out["rate_reference"] = recorded_rate_reference(result)
+    diag = result.get("chain_diagnostics") or {}
+    if str(diag.get("t_origin_basis", "")).startswith("quote_time") and diag.get("quote_time"):
+        out["spx_quote_time"] = str(diag["quote_time"])
     return out
 
 
@@ -1070,6 +1075,7 @@ class JointCalibrator:
         feller: str = "off",
         vix_targets: Mapping[str, float] | None = None,
         rate_reference: str = DEFAULT_RATE_REFERENCE,
+        spx_quote_time: str | None = None,
     ):
         """
         Parameters
@@ -1102,6 +1108,13 @@ class JointCalibrator:
                      ^IRX when the curve is missing or stale, recorded) or
                      "irx" (the 13-week bill, as every fit committed before
                      C23; recorded_inputs(result) gives a stored fit's)
+        spx_quote_time: the quote time to measure the SPX chain's T from
+                     (option_chain.clean_option_chain quote_time), when a raw
+                     or stored chain is cleaned here. None (default): what
+                     the chain records. recorded_inputs(result) passes the
+                     one a committed fit recorded: the 2026-10-26 fit took
+                     T from its Yahoo download instant, which the cleaner no
+                     longer reads as a quote time.
         """
         if feller not in _FELLER_MODES:
             raise ValueError(f"feller must be one of {_FELLER_MODES}, got {feller!r}")
@@ -1113,6 +1126,7 @@ class JointCalibrator:
         self.feller = feller
         self.w1, self.w2, self.w3 = w1, w2, w3
         self._spx_chain_in = spx_chain
+        self._spx_quote_time = spx_quote_time
         self._vix_targets = None if vix_targets is None else {str(k): float(v)
                                                               for k, v in vix_targets.items()}
         if rate_reference not in RATE_REFERENCE_KINDS:
@@ -1244,7 +1258,8 @@ class JointCalibrator:
             self._spx_hist["date"].astype(str).str[:10] == self.spx_snapshot_session, "close"]
         S_sess = float(sess_close.iloc[-1]) if len(sess_close) else self.S
         return oc.clean_option_chain(raw, self.spx_snapshot_session, S_sess,
-                                     r_ref=self.rate_ref.for_clean())
+                                     r_ref=self.rate_ref.for_clean(),
+                                     quote_time=self._spx_quote_time)
 
     def _prepare_spx_surface(self) -> pd.DataFrame:
         """
@@ -1715,8 +1730,11 @@ class JointCalibrator:
         d = getattr(self, "spx_chain_diagnostics", None) or {}
         origin = d.get("t_origin")
         gth = str(d.get("t_origin_basis", "")).startswith("quote_time")
-        start = (f"the quote time {origin} (Cboe Global Trading Hours book)" if gth
-                 else "the quote session's 16:00 ET close (closing book)")
+        fetched = d.get("fetched_at")
+        start = (f"the quote time {origin} (Global Trading Hours book)" if gth
+                 else "the quote session's 16:00 ET close "
+                      + (f"(the chain records no quote time; downloaded {fetched})" if fetched
+                         else "(closing book)"))
         return {
             "T": f"from {start} to 16:00 ET (PM) / 09:30 ET (AM) settlement, /365d",
             "T_origin": origin,

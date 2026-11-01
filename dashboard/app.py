@@ -31,6 +31,7 @@ Run a local preview (read-only, bound to 127.0.0.1):
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import glob
 import hashlib
@@ -46,6 +47,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -73,6 +75,9 @@ _logger = logging.getLogger("vol_dashboard")
 ROOT = Path(__file__).resolve().parent.parent
 DASH = Path(__file__).resolve().parent
 DATA = ROOT / "data_store"
+# The deploy streak the daily workflow computes from gh-pages history before it
+# freezes (scripts/ci/deploy_streak.py; gitignored, never committed): absent locally.
+DEPLOY_STREAK_FILE = ROOT / ".deploy-streak.json"
 sys.path.insert(0, str(ROOT))
 if str(DASH) not in sys.path:
     sys.path.insert(0, str(DASH))
@@ -82,6 +87,7 @@ import desk_charts as charts  # noqa: E402
 import desk_cone  # noqa: E402
 import desk_density  # noqa: E402
 import desk_glossary  # noqa: E402
+import desk_inventory  # noqa: E402
 import desk_market  # noqa: E402
 import desk_monitor  # noqa: E402
 import desk_quotes  # noqa: E402
@@ -94,6 +100,7 @@ from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates
     BERLIN_11,
     CIVIDIS_11,
     DIVERGE_11,
+    HEAT_CLASSES,
     MINUS,
     SPX_MULTIPLIER,
     _fmt,
@@ -153,7 +160,7 @@ NAV: list[tuple[str, str, str, str]] = [
     ("/research", "Research", "e",
      "The 2018–2025 delta-hedged straddle backtest (mark-to-model), its inference and β sensitivity."),
     ("/corrections", "Corrections", "x",
-     "Correction rounds C16–C23 as postmortems, each tied to commits and regression tests."),
+     "Every correction round from C16 on as a postmortem, each tied to commits and regression tests."),
     ("/model-risk", "Model Risk", "m", "Model inventory and monitoring checks with explicit thresholds."),
 ]
 
@@ -413,6 +420,24 @@ def with_unit(text: Any, unit: str) -> str:
 
 app.jinja_env.filters["u"] = with_unit
 
+# A chart spec's fields the page renders as HTML from it (the chart's aria-label,
+# its description, legend bar and data table) and desk.js never reads: left out of
+# its JSON (D2: 209 KB of a 45-expiry Surface page, 51 KB of Research's)
+SPEC_HTML_FIELDS = ("table", "describe", "legend_items", "title")
+
+
+def spec_json(spec: Any) -> Any:
+    """A chart spec as the page's JSON block: compact, UTF-8, keys sorted, HTML-safe
+    (<, >, & and ' as JSON escapes, as Flask's tojson), without SPEC_HTML_FIELDS."""
+    from jinja2.utils import htmlsafe_json_dumps
+
+    if isinstance(spec, dict):
+        spec = {k: v for k, v in spec.items() if k not in SPEC_HTML_FIELDS}
+    return htmlsafe_json_dumps(spec, dumps=app.json.dumps, separators=(",", ":"), ensure_ascii=False)
+
+
+app.jinja_env.filters["spec_json"] = spec_json
+
 
 _GREEK = re.compile(r"([\u0370-\u03ff\u1f00-\u1fff]+)")
 
@@ -626,16 +651,31 @@ def _read_vix_wide() -> pd.DataFrame:
 
 
 VX_TABLE = "data_store/vol_system.db"     # table vix_futures_daily
+# Cboe publishes VX daily settlements to 4 decimals (17.1186): printed at that
+# precision, a change is the exact difference of the two printed settlements
+VX_DP = 4
+VX_FMT = f".{VX_DP}f"
 
 
-def vx_last_date() -> str | None:
-    """The newest session the market DB stores VX futures for (None: no futures table)."""
+def vx_last_date(on_or_before: str | None = None) -> str | None:
+    """The newest session the market DB stores VX futures for, on or before
+    ``on_or_before`` when given (None: no futures table, or no row by then)."""
     with _db() as con:
         try:
-            row = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()
+            row = con.execute("SELECT MAX(date) FROM vix_futures_daily WHERE substr(date, 1, 10) <= ?",
+                              (on_or_before or "9999-12-31",)).fetchone()
         except sqlite3.OperationalError:          # a market DB without the futures table
             return None
     return str(row[0])[:10] if row and row[0] else None
+
+
+def vix_close_on(session: str) -> float | None:
+    """VIX's close of exactly ``session`` (vix_daily: Cboe's 16:15 ET print), to the
+    2 dp Cboe publishes (a float32 copy of a print reads 18.389999389648438), or
+    None when the market DB has none for that session."""
+    with _db() as con:
+        row = con.execute("SELECT close FROM vix_daily WHERE substr(date, 1, 10) = ?", (session,)).fetchone()
+    return round(float(row[0]), 2) if row and row[0] is not None else None
 
 
 def vx_prev_date(before: str) -> str | None:
@@ -664,27 +704,61 @@ def vx_session_rows(session: str) -> list[dict]:
     return cast("list[dict]", df.to_dict("records"))
 
 
-def _latest_market_session() -> str | None:
-    """Newest session any dashboard input knows about (DB close or rule label).
-
-    The reference date for every staleness age: an input is 'n sessions old'
-    relative to the newest session the site has data for.
-    """
-    dates = []
+def newest_session_parts() -> dict[str, str | None]:
+    """The newest session the site has data for and where it comes from:
+    ``db`` the market database's newest close (MAX spx_ohlcv.date), ``labels``
+    the newest rule label, ``ref`` the later of the two (None if neither)."""
+    db = labels = None
     try:
         with _db() as con:
             row = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()
         if row and row[0]:
-            dates.append(str(row[0])[:10])
+            db = str(row[0])[:10]
     except Exception as exc:  # reported by the loaders that need the DB
         _logger.info("latest session: DB unavailable (%s)", exc)
     try:
-        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])
+        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet",
+                             columns=["regime"])["regime"].dropna()
         if len(rl):
-            dates.append(str(pd.Timestamp(rl.index[-1]).date()))
+            labels = str(pd.Timestamp(rl.index[-1]).date())
     except Exception as exc:
         _logger.info("latest session: regime labels unavailable (%s)", exc)
-    return max(dates) if dates else None
+    return {"ref": max((x for x in (db, labels) if x), default=None), "db": db, "labels": labels}
+
+
+def _latest_market_session() -> str | None:
+    """Newest session any dashboard input knows about (DB close or rule label).
+
+    The reference date for every staleness age (the footer's freshness table,
+    the page badges, the VX futures lag): an input is 'n sessions old'
+    relative to the newest session the site has data for.
+    """
+    return newest_session_parts()["ref"]
+
+
+def newest_session_source(parts: Mapping[str, str | None]) -> str | None:
+    """What the newest session is when the market database and the rule labels
+    disagree on it (None when they agree): its source and the other one's date."""
+    ref, db, labels = parts.get("ref"), parts.get("db"), parts.get("labels")
+    if ref is None or db == labels:
+        return None
+    if ref == labels:
+        return f"the rule labels’ date; the market database ends {db}" if db else "the rule labels’ date"
+    return (f"the market database’s newest close; the rule labels end {labels}" if labels
+            else "the market database’s newest close")
+
+
+def vx_freshness(vx_date: str | None = None) -> dict:
+    """The VX futures table's age: NYSE sessions from its newest date to the newest
+    session the site has data for (_latest_market_session). The one definition
+    the Overview (#vx-curve-age), Model Risk M5 and the footer's freshness table
+    use, so the three never disagree. ``vx_date`` defaults to vx_last_date()."""
+    parts = newest_session_parts()
+    date = vx_last_date() if vx_date is None else vx_date
+    age = session_age(date, parts["ref"]) if date and parts["ref"] else None
+    return {"date": date, "ref": parts["ref"], "db": parts["db"], "labels": parts["labels"],
+            "age": age, "level": stale_level(age) if age is not None else None,
+            "ref_source": newest_session_source(parts)}
 
 
 # ── Calibration selection ──────────────────────────────────────────────────────
@@ -784,17 +858,94 @@ def latest_good_calibration_path(cal_dir: str | Path | None = None) -> str | Non
     return max(candidates)[2]
 
 
+def load_run_records(data_dir: Path | None = None) -> list[dict]:
+    """The daily job's run records (data_store/runs/run_<run_utc>_<slot>.json,
+    scripts/cloud_refresh.py run_record), oldest first. A file that cannot be
+    read is logged and skipped: the records explain a banner, they are not a
+    number on a page (scripts/ci/check_captures.py validates each before the
+    job commits it)."""
+    d = (Path(data_dir) if data_dir is not None else DATA) / "runs"
+    out = []
+    for f in sorted(d.glob("run_*.json")) if d.is_dir() else []:
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError) as e:
+            _logger.warning("run record %s unreadable: %s", f.name, e)
+            continue
+        if isinstance(rec, dict) and rec.get("schema") == "run_ledger/1" and rec.get("run_utc"):
+            out.append(rec)
+    return sorted(out, key=lambda r: str(r["run_utc"]))
+
+
+def _run_record_cause(session: str, records: list[dict]) -> str | None:
+    """'The gate rejected <s> (<slot>): <reason>' from the newest run that tried
+    to fit a session after ``session`` and did not store a fit."""
+    tried = [r for r in records
+             if (c := r.get("calibration") or {}).get("session") and str(c["session"]) > session
+             and c.get("status") in ("rejected", "skipped", "failed")]
+    if not tried:
+        return None
+    newest = max(str(r["calibration"]["session"]) for r in tried)
+    on_newest = [r for r in tried if str(r["calibration"]["session"]) == newest]
+    rejected = [r for r in on_newest if r["calibration"]["status"] == "rejected"]
+    r = (rejected or on_newest)[-1]
+    c = r["calibration"]
+    reason = str(c.get("reason") or "no reason recorded").rstrip(".")
+    slot = r.get("slot") or "run"
+    if c["status"] == "rejected":
+        head = f"The gate rejected {newest} ({slot}): {reason}"
+    elif c["status"] == "skipped":
+        head = f"The {slot} run did not fit {newest}: {reason}"
+    else:
+        head = f"The {newest} fit failed ({slot}): {reason}"
+    counts = Counter(x["calibration"]["status"] for x in tried)
+    more = ""
+    if len(tried) > 1:
+        more = (f" ({len(tried)} runs after {session} tried a fit: "
+                + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) + ")")
+    return f"{head}{more}; the {session} fit is shown."
+
+
+def unfitted_causes(sessions: Iterable[str], records: list[dict]) -> str:
+    """Why sessions have no Heston fit, from the job's run records as the stale
+    banner reads them (_run_record_cause): for each session, the newest run that
+    tried to fit it and stored nothing (a run whose own session it is first: a later
+    run that found a stale database also names the older session), a rejection first,
+    grouped by what
+    happened and the reason recorded: 'the gate rejected the fit of 2026-11-02 —
+    kappa pinned at bound (kappa=0.10); the job did not fit 2026-10-30 — no SPX
+    option chain returned'. A session no run record names is left out; '' when none is
+    named. The Surface history's note said each dash's scorecard 'says why',
+    and the scorecard says only that no fit is stored."""
+    groups: dict[tuple[str, str], list[str]] = {}
+    for s in sorted(set(sessions)):
+        tried = [r for r in records if str((r.get("calibration") or {}).get("session")) == s
+                 and r["calibration"].get("status") in ("rejected", "skipped", "failed")]
+        if not tried:
+            continue
+        tried = [r for r in tried if str(r.get("expected_session") or s) == s] or tried
+        c = ([r for r in tried if r["calibration"]["status"] == "rejected"] or tried)[-1]["calibration"]
+        why = str(c.get("reason") or "no reason recorded").rstrip(".")
+        groups.setdefault((str(c["status"]), why), []).append(s)
+    said = {"rejected": "the gate rejected the fit of {}", "skipped": "the job did not fit {}",
+            "failed": "the fit of {} failed"}
+    return "; ".join(f"{said[k].format(', '.join(ss))} — {why}" for (k, why), ss in groups.items())
+
+
 def calibration_stale_cause(session: str | None, data_dir: Path | None = None,
                             rows: list[dict] | None = None) -> str | None:
     """Why the headline fit is older than the newest session, from what the store holds.
 
     The stale banner said "No newer fit passed the quality gate" whether or not
     a newer fit existed. The cause is read from the store: a stored fit after
-    the headline that failed the gate (with the gate's recorded reason); a
-    stored SPX chain after it with no fit; or neither. The daily job stores a
-    session's chain and fit only when the fit passes the gate, so with neither
-    stored the store cannot say whether a later session was fitted and
-    rejected or not fitted at all, and the text says so.
+    the headline that failed the gate (with the gate's recorded reason); the
+    daily job's run records (data_store/runs, FUND_GRADE_PLAN 0.9): a later
+    session the gate rejected, with its slot and reason, or that a run skipped
+    or failed to fit; a stored SPX chain after it with no fit; or none of
+    these. The daily job stores a session's chain and fit only when the fit
+    passes the gate, so with no record and nothing stored the store cannot say
+    whether a later session was fitted and rejected or not fitted at all, and
+    the text says so.
     """
     if not session:
         return None
@@ -810,6 +961,9 @@ def calibration_stale_cause(session: str | None, data_dir: Path | None = None,
                else f"failed the quality gate: {last['reason']}")
         more = f" ({len(newer)} stored fits after {session}, none accepted)" if len(newer) > 1 else ""
         return f"The {last['session']} fit is stored but {why}{more}; the {session} fit is shown."
+    from_runs = _run_record_cause(session, load_run_records(data))
+    if from_runs:
+        return from_runs
     later = [c for c in chains if c > session]
     if later:
         return f"An SPX closing chain for {later[-1]} is stored but no fit of it; the {session} fit is shown."
@@ -1448,6 +1602,7 @@ def load_page2() -> dict[str, Any]:
             d["r_ref_pct"] = round(float(cal["r_reference"]) * 100, 2)
             d["r_ref_source"] = cal.get("r_reference_source")
             kind = (cal.get("rate_reference") or {}).get("kind")
+            d["r_ref_kind"] = kind or "irx"
             if kind == "treasury_curve":
                 d["r_ref_label"] = "Treasury r(91d)"
                 d["r_ref_detail"] = ("Treasury zero curve, 91-day zero rate, continuously "
@@ -1582,6 +1737,9 @@ def load_page2() -> dict[str, Any]:
             q_date = _date_str(qprov.get("spot_date")) or _calibration_session(qcal, qpath)
             mc = qprov.get("mc") or {}
             quad = qprov.get("vix_quadrature") or {}
+            from joint_vol_calibration.models.quintic_ou import QUINTIC_BOUNDS
+            eps_lo = float(QUINTIC_BOUNDS[7][0])
+            qconv = qcal.get("convergence") or {}
             q = {
                 "as_of": q_date, "file": Path(qpath).name,
                 "lam_x": round(float(qp["lam_x"]), 3), "lam_y": round(float(qp["lam_y"]), 3),
@@ -1598,7 +1756,9 @@ def load_page2() -> dict[str, Any]:
                 "vix_opt_rmse": _num(ql.get("vix_options_rmse")),
                 "xi0_check": _num(ql.get("xi0_index_reproduction_rmse")),
                 "at_bound": [k for k, v in (qcal.get("at_bound") or {}).items() if v],
-                "eps_saturated": abs(float(qp["epsilon"]) + 0.99) < 0.02,
+                "eps_saturated": abs(float(qp["epsilon"]) - eps_lo) < 0.02, "eps_lo": eps_lo,
+                "stop_reason": (None if qcal.get("success") else desk_inventory.optimiser_stop_reason(
+                    [qconv.get("de_message"), qconv.get("polish_message")])),
                 "n_spx": qprov.get("n_spx_options"), "n_vix_opts": qprov.get("n_vix_options"),
                 "mc_paths": mc.get("n_paths"), "quad_points": quad.get("points_per_dim"),
                 "fit_time": _num(qcal.get("fit_time")), "n_evals": qcal.get("n_evals"),
@@ -2668,7 +2828,8 @@ def _gated_history() -> list[dict]:
                     "vix": _num(losses.get("vix_index_rmse")),
                     "wing": _num(losses.get("spx_oos_put_wing_rmse")),
                     "vx": _num(losses.get("vx_futures_rmse_oos")),
-                    "pinned": list(c.get("pinned_params") or [])})
+                    "pinned": list(c.get("pinned_params") or []),
+                    "w3": _num((c.get("weights") or {}).get("w3"))})
     return sorted(out, key=lambda r: r["session"])
 
 
@@ -3246,10 +3407,61 @@ def param_sub_line(key: str, value: float) -> str | None:
     return None
 
 
+def short_end_sentence(rows: list[dict], sigma_side: str | None, max_days: float = 30.0) -> str | None:
+    """The #oos caption's claim about the short end, from the fit's own
+    out-of-sample rows (oos_rows_of) and the side of the box σ sits on
+    ('upper', 'lower', 'bound' or None). The caption read 'the short end is
+    where a one-factor model with σ on its box ceiling fails' under a fit with
+    σ interior (VALIDATOR-09)."""
+    have = [r for r in rows if _num(r.get("rmse")) is not None]
+    if not have:
+        return None
+    w = max(have, key=lambda r: float(r["rmse"]))
+    days = _num(w.get("T_days"))
+    lead = (f"The worst expiry is {w['expiry']}"
+            + (f", {_fmt(days, '.0f')} days out" if days is not None else "")
+            + f" ({_fmt(float(w['rmse']), '.2f')} vol pts)")
+    if days is None or days > max_days:
+        return f"{lead}, not the short end (≤ {max_days:g} days)."
+    bound = {"upper": ", here with σ on its box ceiling", "lower": ", here with σ on its box floor",
+             "bound": ", here with σ on a box bound"}.get(sigma_side or "", "")
+    return f"{lead}: a one-factor model misses the short end{bound}."
+
+
+def bates_fits_note(paths: Sequence[str | Path]) -> str:
+    """What the stored Bates SVJ fits (bates_cal_<session>.pkl) show, for the
+    ρ-at-bound banner, which typed 'The one Bates SVJ fit did not converge'."""
+    fits = []
+    for p in sorted(str(x) for x in paths):
+        c = _load_pickle(p)
+        fits.append((Path(p).stem[len("bates_cal_"):], bool(c.get("success"))))
+    if not fits:
+        return "No Bates SVJ fit is stored."
+    bad = [s for s, ok in fits if not ok]
+    good = [s for s, ok in fits if ok]
+    if not good:
+        if len(fits) == 1:
+            return f"The one stored Bates SVJ fit ({bad[0]}) did not converge, so it is not a result."
+        return (f"None of the {len(fits)} stored Bates SVJ fits ({', '.join(bad)}) converged, "
+                "so none is a result.")
+    return (f"{plural(len(good), 'stored Bates SVJ fit')} converged ({', '.join(good)})"
+            + (f"; {len(bad)} did not ({', '.join(bad)})" if bad else "") + ".")
+
+
 def calibration_extras(d: dict, cal: dict) -> None:
     """Parameter tiles, history, OOS by expiry, VIX leg, smiles, identifiability."""
-    from joint_vol_calibration.config import HESTON_BOUNDS
+    from joint_vol_calibration.config import (
+        HESTON_BOUNDS,
+        PROFILE_KAPPA_MAX,
+        ROUGH_HESTON_H_BOUNDS,
+        SIGMA_PROFILE_CAPS,
+    )
 
+    # the boxes the captions name, from config (the template typed σ ≤ 2, σ ≤ 10, κ ≤ 60, H ∈ [0.02, ½])
+    d["boxes"] = {"sigma_hi": float(HESTON_BOUNDS["sigma"][1]), "free_sigma": float(max(SIGMA_PROFILE_CAPS)),
+                  "free_kappa": float(PROFILE_KAPPA_MAX), "h_lo": float(ROUGH_HESTON_H_BOUNDS[0]),
+                  "h_hi": float(ROUGH_HESTON_H_BOUNDS[1])}
+    d["bates_note"] = bates_fits_note(glob.glob(str(DATA / "calibrations" / "bates_cal_*.pkl")))
     p = cal["params"]
     session = d.get("session")
     hist = _gated_history()
@@ -3321,13 +3533,24 @@ def calibration_extras(d: dict, cal: dict) -> None:
     except artifacts.ArtifactError as e:
         _record_error(d, "ATM-skew term structure (surface/<session>/surface.json, diagnostics)", e)
         desk_inputs, sk = [], None
-    # the chain this fit's session was fitted on, as the surface report records it
+    # the chain this fit was made on, from the fit (its chain_diagnostics and the
+    # stored chain), and the book its session's surface, so the smiles, was built from
+    try:
+        fit_chain = fit_chain_record(cal, session)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "the fit's stored chain (data_store/options/spx_<session>.parquet)", e)
+        fit_chain = None
+    d["chain_badge"] = chain_badge(fit_chain) if fit_chain else None
+    d["chain_sentence"] = chain_sentence(fit_chain) if fit_chain else None
     own_chain = next((s for s in desk_inputs if s["session"] == session), None)
-    d["chain_sentence"] = chain_sentence(own_chain["surface"]) if own_chain else None
-    if own_chain:
-        d["chain_badge"] = chain_badge(own_chain["surface"], [
-            n for s in desk_inputs if s["session"] != session for n in [session_expiries(s["surface"])]
-            if n is not None])
+    d["smile_book"] = None
+    if own_chain and not same_chain(fit_chain, own_chain["surface"]):
+        d["smile_book"] = {"book": chain_sentence(own_chain["surface"]),
+                           "fit": (chain_provenance(fit_chain) or {}).get("name") if fit_chain else None}
+    newest_surface = max((s["session"] for s in desk_inputs), default=None)
+    d["oos_hs"] = (None if own_chain is None else
+                   {"same": not d["smile_book"], "shown": newest_surface == session,
+                    "book": (chain_provenance(own_chain["surface"]) or {}).get("short")})
     if sk:
         rv = d.get("rough_vs_heston")
         jr = rv.get("result") if isinstance(rv, dict) else None
@@ -3382,6 +3605,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
     # OOS RMSE by expiry, with the in-sample RMSE as the reference line.
     rows = oos_rows_of(cal)
     d["oos_rows"] = rows
+    sigma_side = next((t["side"] for t in tiles if t["key"] == "sigma"), None)
+    d["oos_short_end"] = short_end_sentence(rows, str(sigma_side) if sigma_side else None)
     d["n_oos"] = (cal.get("oos") or {}).get("n_spx_oos")
     if rows:
         cats = [f"{r['expiry']} · {_fmt(r['T_days'], '.0f')}d" if r["T_days"] is not None else r["expiry"]
@@ -3511,7 +3736,12 @@ def calibration_extras(d: dict, cal: dict) -> None:
                            "data": [[k, v * 100] for k, v in zip(sm["lm"], sm["iv"])]})
             tbl_rows = [[_fmt(k, "+.3f"), _fmt(v * 100, ".2f")] for k, v in zip(sm["lm"], sm["iv"])]
             source = "model"
-            note = None
+            # say why: a panel without quotes, its legend or a note sat short of
+            # its row and read as broken
+            note = (f"The {session} surface has no quotes at this expiry; the line is the Heston smile alone"
+                    if res is not None else
+                    f"No {session} surface to read quotes from; the line is the Heston smile alone")
+            note_short = "No quotes at this expiry: the Heston smile alone"
             k_rng = (float(min(sm["lm"])), float(max(sm["lm"])))
             y_rng = (float(min(sm["iv"])) * 100.0, float(max(sm["iv"])) * 100.0)
             badge = None
@@ -4638,9 +4868,24 @@ def surface_result(surf_oos: list[dict], session: str | None) -> dict | None:
         "range": _range_txt((r["median_abs_hs"] for r in rows), ".2f"),
         "inside_range": _range_txt((r["inside_spread_pct"] for r in rows), ".0f"),
         "heston": ({"median_abs_hs": hes["median_abs_hs"], "inside_spread_pct": hes["inside_spread_pct"],
-                    "n": hes["n"]} if hes else None),
+                    "n": hes["n"], "fit_chain": hes.get("fit_chain")} if hes else None),
         "heston_range": _range_txt((r["median_abs_hs"] for r in surf_oos if r["model"] == hkey), ".1f"),
     }
+
+
+def newer_surface_clause(sr: dict, surf_oos: list[dict]) -> str:
+    """', the headline fit's session (Surface shows the newer 2026-10-30)' after the
+    session surface_result cites, when a newer session has a surface.
+
+    The Overview cites the headline fit's session, so the surface and Heston are
+    scored on the same session's quotes. A newer surface session is one without
+    an accepted Heston fit (its calibration was skipped or rejected; its surface
+    is built from its book all the same), and the Surface page shows it: the
+    Overview names both, so its figure does not pass for the newer session's."""
+    newest = max(r["session"] for r in surf_oos)
+    if newest == sr["session"]:
+        return ""
+    return f", the headline fit’s session (Surface shows the newer {newest})"
 
 
 def joint_fit_result(diag: dict, session: str | None) -> dict | None:
@@ -4699,11 +4944,14 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
             "key": f"Arbitrage-free SVI surface · {held}",
             "value": _fmt(sr["median_abs_hs"], ".2f"), "unit": "half-spreads",
             "detail": (f"Median |model − mid| of the arbitrage-free, calendar-ordered SVI surface on "
-                       f"{_fmt(sr['n'], ',')} held-out quotes of {sr['session']}; "
+                       f"{_fmt(sr['n'], ',')} held-out quotes of {sr['session']}"
+                       f"{newer_surface_clause(sr, surf_oos)}; "
                        f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask{cert}."
                        + (f" Heston on its own held-out quotes of that session: "
                           f"{_fmt(h['median_abs_hs'], '.1f')} half-spreads, "
-                          f"{_fmt(h['inside_spread_pct'], '.1f')}% inside." if h else "") + snap),
+                          f"{_fmt(h['inside_spread_pct'], '.1f')}% inside"
+                          + (f" ({fit_book_clause(h['fit_chain'])})" if h.get("fit_chain") else "")
+                          + "." if h else "") + snap),
             "ci": (f"Range over {sr['n_sessions']} stored sessions: {sr['range']} half-spreads "
                    f"({sr['inside_range']}% inside)" if sr["n_sessions"] > 1 else None),
             # shown beside the range (it was rendered only when there was no range)
@@ -4823,8 +5071,9 @@ def pdv_forecast_rank(fe: dict | None, model: str = "pdv", level: str = "90") ->
 def vix_departures_tail(vix_rep: dict | None) -> str:
     """', with N listed departures (Surface)' after 'the Cboe formula': the
     replication departs from Cboe's rules (rate, quote time, forward, AM/PM
-    lines, ...), and the Overview and Model Risk say how many lines Surface's
-    #vix-replication lists, counted as that list counts them."""
+    lines, a bracket outside Cboe's term window, ...), and the Overview and
+    Model Risk say how many departures Surface's #vix-replication lists: the
+    artifact's deviations, not its descriptive gap notes."""
     n = desk_surface.vix_departure_count(vix_rep)
     return f", with {plural(n, 'listed departure')} (Surface)" if n else ""
 
@@ -4847,13 +5096,16 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
     # works: the arbitrage-free surface on held-out strikes, the VIX replication, the gate
     sr = surface_result(surf_oos, p2.get("session"))
     if sr and _num(sr["median_abs_hs"]) is not None:
+        newer = newer_surface_clause(sr, surf_oos)
         works.append(item(
             "Arbitrage-free SVI surface", "surface.html#scorecard",
             f"median {_fmt(sr['median_abs_hs'], '.2f')} half-spreads from the mid, "
             f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask, on the held-out strikes of "
-            f"{sr['session']}."))
+            f"{sr['session']}{newer}."))
+        # the replication of the session Surface shows (the newest surface session): no
+        # Heston figure sits beside it, and the item links to that page's replication
         try:
-            rep = artifacts.load_surface(DATA, sr["session"])
+            rep = artifacts.load_surface(DATA)
         except artifacts.ArtifactError:
             rep = {}
         indices = ((rep.get("vix") or {}).get("indices") or {}) if rep.get("state") == "ok" else {}
@@ -4863,7 +5115,7 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
             works.append(item(
                 "VIX replicated from the stored chain", "surface.html#vix-replication",
                 f"{signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
-                f"{sr['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."))
+                f"{rep['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."))
     arc = p2.get("archive") or {}
     if arc.get("n_legacy") is not None:
         # The job stores a fit only when it passes the gate, so 'k of k current fits
@@ -4969,14 +5221,19 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
 
 
 def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
-    """The newest stored Cboe book per underlying (data_store/options/cboe/*.json records)."""
-    root = Path(data_dir or DATA) / "options" / "cboe"
+    """The newest stored Cboe book per underlying: the records beside the raw books
+    committed here (data_store/options/cboe/*.json) and the manifests of books
+    held in the private data repository (data_store/options/cboe_manifest/*.json,
+    cboe_downloader.write_manifest: the same fields, no quotes)."""
+    base = Path(data_dir or DATA) / "options"
     newest: dict[str, dict] = {}
-    for f in sorted(root.glob("*.json")) if root.is_dir() else []:
+    files = [f for sub in ("cboe", "cboe_manifest") if (base / sub).is_dir()
+             for f in sorted((base / sub).glob("*.json"))]
+    for f in files:
         try:
             rec = json.loads(f.read_text())
         except (OSError, ValueError) as exc:
-            raise ValueError(f"options/cboe/{f.name}: unreadable record ({exc})") from exc
+            raise ValueError(f"options/{f.parent.name}/{f.name}: unreadable record ({exc})") from exc
         und = str(rec.get("underlying") or f.name.split("_")[0]).upper()
         key = (str(rec.get("session")), str(rec.get("quote_time")))
         if und not in newest or key > (str(newest[und].get("session")), str(newest[und].get("quote_time"))):
@@ -4984,10 +5241,35 @@ def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
     return [newest[u] for u in sorted(newest)]
 
 
+def deploy_streak(path: Path | None = None) -> dict | None:
+    """The site's deploy streak (scripts/ci/deploy_streak.py): N consecutive NYSE
+    sessions with a deploy commit on gh-pages, first and last, before this build.
+    The daily workflow writes the file before it freezes; a local or CI freeze has
+    none, and a file that is not a whole deploy_streak/1 record is logged and
+    left out (no row rather than a number the record does not support)."""
+    p = Path(path) if path is not None else DEPLOY_STREAK_FILE
+    if not p.is_file():
+        return None
+    try:
+        rec = json.loads(p.read_text())
+        n, first, through = rec["streak"], rec["first"], rec["through"]
+        ok = (rec.get("schema") == "deploy_streak/1" and isinstance(n, int) and not isinstance(n, bool)
+              and n >= 1 and all(isinstance(x, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", x)
+                                 for x in (first, through)) and first <= through)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        _logger.warning("deploy streak %s unreadable: %s", p, e)
+        return None
+    if not ok:
+        _logger.warning("deploy streak %s is not a deploy_streak/1 record with a streak: %s", p, rec)
+        return None
+    return {"streak": n, "first": first, "through": through}
+
+
 def pipeline_state(diag: dict) -> dict:
-    """What the daily job has stored: books, fits, derived artifacts, the forward ledger."""
+    """What the daily job has stored: books, fits, derived artifacts, the forward
+    ledger; and how many consecutive sessions the site was deployed for."""
     out: dict[str, Any] = {"captures": [], "fits": None, "fits_newest": None, "surface_sessions": [],
-                           "diag_sessions": [], "forward": None}
+                           "diag_sessions": [], "forward": None, "deploys": deploy_streak()}
     out["captures"] = latest_cboe_captures()
     fits = [r for r in scan_calibrations() if r["legacy"] is False and r["ok"] and r["session"]]
     out["fits"] = len(fits)
@@ -5052,18 +5334,33 @@ def overview_vix_complex(d: dict) -> None:
                 table=charts.table("VIX / VIX3M by calendar year; the CSV has every session",
                                    ["Year", "Sessions#", "Above 1 (%)#", "Mean#"],
                                    [[y, n, _fmt(sh, ".1f"), _fmt(m_, ".3f")] for y, n, sh, m_ in by_year]))
-    # the VX futures curve: its own newest date, the session before as an overlay
+    # the VX futures curve: its own newest date, the session before as an overlay.
+    # It is read on the page's newest session: a contract whose final settlement is
+    # on or before that session (or the curve's own date) no longer trades, so it
+    # is left out and M1 is the first contract still trading (CIO-15)
     d["vx_curve"] = None
-    last = vx_last_date()
+    d["vx_empty"] = "No VX futures settlements are stored."
+    d["vx_fmt"] = VX_FMT
+    # at the newest session once the table is current, never after it (a session the
+    # table holds beyond the newest session the site has data for is not drawn)
+    last = vx_last_date(_latest_market_session())
     if last:
-        cur = desk_market.vx_curve(vx_session_rows(last))
+        fr = vx_freshness(last)
+        cut = max(last, fr["ref"] or last)
+        cur = desk_market.vx_curve(vx_session_rows(last), trading_after=cut)
         prev_date = vx_prev_date(last)
-        prev = desk_market.vx_curve(vx_session_rows(prev_date)) if prev_date else None
-        if cur:
-            ref = _latest_market_session()
-            age = session_age(last, ref)
+        prev = desk_market.vx_curve(vx_session_rows(prev_date), trading_after=cut) if prev_date else None
+        if not cur:
+            d["vx_empty"] = f"No VX monthly contract stored on {last} is still trading on {cut}."
+        else:
+            settled = " and ".join(f"{r['month']} (final settlement {r['expiry']})" for r in cur["settled"])
+            # the front basis: VX1's settlement less VIX's close of the curve's session, shown
+            # when that is the newest session (a stale curve's VX1 need not be its own front)
+            vix = vix_close_on(last) if fr["age"] == 0 else None
             d["vx_curve"] = {**cur, "date": last, "prev_date": prev_date if prev else None, "prev": prev,
-                             "age": age, "level": stale_level(age), "ref": ref}
+                             "age": fr["age"], "level": stale_level(fr["age"]), "ref": fr["ref"],
+                             "ref_source": fr["ref_source"], "cut": cut, "settled_text": settled,
+                             "vix": vix, "basis": cur["m1"]["settle"] - vix if vix is not None else None}
             pv = {r["expiry"]: r["settle"] for r in (prev or {}).get("rows") or []}
             cats = [r["expiry"] for r in cur["rows"]]
             series = [{"name": f"{last} settlements", "type": "line", "role": "market", "color": "headline",
@@ -5079,19 +5376,20 @@ def overview_vix_complex(d: dict) -> None:
                     f", with {prev_date}" if prev else ""),
                 x={"type": "category", "categories": cats,
                    "name": "Contract (final settlement)", "interval": 0, "rotate": 45},
-                y={"name": "VX (index pts)", "digits": 1, "tipDigits": 2},
+                y={"name": "VX (index pts)", "digits": 1, "tipDigits": VX_DP},
                 series=series, xs=cats, csv=f"vx_curve_{last}.csv",
                 grid={"top": 12, "bottom": 64},
-                describe=(f"{cur['n']} monthly contracts on {last}, front month first; "
+                describe=(f"{cur['n']} monthly contracts on {last}"
+                          + (f" still trading on {cut}" if cut > last else "") + ", front month first; "
                           "M1 → M2 "
                           f"{_fmt(cur['m1m2'] * 100 if cur['m1m2'] is not None else None, '+.2f')}%."),
                 table=charts.table(f"VX monthly settlements, {last}" + (f" and {prev_date}" if prev else ""),
                                    ["Contract", "Final settlement", "Days#", f"{last}#",
                                     *([f"{prev_date}#", "Change#"] if prev else [])],
                                    [[r["month"], r["expiry"], _fmt(r["days"], ".0f"),
-                                     _fmt(r["settle"], ".2f"),
-                                     *([_fmt(pv.get(r["expiry"]), ".2f"),
-                                        (signed(r["settle"] - pv[r["expiry"]], ".2f")
+                                     _fmt(r["settle"], VX_FMT),
+                                     *([_fmt(pv.get(r["expiry"]), VX_FMT),
+                                        (signed(r["settle"] - pv[r["expiry"]], VX_FMT)
                                          if r["expiry"] in pv else "—")]
                                        if prev else [])] for r in cur["rows"]]))
 
@@ -5238,6 +5536,64 @@ def heston_model_key(models: Iterable[str]) -> str | None:
     return next((m for m in models if str(m).lower().startswith("heston")), None)
 
 
+def history_model_keys(session_models: Iterable[str], stored_models: Iterable[str]) -> list[str]:
+    """The Surface history table's model columns: the page session's models in
+    their order, then every other model a stored session scores, by name."""
+    own = list(dict.fromkeys(session_models))
+    return own + sorted(set(stored_models) - set(own))
+
+
+def unscored_models(scorecard: dict | None) -> list[dict]:
+    """The models a session's scorecard.json lists but could not score (its
+    ``available: false`` rows: Heston on a session with no stored fit, whose
+    surface is still built from the session's book), with the scorecard's reason."""
+    return [{"key": str(m["model"]), "short": model_short(str(m["model"])),
+             "reason": str(m.get("reason") or "")}
+            for m in ((scorecard or {}).get("models") or [])
+            if isinstance(m, dict) and m.get("model") and m.get("available") is False]
+
+
+# ── the smile's expiry strip and the selected expiry's status line ─────────────
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+# the OCC root of an SPX option line: the monthly SPX settles at the open (the SOQ),
+# SPXW at the close
+SETTLEMENT_OF_ROOT = {"SPX": "AM", "SPXW": "PM"}
+
+
+def expiry_settlements(mkt: pd.DataFrame) -> dict[str, str]:
+    """{expiry: 'AM' | 'PM'} from the OCC root of its lines, where the residual table
+    carries one; none for a chain without roots (a Yahoo chain), nor for an expiry
+    whose lines mix settlements: a tag is read, never guessed from the date."""
+    if "root" not in mkt.columns:
+        return {}
+    out: dict[str, str] = {}
+    for e, roots in mkt.groupby("expiry")["root"]:
+        st = {SETTLEMENT_OF_ROOT.get(str(r).strip().upper(), "") for r in roots.unique()}
+        if len(st) == 1 and "" not in st:
+            out[str(e)] = st.pop()
+    return out
+
+
+def expiry_tab_label(expiry: str, year: bool = False) -> str:
+    """An expiry tab's date: 'Nov 25', or "Jan 15 '27" on the first tab of a year
+    (year=True), so 'Nov 19' a year out is told from this November's. The template
+    adds the days to expiry ('· 30', desk.css prints 'd' and names it 'days')."""
+    day = pd.Timestamp(str(expiry)[:10])
+    return f"{MONTHS[day.month - 1]} {day.day}" + (f" ’{day.year % 100:02d}" if year else "")
+
+
+def expiry_status(expiry: str, settle: str | None, row: Sequence[Any], k: int, n: int) -> str:
+    """The selected expiry's status line, from its row of the smile's 'Quotes per
+    expiry' table (expiry, days, F, quotes, median half-spread; desk.js builds the
+    line for another expiry from the same row) and its place among the n tabs:
+    'Expiry 7 of 45 · 2026-11-25 · Wed · PM · 30 days · F 6,950.12 · 109 quotes ·
+    median half-spread 0.06 vol pts'."""
+    wd = WEEKDAYS[pd.Timestamp(str(expiry)[:10]).weekday()]
+    return " · ".join([f"Expiry {k} of {n}", str(expiry), wd, *([settle] if settle else []), f"{row[1]} days",
+                       f"F {row[2]}", f"{row[3]} quotes", f"median half-spread {row[4]} vol pts"])
+
+
 # the quote inspector's footnote: where the chain's quotes come from and when
 def quote_source_note(surface_json: dict) -> str:
     """'Yahoo close, no quote time': the chain's vendor and quote time (chain_provenance)."""
@@ -5245,48 +5601,50 @@ def quote_source_note(surface_json: dict) -> str:
     return f"{pv['short']}, {pv['time']}" if pv else "Chain source not recorded, no quote time"
 
 
-def smile_quote_series(group: str, models: Sequence[str], shown: Iterable[str | None],
+def smile_quote_series(group: str | None, models: Sequence[str], shown: Iterable[str | None],
                        anchor_model: str | None, oos_mids: bool = False, strip: bool = True) -> list[dict]:
     """One expiry's smile series (desk_quotes): bid–ask bars, mids, each model at
     the quoted strikes, the anchor model's fitted quotes as diamonds and, under
     the smile, each model's z per quote. They hold no data: desk.js fills them
     from the chart's packed quotes (``quote`` names the field). ``oos_mids``: the
     mids split into the anchor model's out-of-sample quotes (hollow) and its
-    anchors, as the Calibration smiles draw them."""
+    anchors, as the Calibration smiles draw them. ``group`` None: the template a
+    book smile (Surface) fills with the shown expiry, its names without a date."""
     shown = set(shown)
-    g = str(group)
-    out: list[dict] = [{"name": f"{g} bid–ask", "legendKey": "Bid–ask", "legend": True, "type": "errorbar",
-                        "role": "bidask", "color": "muted", "group": g, "quote": "ba"}]
+    g = None if group is None else str(group)
+    pre, tag = (f"{g} ", {"group": g}) if g is not None else ("", {})
+    out: list[dict] = [{"name": f"{pre}bid–ask", "legendKey": "Bid–ask", "legend": True, "type": "errorbar",
+                        "role": "bidask", "color": "muted", **tag, "quote": "ba"}]
     if oos_mids and anchor_model:
         # market mids are 'headline' everywhere (P4.5): hollow, the anchors filled diamonds
-        out.append({"name": f"{g} mid (out of sample)", "legendKey": "Mid (out of sample)", "legend": True,
+        out.append({"name": f"{pre}mid (out of sample)", "legendKey": "Mid (out of sample)", "legend": True,
                     "type": "scatter", "role": "market", "color": "headline", "hollow": True, "size": 4,
                     "opacity": 0.6,
-                    "group": g, "quote": "oos", "model": anchor_model})
+                    **tag, "quote": "oos", "model": anchor_model})
     else:
-        out.append({"name": f"{g} mid", "legendKey": "Mid", "legend": True, "type": "scatter",
-                    "role": "market", "color": "headline", "size": 4, "group": g, "quote": "mid"})
-    out.extend({"name": f"{g} {model_label(m)}", "legendKey": model_label(m), "legend": True,
+        out.append({"name": f"{pre}mid", "legendKey": "Mid", "legend": True, "type": "scatter",
+                    "role": "market", "color": "headline", "size": 4, **tag, "quote": "mid"})
+    out.extend({"name": f"{pre}{model_label(m)}", "legendKey": model_label(m), "legend": True,
                 "hidden": m not in shown, "type": "line", "role": "model", "color": model_colour(m),
                 "width": 1.5,
-                "group": g, "quote": "model", "model": m} for m in models)
+                **tag, "quote": "model", "model": m} for m in models)
     anchor_key = "Mid (fit anchor)" if oos_mids else "Heston fit anchors"
     if anchor_model:
-        out.append({"name": f"{g} {'mid (fit anchor)' if oos_mids else 'Heston fit anchor'}",
+        out.append({"name": f"{pre}{'mid (fit anchor)' if oos_mids else 'Heston fit anchor'}",
                     "legendKey": anchor_key, "legend": True, "type": "scatter", "symbol": "diamond",
                     "size": 9 if oos_mids else 8, "z": 4, "role": "anchor", "color": ANCHOR_COLOUR,
-                    "group": g,
+                    **tag,
                     "quote": "fit", "model": anchor_model})
     if strip:
-        out.extend({"name": f"{g} {model_label(m)} z", "legendKey": model_label(m), "type": "scatter",
-                    "size": 4, "role": "model", "color": model_colour(m), "group": g, "quote": "z",
+        out.extend({"name": f"{pre}{model_label(m)} z", "legendKey": model_label(m), "type": "scatter",
+                    "size": 4, "role": "model", "color": model_colour(m), **tag, "quote": "z",
                     "model": m,
                     "strip": True} for m in models)
         if anchor_model:
-            out.append({"name": f"{g} {model_label(anchor_model)} fit anchor z", "legendKey": anchor_key,
+            out.append({"name": f"{pre}{model_label(anchor_model)} fit anchor z", "legendKey": anchor_key,
                         "type": "scatter", "symbol": "diamond", "size": 7, "z": 4, "role": "anchor",
                         "color": ANCHOR_COLOUR,
-                        "group": g, "quote": "zfit", "model": anchor_model, "strip": True})
+                        **tag, "quote": "zfit", "model": anchor_model, "strip": True})
     return out
 
 
@@ -5326,12 +5684,31 @@ def _model_surface_heat(params: dict) -> dict:
     return {"cols": [_fmt(k, "+.2f") for k in lm], "rows": out_rows, "lo": lo, "hi": hi, "points": pts}
 
 
-def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail,
+# A Surface heatmap cell's details (D2): numbers in the session's data file, written
+# into the cell's readout by desk.js with its grid's template: {i:d} is number i to
+# d decimals ({i:+d} signed), {i} as it is. Until the file is loaded the readout
+# names the cell's row, column and printed value.
+HEAT_DETAIL_IV = "mid IV {0:2}% (median of {1}) · half-spread {2:2} vol pts"
+HEAT_DETAIL_RESID = "{0:+2} half-spreads (median of {1}) · {2:0}% inside"
+
+
+def heat_detail(template: str, vals: Sequence[Any]) -> str:
+    """A HEAT_DETAIL_* template filled as desk.js fills it (the readout's text)."""
+    def one(m: re.Match) -> str:
+        v, spec = vals[int(m.group(1))], m.group(2)
+        if spec is None:
+            return str(v)
+        return signed(v, f".{spec[-1]}f") if spec.startswith("+") else _fmt(float(v), f".{spec}f")
+    return re.sub(r"\{(\d)(?::(\+?\d))?\}", one, template)
+
+
+def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, nums,
                  used: Sequence[int] | None = None) -> list[dict]:
     """Heatmap rows: one per expiry, one cell per ln(K/F) bucket in ``used`` (K_BINS).
 
     Each cell records how many quotes it holds (``n``), so the cells of a grid
-    add up to the quotes it shows."""
+    add up to the quotes it shows, and its detail numbers (``vals``, nums(g, v):
+    the session data file's, rounded as the readout prints them)."""
     qb = q.assign(kb=k_bucket(q["k"]))
     used = list(used) if used is not None else k_buckets_used(q["k"])
     rows = []
@@ -5341,11 +5718,10 @@ def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail,
         for b in used:
             g = qe[qe["kb"] == b]
             if g.empty:
-                empty = cell("", None, detail=f"{e} · ln(K/F) {k_bucket_label(b)}: no quotes")
-                cells.append({**empty, "n": 0})
+                cells.append({**cell("", None), "n": 0, "vals": None})
                 continue
             v = value(g)
-            cells.append({**cell(v["text"], colour(v["value"]), detail=detail(g, v)), "n": len(g)})
+            cells.append({**cell(v["text"], colour(v["value"])), "n": len(g), "vals": nums(g, v)})
         # exp: the row's expiry (Surface selects it across the heatmaps, the delta
         # grid, the by-expiry chart and the smile: desk.js initExpiryCursor)
         rows.append({"label": f"{e} · {_fmt(exps[e], '.0f')}d", "exp": str(e), "cells": cells})
@@ -5382,7 +5758,7 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
     def tint(text: str, bg: str | None, title: str = "", xp: bool = False) -> dict:
         c = {"text": text, "title": title, "xp": xp}
         if bg is not None:
-            c.update(bg=bg, fg=_text_colour_on(bg))
+            c.update(bg=bg, fg=_text_colour_on(bg), cls=HEAT_CLASSES.get(bg))
         return c
 
     def row(r: dict, head: str, sub: str = "") -> dict:
@@ -5735,11 +6111,14 @@ def chain_provenance(surface_json: dict) -> dict | None:
     A Yahoo download carries no quote times. Until 2026-10-27 the job stamped
     the download instant into its quote_time, and a download inside Global
     Trading Hours was then treated as a timed book, T measured from it
-    (option_chain.t_origin; VALIDATOR-01, QUANT-01): such a chain is named a
-    download with its fetch time, never 'quotes at'. A Cboe book records the
-    time of its quotes. Keys: vendor ('yahoo', 'cboe' or the raw source), name,
-    short, time (the quote-time clause), badge (that clause in parts short
-    enough to set unbroken on a 320 px phone), fetched_as_quote_time."""
+    (option_chain.t_origin; VALIDATOR-01, QUANT-01); the producer now records
+    that instant as fetched_at and measures T from the 16:00 ET close. Either
+    way such a chain is named a download with its fetch time and where its T
+    runs from, never 'quotes at'. A Cboe book records the time of its quotes.
+    Keys: vendor ('yahoo', 'cboe' or the raw source), name, short, time (the
+    quote-time clause), badge (that clause in parts short enough to set
+    unbroken on a 320 px phone), download (a Yahoo chain with a known fetch
+    instant)."""
     inp = surface_json.get("inputs") or {}
     uni = surface_json.get("universe") or {}
     src = str(inp.get("source") or uni.get("source") or "").strip().lower()
@@ -5747,19 +6126,20 @@ def chain_provenance(surface_json: dict) -> dict | None:
         return None
     qt = inp.get("quote_time") or uni.get("quote_time")
     if src in YAHOO:
-        if qt:
-            from_fetch = str(inp.get("t_origin_basis") or "").startswith("quote_time")
-            badge = [f"fetched {_utc_text(qt)}", "Yahoo reports no quote times",
-                     *(["T measured from the fetch"] if from_fetch else [])]
+        fetched = qt or inp.get("fetched_at") or uni.get("fetched_at")
+        if fetched:
+            basis = str(inp.get("t_origin_basis") or uni.get("t_origin_basis") or "")
+            t_from = ("T measured from the fetch" if qt and basis.startswith("quote_time")
+                      else "T from the 16:00 ET close" if basis.startswith("session close") else None)
+            badge = [f"fetched {_utc_text(fetched)}", "Yahoo reports no quote times",
+                     *([t_from] if t_from else [])]
             return {"vendor": "yahoo", "name": "Yahoo Finance download", "short": "Yahoo download",
-                    "time": f"{badge[0]}; {', '.join(badge[1:])}", "badge": badge,
-                    "fetched_as_quote_time": True}
+                    "time": f"{badge[0]}; {', '.join(badge[1:])}", "badge": badge, "download": True}
         return {"vendor": "yahoo", "name": CHAIN_SOURCES[src], "short": "Yahoo close",
-                "time": "no quote time", "badge": ["no quote time"], "fetched_as_quote_time": False}
+                "time": "no quote time", "badge": ["no quote time"], "download": False}
     name = CHAIN_SOURCES.get(src, src)
     time = f"quotes at {_utc_text(qt)}" if qt else "no quote time"
-    return {"vendor": src, "name": name, "short": name, "time": time, "badge": [time],
-            "fetched_as_quote_time": False}
+    return {"vendor": src, "name": name, "short": name, "time": time, "badge": [time], "download": False}
 
 
 def _chain_clause(surface_json: dict) -> str:
@@ -5775,7 +6155,7 @@ def chain_sentence(surface_json: dict) -> str:
     pv = chain_provenance(surface_json)
     if not pv:
         return "a chain whose source is not recorded"
-    if pv["fetched_as_quote_time"]:
+    if pv["download"]:
         when, _, rest = pv["time"].partition("; ")
         return f"a {pv['name']} {when} ({rest.replace(', ', '; ')})"
     if pv["time"] == "no quote time":
@@ -5789,6 +6169,17 @@ def chain_source(surface_json: dict) -> list[str] | None:
     """['Yahoo Finance close snapshot', 'no quote time'] from surface.json inputs and universe."""
     pv = chain_provenance(surface_json)
     return [pv["name"], *pv["badge"]] if pv else None
+
+
+# the chain a fit was made on, as the scorecard records its vendor (fit_chain_source)
+FIT_CHAINS = {"yahoo": "Yahoo download", "cboe": "Cboe book"}
+
+
+def fit_book_clause(vendor: str) -> str:
+    """'the fit was made on the session’s Yahoo download, not on this book': said
+    beside a Heston figure scored on a book other than the chain it was fitted on
+    (the scorecard's fit.scored_on_fit_chain is false)."""
+    return f"the fit was made on the session’s {FIT_CHAINS.get(vendor, vendor + ' chain')}, not on this book"
 
 
 def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str | None:
@@ -5811,6 +6202,58 @@ def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str |
         parts.append(f"{int(n)} expiries" + (f" (other stored session{'s' if len(oth) > 1 else ''} {rng})"
                                               if oth else ""))
     return " · ".join(parts)
+
+
+def fit_chain_record(cal: dict, session: str | None, data_dir: Path | None = None) -> dict | None:
+    """The chain a joint fit was made on, in surface.json's shape (inputs and
+    universe) so chain_badge and chain_sentence can name it, read from the fit
+    itself: its chain_diagnostics (vendor, quote or fetch time, where T runs
+    from) and the stored chain it was fitted on, data_store/options/
+    spx_<session>.parquet (its rows and listed expiries); 'scored' is the fit's
+    anchors plus its out-of-sample quotes.
+
+    Since tier 0.7 a session's surface is built from its Cboe book when that
+    passes the quote-state gates, while the bot fits the session's Yahoo
+    download, so the surface's surface.json names another chain. Calibration
+    took the fit's chain from there and named the Cboe book as the fit's."""
+    diag = cal.get("chain_diagnostics") or {}
+    snap = _date_str(cal.get("spx_snapshot_session")) or session
+    if not snap:
+        return None
+    path = Path(data_dir if data_dir is not None else DATA) / "options" / f"spx_{snap}.parquet"
+    rows = n_exp = None
+    stored_src = None
+    if path.exists():
+        try:
+            ch = pd.read_parquet(path)
+        except (OSError, ValueError) as e:
+            raise artifacts.ArtifactError(f"{path}: unreadable stored chain ({e})") from e
+        rows = len(ch)
+        n_exp = int(ch["expiry"].nunique()) if "expiry" in ch.columns else None
+        srcs: list[str] = (sorted(set(ch["source"].dropna().astype(str))) if "source" in ch.columns
+                           else [])
+        stored_src = srcs[0] if len(srcs) == 1 else None
+    oos = _num((cal.get("oos") or {}).get("n_spx_oos"))
+    anchors = _num(cal.get("n_spx_options"))
+    inputs = {"source": diag.get("source") or stored_src, "quote_time": diag.get("quote_time"),
+              "fetched_at": diag.get("fetched_at"), "t_origin_basis": diag.get("t_origin_basis"),
+              "chain": f"data_store/options/{path.name}", "chain_rows": rows}
+    universe = {"n_universe": int(anchors) + int(oos) if anchors is not None and oos is not None else None,
+                "n_expiries": n_exp}
+    return {"inputs": inputs, "universe": universe, "session": snap}
+
+
+def same_chain(fit_chain: dict | None, surface_json: dict) -> bool:
+    """Whether a surface was built from the chain the fit was made on: the
+    stored file surface.json names, else (a record without it) the vendor."""
+    if not fit_chain:
+        return False
+    want = (fit_chain.get("inputs") or {}).get("chain")
+    got = (surface_json.get("inputs") or {}).get("chain")
+    if want and got:
+        return Path(str(got)).as_posix() == want
+    a, b = chain_provenance(fit_chain), chain_provenance(surface_json)
+    return bool(a and b and a["vendor"] == b["vendor"])
 
 
 def session_expiries(sj: dict) -> int | None:
@@ -5893,23 +6336,49 @@ def arb_violations(arb: dict) -> list[dict]:
     return flag_bad_quotes(sorted(lv, key=lambda x: -(x["shortfall"] or 0.0)), rep)
 
 
+# Surface #surface-change compares the headline with the newest earlier stored session
+# and, per lag, the newest stored at least that many NYSE sessions back (about a week, a
+# month and a quarter): at most four sessions, however many the bot stores. Each one
+# compared adds its table and two term-chart lines with their rows, about 11 kB at 45
+# expiries: comparing every stored session put the page over its 450 kB budget at eight
+# earlier sessions, and six would be about 456 kB (D2).
+COMPARE_LAGS = (5, 21, 63)
+
+
+def compared_sessions(head: str, earlier: Sequence[str]) -> list[str]:
+    """The earlier sessions #surface-change compares with the headline, newest first:
+    the newest earlier one, then per COMPARE_LAGS the newest at least that many NYSE
+    sessions (session_age) before the headline, each named once."""
+    newest = sorted(earlier, reverse=True)
+    age = {x: session_age(x, head) or 0 for x in newest}
+    out = newest[:1]
+    for lag in COMPARE_LAGS:
+        pick = next((x for x in newest if age[x] >= lag), None)
+        if pick is not None and pick not in out:
+            out.append(pick)
+    return sorted(out, reverse=True)
+
+
 def surface_comparison(head: str, inputs: Sequence[dict]) -> dict | None:
-    """The headline session's constant-maturity grid against every earlier stored
-    session (Surface #surface-change): per earlier session, newest first, its
-    gap in NYSE sessions (session_age) and desk_surface.cm_delta's rows; and
-    every session's listed grid, for the ATM and RR25 term charts. Stored
-    sessions are irregular (March to October), so a change is never called a
-    day's or the previous session's."""
+    """The headline session's constant-maturity grid against the earlier stored
+    sessions compared_sessions picks (Surface #surface-change): per compared
+    session, newest first, its gap in NYSE sessions (session_age) and
+    desk_surface.cm_delta's rows; and every stored session's listed grid (the
+    state tiles' ranges use them all; the ATM and RR25 term charts draw the
+    headline and the compared ones). Stored sessions are irregular (March to
+    October), so a change is never called a day's or the previous session's."""
     grids: dict[str, dict] = {}
     for s in inputs:
         listed = desk_surface.delta_grid(s["surface"], s["quotes"], s["vix"])
         grids[s["session"]] = {"listed": listed, "cm": desk_surface.constant_maturity(listed)}
-    earlier = sorted((x for x in grids if x < head), reverse=True)
+    stored = [x for x in grids if x < head]
+    earlier = compared_sessions(head, stored)
     if head not in grids or not earlier:
         return None
     views = [{"session": old, "gap": session_age(old, head),
               "rows": desk_surface.cm_delta(grids[head]["cm"], grids[old]["cm"])} for old in earlier]
-    return {"head": head, "default": earlier[0], "views": views, "grids": grids}
+    return {"head": head, "default": earlier[0], "views": views, "grids": grids,
+            "n_earlier": len(stored), "lags": list(COMPARE_LAGS)}
 
 
 def forward_vol_series(fw: Sequence[dict]) -> list[dict]:
@@ -5954,17 +6423,20 @@ def vix_official_markers(vx: dict | None) -> list[dict]:
 
 
 def rr_term_spec(cmp_: dict) -> dict:
-    """RR25 against days to expiry (log axis) for every stored session: the headline
-    solid, the others grey, the session chosen on the comparison tabs dashed."""
+    """RR25 against days to expiry (log axis) for the headline and the compared
+    sessions (surface_comparison's views): the headline solid, the others grey,
+    the session chosen on the comparison tabs dashed."""
     head = cmp_["head"]
+    shown = {head, *(v["session"] for v in cmp_["views"])}
+    grids = {s: g for s, g in cmp_["grids"].items() if s in shown}
     series: list[dict[str, Any]] = []
     rows = []
-    for s, g in sorted(cmp_["grids"].items()):
+    for s, g in sorted(grids.items()):
         pts = [[r["T_days"], r["rr25"]] for r in g["listed"]]
         rows += [[s, r["expiry"], _fmt(r["T_days"], ".0f"), signed(r["rr25"], ".2f")] for r in g["listed"]]
         if s == head:
             continue
-        series.append({"name": f"RR25 {s} (grey)", "legendKey": "Every stored session", "legend": True,
+        series.append({"name": f"RR25 {s} (grey)", "legendKey": "Sessions compared", "legend": True,
                        "type": "line", "role": "other", "color": "muted", "width": 1, "z": 1, "data": pts})
         series.append({"name": f"SVI-cal RR25 {s}", "legend": True, "type": "line", "role": "model",
                        "model": "svi_cal", "color": model_colour("svi_cal"),
@@ -5974,17 +6446,18 @@ def rr_term_spec(cmp_: dict) -> dict:
                    "color": model_colour("svi_cal"),
                    "width": 2, "symbol": "circle", "size": 4, "z": 3,
                    "data": [[r["T_days"], r["rr25"]] for r in cmp_["grids"][head]["listed"]]})
-    days = [r["T_days"] for g in cmp_["grids"].values() for r in g["listed"]]
+    days = [r["T_days"] for g in grids.values() for r in g["listed"]]
     return charts.xy(
-        "chart-rr-term", f"25-delta risk reversal by days to expiry, {head} and every stored session",
+        "chart-rr-term", f"25-delta risk reversal by days to expiry, {head} and the sessions compared",
         x={"type": "value", "log": True, "name": "Days to expiry (log scale)", "digits": 0,
            "min": round_sig(min(days) / 1.15, 2), "max": round_sig(max(days) * 1.15, 2)},
         y={"name": "RR25 (vol pts)", "digits": 0, "tipDigits": 2, "signed": True},
         series=series, tooltip="item", csv=f"rr25_term_{head}.csv",
         describe=(f"RR25 = 25Δ call vol − 25Δ put vol of the SVI-cal surface per listed expiry: {head} "
-                  "solid, the other stored sessions grey, the session chosen on the comparison tabs dashed. "
+                  "solid, the sessions compared grey, the session chosen on the comparison tabs dashed. "
                   "A wing extrapolated beyond the quoted strikes leaves a gap."),
-        table=charts.table("RR25 (vol pts) per listed expiry and stored session, SVI-cal surface",
+        table=charts.table("RR25 (vol pts) per listed expiry, this session and the sessions compared, "
+                           "SVI-cal surface",
                            ["Session", "Expiry", "T (d)#", "RR25#"], rows))
 
 
@@ -6024,6 +6497,9 @@ def surface_extras(d: dict, surf: dict) -> None:
     models = surf["models"]
     # the page badge listed none
     d["models"] = [{"key": m, "label": model_label(m), "short": model_short(m)} for m in models]
+    # a model the scorecard lists but could not score on this session (Heston
+    # without a stored fit): the badge says so instead of leaving it out silently
+    d["unscored"] = [u for u in unscored_models(surf.get("scorecard")) if u["key"] not in models]
     # scores: the producer's scorecard when present, else computed on the residual table
     if surf.get("scorecard_rows"):
         d["score_rows"] = [{"key": r["model"], "label": model_label(r["model"]),
@@ -6049,8 +6525,16 @@ def surface_extras(d: dict, surf: dict) -> None:
     n_scored = {(r.get("oos") or {}).get("n") for r in d["score_rows"]}
     d["same_quotes"] = len(n_scored) == 1 and None not in n_scored
     exps = mkt.groupby("expiry")["T_days"].median().sort_values()
-    d["expiries"] = [{"expiry": e, "T_days": float(t), "n": int((mkt["expiry"] == e).sum())}
-                     for e, t in exps.items()]
+    settles = expiry_settlements(mkt)
+    # the smile's tabs: 'Nov 25 · 30d' ("Jan 15 '27 · 81d" on the first of a year past the
+    # session's), AM / PM where the OCC root says, and the first expiry of each month
+    # after the first marks a month boundary (desk.css .mo)
+    prev = [str(session)[:7], *(str(e)[:7] for e in exps.index)]
+    d["expiries"] = [{"expiry": e, "T_days": float(t), "n": int((mkt["expiry"] == e).sum()),
+                      "label": expiry_tab_label(str(e), str(e)[:4] != prev[i][:4]),
+                      "days": _fmt(t, ".0f"), "settle": settles.get(str(e)),
+                      "month_start": i > 0 and str(e)[:7] != prev[i]}
+                     for i, (e, t) in enumerate(exps.items())]
     d["n_quotes"] = len(mkt)
     d["median_half_spread"] = float(mkt["half_spread_vp"].median())
 
@@ -6094,9 +6578,9 @@ def surface_extras(d: dict, surf: dict) -> None:
             value=lambda g: {"value": float(g["mid_iv"].median() * 100),
                              "text": _fmt(float(g["mid_iv"].median() * 100), ".1f")},
             colour=lambda v: seq_colour(v, lo, hi),
-            detail=lambda g, v: (f"mid IV {_fmt(v['value'], '.2f')}% (median of {len(g)}) · half-spread "
-                                 f"{_fmt(float(g['half_spread_vp'].median()), '.2f')} vol pts"), used=used),
-        "compact": True}
+            nums=lambda g, v: [round(v["value"], 2), len(g), round(float(g["half_spread_vp"].median()), 2)],
+            used=used),
+        "compact": True, "id": "iv-heatmap", "detail": HEAT_DETAIL_IV}
     d["iv_heat"]["n"] = sum(c["n"] for r in d["iv_heat"]["rows"] for c in r["cells"])
     pts = []
     # 3D x of a bucket: its midpoint; of an open wing, the median ln(K/F) of its quotes
@@ -6120,15 +6604,15 @@ def surface_extras(d: dict, surf: dict) -> None:
         q = q[pd.to_numeric(q["model_iv"], errors="coerce").notna()]
         d["resid_heat"].append({
             "key": m, "label": model_label(m), "cols": [k_bucket_label(b, compact=True) for b in used],
-            "n": len(q), "compact": True,
+            "n": len(q), "compact": True, "id": f"resid-heat-{m}", "detail": HEAT_DETAIL_RESID,
             "rows": _bucket_grid(
                 q, exps,
                 value=lambda g: {"value": float(g["error_hs"].median()),
                                  "text": signed(float(g["error_hs"].median()), ".1f")},
                 colour=lambda v: div_colour(v, 5.0),
-                detail=lambda g, v: (f"{signed(v['value'], '.2f')} half-spreads (median of {len(g)}) · "
-                                     f"{_fmt(g['inside_spread'].astype(bool).mean() * 100, '.0f')}% "
-                                     "inside"), used=used)})
+                nums=lambda g, v: [round(v["value"], 2), len(g),
+                                   round(float(g["inside_spread"].astype(bool).mean() * 100))],
+                used=used)})
 
     # smile slices: one chart, the expiry chosen by tabs (hash state "exp"); every
     # model at the quoted strikes, each with one legend toggle across expiries
@@ -6144,16 +6628,18 @@ def surface_extras(d: dict, surf: dict) -> None:
     d["slice_shown"] = [model_label(m) for m in overlay if m in shown]
     d["default_exp"] = (min(d["expiries"], key=lambda x: abs(x["T_days"] - 30.0))["expiry"]
                         if d["expiries"] else None)
-    series, groups = [], []
+    groups: list[dict] = []
     hres = res[res["model"] == hkey] if hkey else None
     n_anchor = int(hres["in_sample"].astype(bool).sum()) if (hres is not None and "in_sample" in hres) else 0
-    # every quote of every expiry, packed once (desk_quotes): the chart's series
-    # below hold no data, desk.js unpacks them from this block, and the quote
-    # inspector reads strike, right, delta and each model's z from it
+    # every quote of every expiry, packed once (desk_quotes): desk.js unpacks the
+    # shown expiry's into one dateless set of series (the template) and the quote
+    # inspector reads strike, right, delta and each model's z from it. The page
+    # holds the default expiry's; the session's data file every expiry's, fetched
+    # once the smile is drawn (D2: 0.5 MB of a full Cboe book's 1.7 MB page)
     qblock = desk_quotes.encode(res, overlay, list(exps.index))
+    series = smile_quote_series(None, overlay, shown, hkey if n_anchor else None)
     for e in exps.index:
         q = mkt[mkt["expiry"] == e].sort_values("k")
-        series += smile_quote_series(e, overlay, shown, hkey if n_anchor else None)
         by_model = {}
         for m in overlay:
             qm = res[(res["model"] == m) & (res["expiry"] == e)].set_index("k")["model_iv"]
@@ -6174,15 +6660,38 @@ def surface_extras(d: dict, surf: dict) -> None:
                           + [_fmt(pd.Series([v for v, s_ in zip(by_model[m], sel) if s_],
                                             dtype=float).median(), ".2f") for m in overlay])
         groups.append({"group": e, "shown": e == d["default_exp"], **charts.table(
-            f"{e} ({_fmt(exps[e], '.0f')} days): median implied vol (%) by ln(K/F) bucket",
+            f"{e} ({_fmt(exps[e], '.0f')} days)",
             ["ln(K/F)", "Quotes#", "Bid#", "Mid#", "Ask#"] + [model_short(m) + "#" for m in overlay],
             rows_e)})
+    # the session's data file: every expiry's packed quotes, each heatmap cell's
+    # detail numbers (its readout's; null for an empty cell) and the 3D view's points
+    # (its spec keeps the colour scale), fetched once the smile is drawn, a heatmap
+    # cell is hovered or focused, or the 3D view is asked for
+    heats = [d["iv_heat"], *d["resid_heat"]]
+    file_: dict = {"quotes": {"order": list(qblock), "groups": qblock},
+                   "heat": {h["id"]: {"detail": h["detail"], "cells": [[c["vals"] for c in r["cells"]]
+                                                                       for r in h["rows"]]} for h in heats}}
+    if d.get("surface3d"):
+        file_["surface3d"] = {"points": d["surface3d"].pop("points")}
+    book = publish_json("surface", session, file_)
+    for x in [*heats, d.get("surface3d")]:
+        if x:
+            x.update(book, session=session)
     hs_by_exp = mkt.groupby("expiry")["half_spread_vp"].median()
+    f_by_exp = mkt.groupby("expiry")["forward"].first()
+    # one row per expiry; the status line under the tabs is its selected row
+    # (expiry_status here for the default, desk.js for the others)
+    per_exp = [[x["expiry"], _fmt(x["T_days"], ".0f"), _fmt(float(f_by_exp[x["expiry"]]), ",.2f"), x["n"],
+                _fmt(float(hs_by_exp[x["expiry"]]), ".2f")] for x in d["expiries"]]
+    d["exp_status"] = next((expiry_status(x["expiry"], x["settle"], r, i + 1, len(per_exp))
+                            for i, (x, r) in enumerate(zip(d["expiries"], per_exp))
+                            if x["expiry"] == d["default_exp"]), "")
     slice_tbl = charts.table("Quotes per expiry",
-                             ["Expiry", "Days#", "Quotes#", "Median half-spread (vol pts)#"],
-                             [[x["expiry"], _fmt(x["T_days"], ".0f"), x["n"],
-                               _fmt(float(hs_by_exp[x["expiry"]]), ".2f")] for x in d["expiries"]])
+                             ["Expiry", "Days#", "Forward F#", "Quotes#", "Median half-spread (vol pts)#"],
+                             per_exp)
     slice_tbl["groups"] = groups
+    # one table, a row group per expiry (D2: 45 tables, each with its caption and head)
+    slice_tbl["group_caption"] = "Median implied vol (%) by ln(K/F) bucket, a row group per expiry"
     d["charts"]["slices"] = charts.xy(
         "chart-slices", f"Smile slice with bid–ask quotes and model overlays, {session}",
         x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
@@ -6197,7 +6706,9 @@ def surface_extras(d: dict, surf: dict) -> None:
                     "(model − mid) / half-spread per quote, the band ±1 is inside the spread. "
                     "The readout under the chart steps through the quotes with the arrow keys."),
         table=slice_tbl,
-        quotes=smile_quotes_meta(qblock, overlay, hkey if n_anchor else None, surf.get("surface") or {}))
+        quotes={**smile_quotes_meta({e: g for e, g in qblock.items() if e == d["default_exp"]}, overlay,
+                                    hkey if n_anchor else None, surf.get("surface") or {}),
+                "template": True, "order": list(qblock), "session": session, **book})
 
     # out-of-sample median |model − mid| by expiry, one line per model, on the
     # same quotes as the scorecard beside it (the scorecard's by_expiry rows mix
@@ -6357,11 +6868,21 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["vix_deviations"] = list(vx.get("deviations") or [])
         d["vix_markers"] = vix_official_markers(vx)
         d["vix_calc_time"] = vx.get("calculation_time_ny")
+        # when the session's Cboe closes print (13:15 ET on an early close; 16:15 for a
+        # record written before vix_replication.json recorded it, none on an early close)
+        d["vix_close_hm"] = desk_surface.cboe_close_hm(vx)
+        d["vix_calc_words"] = desk_surface.vix_calc_time_words(vx)
         # each index's two terms and its gap split as gap_attribution splits it (#vix-terms-table)
         d["vix_terms"] = [{**r, "surface_label": model_short(r["surface"]) if r["surface"] else None}
                           for r in desk_surface.vix_terms(vx)]
-        # the gap-attribution sentence restated from that table, on its sign
-        d["vix_notes"] = desk_surface.vix_gap_notes(vx.get("gap_notes"), d["vix_terms"])
+        # what the unexplained part can come from, read from the artifact's own record
+        # (the rate is named unless every term of each index with a split shown was
+        # priced at Cboe's rate)
+        d["vix_causes"] = desk_surface.vix_unexplained_causes(vx)
+        # the gap-attribution sentence restated from that table, on its sign: the VIX's
+        # split, so the VIX's own terms decide whether the rate is named
+        d["vix_notes"] = desk_surface.vix_gap_notes(vx.get("gap_notes"), d["vix_terms"],
+                                                    causes=desk_surface.vix_unexplained_causes(vx, ("VIX",)))
         d["strip"] = [{"expiry": r.get("expiry"), "days": _num(r.get("days")),
                        "vs": _num(r.get("var_swap_vol")), "atm": _num(r.get("atm_vol_quotes")), "diff": _num(r.get("vs_minus_atm_vp")),
                        "ratio": _num(r.get("atm_over_vs")), "settlement": r.get("settlement"),
@@ -6383,7 +6904,8 @@ def surface_extras(d: dict, surf: dict) -> None:
                          "size": 5, "width": 1.5, "dash": True, "legend": True,
                          "data": [[r["days"], r["atm"]] for r in d["strip"]
                                   if r["atm"] is not None and r["days"] is not None]}]
-                + ([{"name": "Cboe close (16:15 ET): VIX9D, VIX, VIX3M, VIX6M", "type": "scatter",
+                + ([{"name": f"Cboe close ({d['vix_close_hm']} ET): VIX9D, VIX, VIX3M, VIX6M",
+                     "type": "scatter",
                      "role": "cboe", "color": "headline", "hollow": True, "size": 10, "legend": True, "z": 4,
                      "data": [[m_["days"], m_["close"]] for m_ in d["vix_markers"]]}]
                    if d["vix_markers"] else []),
@@ -6404,8 +6926,18 @@ def surface_extras(d: dict, surf: dict) -> None:
     # every session the surface report has covered (index.json)
     idx = surf.get("index") or []
     if idx:
-        mk = list(models)
+        # a column for every model scored on any stored session: this session's
+        # models, then the others by name. A session without a Heston fit still
+        # has a surface; taking only its models dropped Heston's column from
+        # every earlier session as well (the cell of a session where a model is
+        # not scored is a dash, and the note says why)
+        mk = history_model_keys(models, (r["model"] for r in oos_all))
         d["history_models"] = [{"key": m, "label": model_short(m)} for m in mk]
+        d["history_gaps"] = any(oos_by.get((r["session"], m)) is None for r in idx for m in mk)
+        # why Heston has no figure on a session, where the job's run records say
+        hk = heston_model_key(mk)
+        unfit = [r["session"] for r in idx if hk and oos_by.get((r["session"], hk)) is None]
+        d["history_unfitted"] = unfitted_causes(unfit, load_run_records(DATA)) if unfit else ""
         d["surface_history"] = [{"session": r["session"], "n": r.get("n_quotes"),
                                  "arb_out": r.get("arbitrage_quotes_outside_spread"),
                                  "vix_rep": _num(r.get("vix_replicated")),
@@ -6699,8 +7231,8 @@ INVENTORY_PATH = DASH / "model_inventory.json"
 # the IDs docs/model_validation uses): the dashboard had its own numbering, so
 # "M4" was the rule labeller here and the joint calibrator in the pack.
 INV_CALIBRATOR, INV_GREEKS, INV_BETA, INV_LABELS, INV_CLASSIFIER = "M4", "M6", "M7", "M10", "M11"
-INV_VX = "M5"
-VX_LAG_CHECK = "VX futures table lag behind the market DB (NYSE sessions)"
+INV_VX, INV_SURFACE, INV_LEDGER, INV_RATES = "M5", "M14", "M18", "M19"
+VX_LAG_CHECK = "VX futures table lag behind the newest session (NYSE sessions)"
 CHAIN_VENDORS = {"yfinance": "V1", "yahoo": "V1", "cboe": "V2"}
 
 
@@ -6725,7 +7257,46 @@ MONITOR_LIMITS = {
     "median_abs_hs": (2.0, 5.0),    # half-spreads, Heston out-of-sample median |model − mid|
     "vix_rep_gap": (0.5, 1.5),      # index pts, |VIX replicated from the chain − Cboe close|
     "arb_exec_share": (2.0, 5.0),   # % of scored quotes in a row failing static arbitrage at bid/ask
+    "vx_lag": (0, 1),               # NYSE sessions the VX futures table lags the newest session
 }
+
+# Checks over their limit for a reason that does not change from session to session
+# (CIO-14: half the breaches were permanent, which trains a reader to ignore red).
+# They carry the status 'design', with the reason, after the live statuses; the
+# limits and the bullet still show by how much. The VX futures lag was one until the
+# daily job began storing each session's settlements (FUND_GRADE_PLAN 1.12); it is a
+# live check now.
+BY_DESIGN_CHECKS: dict[str, str] = {}
+RESEARCH_BY_DESIGN = ("research tier: the model feeds no published number and never trades, so falling short "
+                      "of its baseline is the published negative result, not a failure")
+
+
+def curve_max_age_days() -> int:
+    """The age (calendar days) past which the calibrator refuses the Treasury
+    curve and falls back to ^IRX: the default of rates.get_zero_curve, which
+    joint_calibrator.reference_rate calls without overriding it. Model Risk
+    typed '7 days'."""
+    import inspect
+
+    from joint_vol_calibration.data import rates
+    return int(inspect.signature(rates.get_zero_curve).parameters["max_age_days"].default)
+
+
+def by_design(checks: Sequence[dict], tiers: dict[str, str]) -> list[dict]:
+    """``checks`` with each watch or breach that holds by design set to status
+    'design', with the reason (by_design) and the status its limits give
+    (limit_status): every check of a research-tier model (``tiers``: inventory
+    id -> tier) and each check in BY_DESIGN_CHECKS. A production or backtest
+    model's breach stays a breach."""
+    out = []
+    for check in checks:
+        c = dict(check)
+        why = (RESEARCH_BY_DESIGN if tiers.get(str(c.get("model"))) == "research"
+               else BY_DESIGN_CHECKS.get(str(c.get("key") or "")))
+        if why and c.get("status") in ("watch", "breach"):
+            c.update(status="design", limit_status=c["status"], by_design=why)
+        out.append(c)
+    return out
 
 
 def _rag(value: float | None, limits: tuple) -> str:
@@ -6778,6 +7349,9 @@ CHECK_EVIDENCE = {
     "classifier": ("research.html", "research-classifier"),
     "vix_rep_gap": ("surface.html", "vix-replication"),
     "arb_exec_share": ("surface.html", "arbitrage"),
+    "svi_certificate": ("surface.html", "scorecard"),
+    "ledger_chain": ("research.html", "forward"),
+    "rate_reference": ("calibration.html", "carry"),
 }
 
 # Each check's short name, for the 'Monitored' chip on its evidence panel: a panel
@@ -6797,6 +7371,9 @@ CHECK_SHORT = {
     "classifier": "classifier skill",
     "vix_rep_gap": "VIX replication",
     "arb_exec_share": "static arbitrage",
+    "svi_certificate": "SVI certificates",
+    "ledger_chain": "ledger chain",
+    "rate_reference": "rate reference",
 }
 
 
@@ -6835,19 +7412,116 @@ def surface_check_values(surf: dict) -> dict:
             "n_ex": n_ex, "n_q": n_q}
 
 
+def reproduce_status(path: Path | None = None) -> dict | None:
+    """The weekly reproduction's result (data_store/reproduce/status.json, written
+    by scripts/ci/reproduce.py --status and committed by .github/workflows/
+    reproduce.yml): when it finished, how many artifacts were rebuilt within
+    tolerance and how many exactly, and the run. None when it has not run yet;
+    a file that is not a whole reproduce_status/1 record is logged and treated
+    the same (the page then says it has not been reproduced, never a count the
+    record does not support)."""
+    p = Path(path) if path is not None else DATA / "reproduce" / "status.json"
+    if not p.is_file():
+        return None
+    try:
+        rec = json.loads(p.read_text())
+        n, k, b = rec["n_checks"], rec["n_ok"], rec["n_exact"]
+        when = str(rec["finished_utc"])
+        day = when[:10]
+        ok = (rec.get("schema") == "reproduce_status/1"
+              and all(isinstance(x, int) and not isinstance(x, bool) for x in (n, k, b))
+              and 0 <= b <= k <= n and n >= 1 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) is not None)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        _logger.warning("reproduce status %s unreadable: %s", p, e)
+        return None
+    if not ok:
+        _logger.warning("reproduce status %s is not a whole reproduce_status/1 record", p)
+        return None
+    url = rec.get("run_url")
+    return {"date": day, "n_checks": n, "n_ok": k, "n_exact": b, "commit": str(rec.get("commit") or "")[:7],
+            "run_url": url if isinstance(url, str) and url.startswith("https://") else None,
+            "failed": [str(f.get("artifact")) for f in rec.get("failed") or [] if isinstance(f, dict)]}
+
+
+def _output_written(outputs: Any) -> bool:
+    """Every output path exists and, for a directory, holds a file (the inventory
+    prints an output's 'pending' note until then). 'data_store/...' resolves
+    under DATA, the record the pages read."""
+    outs = [outputs] if isinstance(outputs, str) else list(outputs or [])
+
+    def one(rel: str) -> bool:
+        p = DATA / rel[len("data_store/"):] if rel.startswith("data_store/") else ROOT / rel
+        return any(x.is_file() for x in p.iterdir()) if p.is_dir() else p.is_file()
+    return bool(outs) and all(one(o) for o in outs)
+
+
+def inventory_values(greeks: dict, beta_later: list[dict] | None,
+                     classifier_eval: dict | None) -> dict[str, str]:
+    """The model inventory's {placeholders}, each from its artifact (desk_inventory).
+    ``greeks`` is load_page3's result, ``beta_later`` beta_estimation's later
+    chains and ``classifier_eval`` the research classifier's stored evaluation;
+    the rest is read here."""
+    from joint_vol_calibration.config import (
+        HESTON_BOUNDS,
+        PROFILE_KAPPA_MAX,
+        ROUGH_HESTON_H_BOUNDS,
+        SIGMA_PROFILE_CAPS,
+    )
+
+    s_lo, s_hi = (float(x) for x in HESTON_BOUNDS["sigma"])
+    hist = _gated_history()
+
+    def side(h: dict) -> str | None:
+        if "sigma" not in h["pinned"]:
+            return None
+        return "ceiling" if float(h["params"]["sigma"]) >= (s_lo + s_hi) / 2 else "floor"
+    diag = artifacts.load_diagnostics_summary(DATA)
+    rows = (diag.get("rows") or []) if diag.get("state") == "ok" else []
+    prov = greeks.get("provenance") or {}
+    g_sigma = _num((prov.get("params") or {}).get("sigma"))
+    qpaths = sorted(glob.glob(str(DATA / "calibrations" / "quintic_cal_*.pkl")))
+    q = _load_pickle(qpaths[-1]) if qpaths else {}
+    q_par = q.get("params_dict") or {}
+    q_names = {"a0": "alpha0", "a1": "alpha1", "a3": "alpha3", "a5": "alpha5"}
+    conv = q.get("convergence") or {}
+    inf = artifacts.load_inference(DATA)
+    ev = classifier_eval or {}
+    return {
+        "vx_futures_oos_rmse": vx_futures_oos_text(),
+        "sigma_box": desk_inventory.sigma_box_text([(h["session"], side(h)) for h in hist]),
+        "sigma_box_cost": desk_inventory.sigma_box_cost_text(
+            rows, {h["session"]: h["params"] for h in hist}, max(SIGMA_PROFILE_CAPS), PROFILE_KAPPA_MAX),
+        "vvix_boxed": desk_inventory.vvix_boxed_text(rows),
+        "vix_options_leg": desk_inventory.vix_options_leg_text([h["w3"] for h in hist]),
+        "greeks_sigma": desk_inventory.greeks_sigma_text(
+            _date_str(prov.get("as_of_date")), g_sigma, (s_lo, s_hi),
+            _bound_side(g_sigma, s_lo, s_hi) if g_sigma is not None else None),
+        "beta_later": desk_inventory.beta_later_text([(c["session"], c["ratio"]) for c in beta_later or []]),
+        "pdv_rank": desk_inventory.pdv_rank_text(
+            pdv_forecast_rank(inf.get("forecast")) if inf.get("state") == "ok" else None),
+        "classifier_skill": desk_inventory.classifier_text(
+            None if ev.get("oos_acc") is None else float(ev["oos_acc"]) * 100,
+            None if ev.get("persistence_acc") is None else float(ev["persistence_acc"]) * 100),
+        "quintic_fit": desk_inventory.quintic_text(
+            bool(qpaths), bool(q.get("success")), [conv.get("de_message"), conv.get("polish_message")],
+            [(k, q_par.get(q_names.get(k, k))) for k, on in (q.get("at_bound") or {}).items() if on]),
+        "rough_h": desk_inventory.rough_h_text(rows, *(float(x) for x in ROUGH_HESTON_H_BOUNDS)),
+        "ledger_record": desk_inventory.ledger_text(artifacts.load_forward_ledger(DATA)),
+    }
+
+
 def load_model_risk() -> dict[str, Any]:
-    d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": []}
+    d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": [],
+                         "reproduced": reproduce_status()}
+    inv_models: list[dict] = []
     with _loader_boundary(d, "model inventory (dashboard/model_inventory.json)"):
         inv = json.loads(INVENTORY_PATH.read_text())
-        # numbers in the inventory's prose are computed from the artifacts, never typed
-        vx_txt = None
-        for m in inv["models"]:
-            if "{vx_futures_oos_rmse}" in m.get("limitations", ""):
-                vx_txt = vx_txt or vx_futures_oos_text()
-                m["limitations"] = m["limitations"].replace("{vx_futures_oos_rmse}", vx_txt)
+        inv_models = inv["models"]
         d["inventory"] = inv["models"]
         d["vendor_inputs"] = inv.get("vendor_inputs") or []
         d["inventory_about"] = inv.get("about")
+    beta_later: list[dict] | None = None
+    clf_eval: dict | None = None
     p2 = load_page2()
     for e in p2.get("errors") or []:
         d["errors"].append(e)
@@ -6906,12 +7580,23 @@ def load_model_risk() -> dict[str, Any]:
     add(INV_CALIBRATOR, "Feller condition (diagnostic, not imposed)", None,
         f"{p2.get('feller_state') or '—'}, margin {_fmt(p2.get('feller_margin'), '+.2f')}", "", fit_art,
         "Not a no-arbitrage condition; reported, not limited.", status="info", key="feller")
+    # M19: the rate reference of the headline fit: the Treasury zero curve, or ^IRX if the curve was refused
+    rk = p2.get("r_ref_kind")
+    rk_text = {"treasury_curve": "Treasury zero curve", "irx": "^IRX"}.get(str(rk), str(rk))
+    add(INV_RATES, "Rate reference of the headline fit (the Treasury zero curve, or the ^IRX fallback)", None,
+        rk_text if rk else "not recorded", "", fit_art,
+        (str(p2.get("r_ref_source") or "") + ". " if p2.get("r_ref_source") else "")
+        + f"The curve is refused when missing or older than {_fmt(curve_max_age_days(), '.0f')} days; "
+        "the fit then falls back to ^IRX and records it.",
+        status="ok" if rk == "treasury_curve" else ("watch" if rk else "na"),
+        limits_text="OK on the curve · watch on ^IRX", key="rate_reference")
     # M3: β drift — the newest stored chain against the frozen backtest β
     with _loader_boundary(d, "β estimation chains"):
         st = _load_pickle(DATA / "backtest" / "full_results.pkl")
         beta = _num(st.get("atm_to_vix_ratio", (st.get("metrics") or {}).get("atm_to_vix_ratio")))
         be = beta_estimation(None)
         later = be.get("later") or []
+        beta_later = later
         newest = later[-1] if later else None
         drift = abs(newest["ratio"] - beta) if (newest and beta is not None) else None
         chains = sorted((c for c in be.get("chains") or [] if c["role"] in ("estimation", "later")
@@ -6935,17 +7620,17 @@ def load_model_risk() -> dict[str, Any]:
             "label_lag",
             ["data_store/signals/regime_labels.parquet", "data_store/vol_system.db"],
             f"Labels {lab_date}; market DB {db_date}.", digits=".0f")
-    # M5: the VX futures table behind the market DB (the fits' out-of-sample VX leg)
-    with _loader_boundary(d, "VX futures table / market DB"):
-        vx_date = vx_last_date()
-        with _db() as con:
-            db_date = str(con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0])[:10]
-        vx_lag = session_age(vx_date, db_date) if vx_date else None
+    # M5: the VX futures table behind the newest session (the fits' out-of-sample VX
+    # leg); vx_freshness, the age the Overview and the footer's freshness table print
+    with _loader_boundary(d, "VX futures table / newest session"):
+        vx = vx_freshness()
+        vx_date, vx_lag = vx["date"], vx["age"]
+        src = f" ({vx['ref_source']})" if vx["ref_source"] else ""
         add(INV_VX, VX_LAG_CHECK, _num(vx_lag),
-            _fmt(vx_lag) if vx_date else "no futures table", "label_lag", VX_TABLE,
-            f"vix_futures_daily through {vx_date or '—'}; market DB {db_date}. Only the fits' out-of-sample "
-            f"VX score reads them, so a fit after {vx_date or 'the table'} has none.", key="vx_lag",
-            digits=".0f")
+            _fmt(vx_lag) if vx_date else "no futures table", "vx_lag", VX_TABLE,
+            f"vix_futures_daily through {vx_date or '—'}; newest session {vx['ref'] or '—'}{src}. Only the "
+            f"fits' out-of-sample VX score reads them, so a fit after {vx_date or 'the table'} has none.",
+            key="vx_lag", digits=".0f")
     # M2: Greeks surface built from the headline fit
     g = load_page3()
     for e in g.get("errors") or []:
@@ -6961,6 +7646,7 @@ def load_model_risk() -> dict[str, Any]:
     with _loader_boundary(d, "research classifier (regime_classifier.pkl)"):
         clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
         ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
+        clf_eval = ev
         if ev.get("oos_acc") is not None:
             gap = (float(ev["oos_acc"]) - float(ev["persistence_acc"])) * 100
             add(INV_CLASSIFIER, "Classifier accuracy minus the persistence baseline (percentage pts)", gap,
@@ -6986,12 +7672,28 @@ def load_model_risk() -> dict[str, Any]:
 
         def surf_hist(k):
             return [(s_, v[k]) for s_, v in shist] if shist and shist[-1][0] == surf["session"] else None
+        # a session's surface is built whatever its Heston fit did: its scorecard.json
+        # then marks Heston not available, with the producer's reason (as
+        # surface.scorecard.UNAVAILABLE_REASONS gives it)
+        # the chain Heston was fitted on, when the scorecard says it is not the book scored
+        fit_chain = next((str((m.get("fit") or {}).get("fit_chain_source") or "")
+                          for m in ((surf.get("scorecard") or {}).get("models") or [])
+                          if isinstance(m, dict) and str(m.get("model", "")).startswith("heston")
+                          and m.get("available") is not False
+                          and (m.get("fit") or {}).get("scored_on_fit_chain") is False), None) or None
+        unscored = next((str(m.get("reason") or "no stored fit")
+                         for m in ((surf.get("scorecard") or {}).get("models") or [])
+                         if isinstance(m, dict) and str(m.get("model", "")).startswith("heston")
+                         and m.get("available") is False), None)
         add(INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)",
             today["median_abs_hs"],
             f"{_fmt(today['median_abs_hs'], '.1f')} ({_fmt(today['inside_pct'], '.1f')}% inside)",
-            "median_abs_hs", sart + ("scorecard.json" if today["scorecard"] else "residuals.parquet"),
-            f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; "
-            + _chain_clause(surf.get("surface") or {}) + ".",
+            "median_abs_hs",
+            sart + ("scorecard.json" if today["scorecard"] or unscored else "residuals.parquet"),
+            (f"Heston is not scored on {surf['session']}: {unscored}" if unscored else
+             f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; "
+             + _chain_clause(surf.get("surface") or {})
+             + (f"; {fit_book_clause(fit_chain)}" if fit_chain else "") + "."),
             history=surf_hist("median_abs_hs"), digits=".1f")
         vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",
@@ -7000,6 +7702,14 @@ def load_model_risk() -> dict[str, Any]:
             f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}; "
             "a gap points at a thin or stale strip.",
             history=surf_hist("rep_gap"), two_sided=True)
+        cert = (((surf.get("surface") or {}).get("surfaces") or {}).get("svi_cal") or {}).get(
+            "arbitrage_free_certified")
+        add(INV_SURFACE, "SVI-cal surface carries its butterfly and calendar certificates", None,
+            "yes" if cert else ("no" if cert is False else "not recorded"), "", sart + "surface.json",
+            "The label 'arbitrage-free', the density and tails (M21) and the desk coordinates (M22) "
+            "rest on them.",
+            status="ok" if cert else ("breach" if cert is False else "na"),
+            limits_text="OK if yes · breach if no", key="svi_certificate")
         share = today["arb_exec_share"]
         lv = arb_violations((surf.get("surface") or {}).get("arbitrage") or {})
         legs = list(dict.fromkeys(v["bad_quote"] for v in lv if v["bad_quote"]))
@@ -7019,20 +7729,45 @@ def load_model_risk() -> dict[str, Any]:
                                  "median_abs_hs"),
                                 ("Data", "VIX replicated from the stored chain − Cboe close (index pts)",
                                  "vix_rep_gap"),
-                                ("Data", ARB_CHECK, "arb_exec_share")):
+                                ("Data", ARB_CHECK, "arb_exec_share"),
+                                (INV_SURFACE,
+                                 "SVI-cal surface carries its butterfly and calendar certificates",
+                                 "svi_certificate")):
             add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
                 "Shown once the surface report has run.", status="na", limits_text="—", key=key_)
+    # M18: the forward ledger's hash chain (each entry names the SHA-256 of the one before)
+    try:
+        led = artifacts.load_forward_ledger(DATA)
+        broken = None
+    except artifacts.ArtifactError as e:
+        led, broken = {"state": "error"}, str(e)
+    n_led = led.get("n") if led.get("state") == "ok" else None
+    add(INV_LEDGER, "Forward ledger hash chain intact", None,
+        f"yes, {plural(n_led, 'session')}" if n_led else ("no" if broken else "no entry yet"), "",
+        "data_store/forward/",
+        broken or "Each entry names the SHA-256 of the one before it, so an edited entry breaks the chain.",
+        status="ok" if n_led else ("breach" if broken else "na"),
+        limits_text="OK if intact · breach if broken",
+        key="ledger_chain")
+    # every count, session and state in the inventory's prose is computed from the
+    # artifacts (desk_inventory), never typed; an unknown placeholder fails the build
+    with _loader_boundary(d, "model inventory prose (dashboard/model_inventory.json placeholders)"):
+        d["inventory"] = desk_inventory.fill_models(
+            inv_models, inventory_values(g, beta_later, clf_eval), _output_written)
     # worst first: BREACH, WATCH, OK, INFO, then N/A; within a status, in inventory
     # order (the vendor-data checks last), the order they were added within a model
     order = [m["id"] for m in d["inventory"]] + [v.get("id") for v in d.get("vendor_inputs") or []] + ["Data"]
+    mon = by_design(mon, {m["id"]: m.get("tier") for m in d["inventory"]})
     mon = desk_monitor.order_checks(mon, order)
+    for m in d["inventory"]:
+        m["monitors"] = [{"id": c["id"], "short": c["short"], "status": c["status"]} for c in mon
+                         if c["model"] == m["id"]]
     names = {m["id"]: m["name"] for m in d["inventory"]}
     names.update({v.get("id"): v.get("source") for v in d.get("vendor_inputs") or []})
     for m in mon:
         m["model_name"] = names.get(m["model"])
     d["monitors"] = mon
-    d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k)
-                       for k in ("ok", "watch", "breach", "info", "na")}
+    d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k) for k in desk_monitor.SEVERITY}
     d["limits"] = MONITOR_LIMITS
     return _clean_keep(d)
 
@@ -7187,7 +7922,9 @@ def load_chrome() -> dict:
         vx_date = vx_last_date()
     except (sqlite3.Error, OSError) as exc:
         _logger.info("chrome: VX futures unavailable (%s)", exc)
-    ref = max([x for x in (spx_date, labels_date) if x], default=None)
+    # the newest session the site has data for: the reference of every age in the
+    # freshness table, the same one the Overview's VX age and Model Risk M5 use
+    ref = _latest_market_session()
     c["latest"] = ref
     if surf_sessions:
         try:
@@ -7370,6 +8107,28 @@ def own_asset(rel: str) -> dict:
     return {"src": f"{rel}?v={hashlib.sha256(data).hexdigest()[:12]}", "bytes": len(data)}
 
 
+# Session data files (D2): what a page reads only when a reader uses it (every
+# expiry's quotes behind the Surface smile, 0.5 MB on a full Cboe book) is one
+# same-origin JSON file per session, data/<kind>-<session>-<sha256[:16]>.json,
+# that desk.js fetches with its sha384 as the integrity value. The name changes
+# with the bytes (Pages ignores ?v=, so a cached page can never read newer data).
+# Rendering a page registers the exact bytes here; /data/<name> serves them, and
+# freeze_site.py writes every file a page references, and no other, to data/.
+DATA_FILES: dict[str, bytes] = {}
+DATA_SCHEMA = 1
+
+
+def publish_json(kind: str, session: str, obj: dict) -> dict:
+    """Register {schema, session, **obj} (compact, keys sorted) as a data file:
+    {"src": its path from a page, "integrity": its sha384 SRI value}."""
+    body = json.dumps({"schema": DATA_SCHEMA, "session": session, **obj}, separators=(",", ":"),
+                      sort_keys=True, allow_nan=False).encode("utf-8")
+    name = f"{kind}-{session}-{hashlib.sha256(body).hexdigest()[:16]}.json"
+    DATA_FILES[name] = body
+    return {"src": f"data/{name}",
+            "integrity": "sha384-" + base64.b64encode(hashlib.sha384(body).digest()).decode()}
+
+
 @app.context_processor
 def _page_context() -> dict:
     route = request.path if request.path in ROUTES else "/"
@@ -7450,6 +8209,17 @@ def page_corrections():
 @app.route("/model-risk")
 def page_model_risk():
     return _render("model-risk.html", load_model_risk())
+
+
+@app.route("/data/<name>")
+def data_file(name: str):
+    """A session data file a rendered page references (publish_json); 404 for any other."""
+    body = DATA_FILES.get(name)
+    if body is None:
+        return make_response("not found", 404)
+    resp = make_response(body)
+    resp.headers["Content-Type"] = "application/json"
+    return resp
 
 
 @app.route("/greeks")

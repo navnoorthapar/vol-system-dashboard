@@ -25,7 +25,9 @@ case "${1:-}" in
     out="${2:-$ROOT/.site-build}"
     echo "==> Rendering a local preview into $out (nothing is published)"
     python "$ROOT/dashboard/freeze_site.py" "$out"
-    echo "==> Open $out/index.html"
+    # the Surface smile reads its other expiries from data/ with fetch(), which a
+    # file:// page cannot do: serve the folder instead of opening the file
+    echo "==> Serve it: python -m http.server -d \"$out\" 8000, then open http://127.0.0.1:8000/"
     exit 0
     ;;
   --steps)

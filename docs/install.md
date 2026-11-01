@@ -6,13 +6,13 @@ Python 3.11. Three routes, from most to least exact.
 
 ```bash
 python3.11 -m venv .venv && . .venv/bin/activate
-make install            # pip install -r requirements-lock.txt
+make install            # pip install --require-hashes -r requirements-lock.txt
 make test-fast          # about 1 minute; `make test` runs the full suite (about 10.5 minutes on 4 vCPU, measured 2026-10-21)
 ```
 
 `requirements-lock.txt` pins every package, including the CPU builds of torch (`+cpu`, from the PyTorch index) and
-`xgboost-cpu`. It is exactly what CI and the daily job install, so it is the environment the published numbers were
-produced in. Those two builds exist only for Linux, which is why the lock does not install anywhere else.
+`xgboost-cpu`, and records the SHA-256 of every file it may install (`--require-hashes` refuses anything else). It is
+exactly what CI and the daily job install, so it is the environment the published numbers were produced in. Those two builds exist only for Linux, which is why the lock does not install anywhere else.
 
 ## 2. Any other platform: the ranges
 
@@ -75,4 +75,4 @@ skipped because that day's `requirements-lock.txt` did not yet carry the C23 tes
 | `make freeze` / `make a11y` | the static site as published / its accessibility gate (Node 20+) |
 | `make demo` | the dashboard on 127.0.0.1, read-only, from the committed artifacts |
 | `make mutation` | curated mutants of the pricer and IV solver against the property tests |
-| `make audit` | pip-audit of the lock (report only) |
+| `make audit` | pip-audit of the lock, gated by `scripts/ci/pip_audit_allowlist.json` (needs `pip install --require-hashes -r scripts/ci/pip_audit_lock.txt`) |

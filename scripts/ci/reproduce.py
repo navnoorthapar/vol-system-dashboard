@@ -6,6 +6,7 @@ diff them against what is committed (`make reproduce`).
     python scripts/ci/reproduce.py                 # fast set, ~3-5 min on 4 cores
     python scripts/ci/reproduce.py --full          # + beta grid, C22 waterfall, S3 null
     python scripts/ci/reproduce.py --only greeks,c7
+    python scripts/ci/reproduce.py --status data_store/reproduce/status.json
 
 The pattern is the Open Source Risk Engine's (ORE) Output vs ExpectedOutput:
 every step runs the same command the README lists for regenerating an
@@ -25,6 +26,14 @@ evaluation on another CPU can move the optimum by ~1e-8 relative. The
 committed refit is bit for bit on the machine that wrote it (README).
 
 Determinism: the steps run with PYTHONHASHSEED=0 and one BLAS/OpenMP thread.
+
+--status PATH also writes the run's result as one small JSON (status_record:
+the commit, the Actions run, when it finished, how many artifacts were
+checked, within tolerance and exact (deviation 0), the largest deviation and
+every failure), whatever the outcome. The weekly workflow
+(.github/workflows/reproduce.yml) commits it as data_store/reproduce/status.json
+and Model Risk prints 'Last reproduced <date>: k of n artifacts within
+tolerance (b exact)' from it (FUND_GRADE_PLAN 0.3).
 """
 from __future__ import annotations
 
@@ -40,6 +49,7 @@ import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -432,6 +442,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--only", help="comma-separated step names (prefix match, e.g. calibration)")
     ap.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1))
     ap.add_argument("--keep", action="store_true", help="keep the scratch tree")
+    ap.add_argument("--status", type=Path, default=None,
+                    help="also write the result as a status JSON here (status_record)")
     args = ap.parse_args(argv)
 
     want = [w.strip() for w in args.only.split(",") if w.strip()] if args.only else None
@@ -484,6 +496,10 @@ def main(argv: list[str] | None = None) -> int:
         checks.extend(do(step))
 
     report(checks, timings, out)
+    if args.status:
+        write_status(args.status, status_record(checks, commit=_git("rev-parse", "HEAD"), run_url=_run_url(),
+                                                full=args.full))
+        print(f"status: {args.status}", flush=True)
     if not args.keep:
         shutil.rmtree(tree, ignore_errors=True)
     bad = [c for c in checks if not c.ok]
@@ -511,6 +527,55 @@ def report(checks: list[Check], timings: dict[str, float], out: Path) -> None:
         [{"artifact": c.artifact, "deviation": c.deviation, "where": c.where, "tolerance": c.tolerance,
           "ok": c.ok, "problems": c.problems, "notes": c.notes} for c in checks], indent=1) + "\n")
     print("\n".join(lines[4:]))
+
+
+STATUS_SCHEMA = "reproduce_status/1"
+
+
+def _finite(x: float) -> float | None:
+    return float(x) if math.isfinite(x) else None
+
+
+def status_record(checks: list[Check], commit: str, run_url: str | None, full: bool = False,
+                  finished_utc: str | None = None) -> dict:
+    """The run's result for data_store/reproduce/status.json: counts derived
+    from the checks (n_exact: within tolerance with deviation exactly 0), the
+    largest finite deviation and the artifact it is in, and every failure with
+    its deviation, tolerance and problems. A NaN deviation (always a failure)
+    is written as null."""
+    ok = [c for c in checks if c.ok]
+    finite = [c for c in checks if math.isfinite(c.deviation)]
+    worst = max(finite, key=lambda c: c.deviation, default=None)
+    return {
+        "schema": STATUS_SCHEMA,
+        "commit": commit,
+        "run_url": run_url or None,
+        "finished_utc": finished_utc or datetime.now(UTC).isoformat(timespec="seconds"),
+        "full": bool(full),
+        "n_checks": len(checks),
+        "n_ok": len(ok),
+        "n_exact": sum(1 for c in ok if c.deviation == 0.0),
+        "max_deviation": worst.deviation if worst else None,
+        "max_deviation_artifact": worst.artifact if worst else None,
+        "failed": [{"artifact": c.artifact, "deviation": _finite(c.deviation), "tolerance": c.tolerance,
+                    "problems": list(c.problems)} for c in checks if not c.ok],
+    }
+
+
+def write_status(path: Path, rec: dict) -> None:
+    """Write the status JSON atomically (a temporary file, then a rename)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(rec, indent=1, allow_nan=False) + "\n")
+    tmp.replace(path)
+
+
+def _run_url() -> str | None:
+    """The GitHub Actions run, when this runs in one."""
+    server, repo, run = (os.environ.get(k)
+                         for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
+    return f"{server}/{repo}/actions/runs/{run}" if server and repo and run else None
 
 
 def _git(*args: str) -> str:

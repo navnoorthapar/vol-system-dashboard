@@ -398,10 +398,93 @@ def parse_vx_settlement_csv(text: str, trade_date: str) -> pd.DataFrame:
     return out
 
 
+_SERVED_SETTLEMENT = re.compile(r"FuturesSettlements_(\d{4}-\d{2}-\d{2})\.csv")
+
+
+def served_settlement_date(resp) -> str | None:
+    """The trade date of the settlement file Cboe actually served: the filename in
+    its Content-Disposition header (``FuturesSettlements_<YYYY-MM-DD>.csv``);
+    None when the response does not name one."""
+    headers = getattr(resp, "headers", None) or {}
+    m = _SERVED_SETTLEMENT.search(str(headers.get("content-disposition") or ""))
+    return m.group(1) if m else None
+
+
 def download_vx_settlements(trade_date: str) -> pd.DataFrame:
-    """Every VX contract's daily settlement on ``trade_date`` (see parse_vx_settlement_csv)."""
+    """Every VX contract's daily settlement on ``trade_date`` (see parse_vx_settlement_csv).
+
+    For a date it has not posted yet Cboe serves its NEWEST file instead (asked
+    for 2026-10-29 at 22:33 ET on 10-28, it sent FuturesSettlements_2026-10-28.csv
+    with 10-28's prices). A file whose name gives another date is therefore
+    another session's prices: it is returned empty, as for a closed day."""
     db._validate_date(trade_date)
-    return parse_vx_settlement_csv(_get(_VX_SETTLEMENT_URL.format(date=trade_date)).text, trade_date)
+    resp = _get(_VX_SETTLEMENT_URL.format(date=trade_date))
+    served = served_settlement_date(resp)
+    if served is not None and served != trade_date:
+        logger.info("VX settlements for %s: Cboe served its %s file (not posted yet)", trade_date, served)
+        return parse_vx_settlement_csv("Product,Symbol,Expiration Date,Price\n", trade_date)
+    return parse_vx_settlement_csv(resp.text, trade_date)
+
+
+# Bounds on a stored VX settlement (index points): VX has settled between about
+# 9 and 70 since 2004, so a value outside is a parse or feed error, not a price.
+VX_SETTLE_BOUNDS = (1.0, 150.0)
+# A session's file lists 8-9 monthly contracts; fewer than this still trading
+# after the session is an incomplete file, not a curve.
+VX_MIN_LIVE_MONTHLIES = 2
+
+
+def check_vx_session(rows: pd.DataFrame, session: str,
+                     previous: pd.DataFrame | None = None) -> tuple[pd.DataFrame, list[str]]:
+    """The monthly VX contracts of ``session`` the daily job may store, and what it
+    left out and why (one line each).
+
+    ``rows``: parse_vx_settlement_csv or parse_vx_contract_csv rows. Kept: rows
+    dated ``session`` of a standard monthly contract (its expiry is its month's
+    database.vx_expiry_for_month, on or after the session), one per contract, with
+    a finite settlement inside VX_SETTLE_BOUNDS. Weeklies are left out: on a day a
+    weekly does not trade Cboe prints a monthly's settlement for it. The whole
+    session is refused (nothing kept) when fewer than VX_MIN_LIVE_MONTHLIES
+    contracts still trade after it (an incomplete file), or when every price
+    equals ``previous`` (the stored monthly settlements of the session before:
+    expiry_date, settle), i.e. Cboe served the earlier session's file again."""
+    why: list[str] = []
+    empty = rows.iloc[0:0]
+    if rows.empty:
+        return empty, ["no rows"]
+    df = rows[rows["date"].astype(str).str[:10] == session].copy()
+    if len(df) < len(rows):
+        why.append(f"{len(rows) - len(df)} row(s) dated another session")
+    weekly = df["is_weekly"].astype(int) == 1
+    df = df[~weekly]
+    std = df["expiry_month"].map(db.vx_expiry_for_month)
+    bad_exp = (df["expiry_date"] != std) | (df["expiry_date"] < session)
+    if bad_exp.any():
+        why.append("not a standard monthly expiry on or after the session: "
+                   + ", ".join(sorted(df.loc[bad_exp, "expiry_date"].astype(str))))
+    df = df[~bad_exp]
+    px = pd.to_numeric(df["settle"], errors="coerce")
+    lo, hi = VX_SETTLE_BOUNDS
+    bad_px = ~(px.between(lo, hi) & np.isfinite(px))
+    if bad_px.any():
+        why.append(f"settlement outside [{lo:g}, {hi:g}]: "
+                   + ", ".join(f"{e} {v}" for e, v in zip(df.loc[bad_px, "expiry_date"], px[bad_px])))
+    df = df[~bad_px]
+    dup = df["expiry_date"].duplicated(keep=False)
+    if dup.any():
+        why.append("more than one row for " + ", ".join(sorted(set(df.loc[dup, "expiry_date"]))))
+        df = df[~dup]
+    live = int((df["expiry_date"] > session).sum())
+    if live < VX_MIN_LIVE_MONTHLIES:
+        return empty, [*why, (f"{live} monthly contract(s) still trading after {session} "
+                              f"(fewer than {VX_MIN_LIVE_MONTHLIES}): an incomplete file")]
+    if previous is not None and not previous.empty:
+        before = dict(zip(previous["expiry_date"].astype(str), pd.to_numeric(previous["settle"])))
+        both = [(float(p), before[e]) for e, p in zip(df["expiry_date"], df["settle"]) if e in before]
+        if len(both) >= VX_MIN_LIVE_MONTHLIES and all(abs(a - b) < 1e-9 for a, b in both):
+            return empty, [*why, ("every price equals the previous session's: Cboe served that "
+                                  f"session's file again, not {session}'s")]
+    return df.sort_values("expiry_date").reset_index(drop=True), why
 
 
 def download_vix_futures_daily_history(
@@ -669,7 +752,8 @@ def book_state_at(at: datetime, session: str | None) -> str:
     Pass the instant the quotes show (a delayed feed's quote_time, see
     delayed_quote_time), not the fetch time.
 
-    'intraday'  09:30 ET to the 16:15 data cutoff of ``session`` itself
+    'intraday'  09:30 ET to the data cutoff of ``session`` itself (16:15 ET;
+                13:15 on an early close, database.close_data_cutoff)
     'gth'       inside the Global Trading Hours window (20:15 ET the evening
                 before, to 09:15 ET) of the session AFTER ``session``: these
                 quotes trade for the next session (option_chain.t_origin
@@ -682,7 +766,8 @@ def book_state_at(at: datetime, session: str | None) -> str:
     if session is None:
         return "closing"
     ny = db._now_ny(at)
-    if db.is_intraday(at) and ny.date().isoformat() == session:
+    if (ny.date().isoformat() == session and db.is_nyse_session(ny.date())
+            and db.SESSION_OPEN <= ny.time() < db.close_data_cutoff(ny.date())):
         return "intraday"
     nxt = oc.next_session(session)
     lo, hi = oc.gth_window(nxt)
@@ -801,6 +886,115 @@ def save_capture(cap: ChainCapture, out_dir) -> tuple:
     tmp.write_text(json.dumps(cap.summary(), indent=2) + "\n")
     os.replace(tmp, js_path)
     return pq_path, js_path
+
+
+# ── Where the raw books live: the public store or a private one ──────────────
+#
+# Cboe's terms bar storing and redistributing its quotes (DATA_SOURCES.md), and
+# this repository is public. When the owner has created the private data
+# repository (secrets CBOE_DATA_REPO and CBOE_DATA_TOKEN), the daily workflow
+# checks it out and points BOOKS_DIR_ENV at its options/cboe/ directory; each
+# new raw book (<stem>.parquet and its <stem>.json) goes there, and the public
+# repository keeps only a manifest, data_store/options/cboe_manifest/<stem>.json
+# (write_manifest: hashes, counts, timestamps, the private path; never a quote).
+# Every reader of raw books finds them through book_dirs / find_books, so a book
+# a later run needs (the forward ledger's marks of open positions, a backfill, a
+# reproduction) is found in the private checkout as well as in the public tree;
+# book_captured also counts a manifest, so the retry slot does not capture a
+# book again that an earlier slot moved to the private store.
+
+BOOKS_DIR_ENV = "CBOE_BOOKS_DIR"
+PRIVATE_BOOKS_SUBDIR = "options/cboe"          # inside the private repository
+MANIFEST_SCHEMA = "cboe_manifest/1"
+
+
+def public_books_dir(data_dir=None):
+    """data_store/options/cboe/ (or <data_dir>/options/cboe/)."""
+    from pathlib import Path
+    return (Path(data_dir) if data_dir is not None else db.DATA_DIR) / "options" / "cboe"
+
+
+def manifest_dir(data_dir=None):
+    """data_store/options/cboe_manifest/: the public record of books held privately."""
+    from pathlib import Path
+    return (Path(data_dir) if data_dir is not None else db.DATA_DIR) / "options" / "cboe_manifest"
+
+
+def book_dirs(data_dir=None, env=None) -> list:
+    """Every directory a raw book can be in, private checkout first: the
+    directory BOOKS_DIR_ENV names (when set and present), then the public
+    data_store/options/cboe/ (the books committed before the private store,
+    and this run's captures until the workflow moves them)."""
+    import os
+    from pathlib import Path
+    env = os.environ if env is None else env
+    out = []
+    private = (env.get(BOOKS_DIR_ENV) or "").strip()
+    if private and Path(private).is_dir():
+        out.append(Path(private))
+    pub = public_books_dir(data_dir)
+    if pub not in out:
+        out.append(pub)
+    return out
+
+
+def find_books(underlying: str, session: str, data_dir=None, env=None) -> list:
+    """The stored raw books (parquet paths) of ``underlying`` for ``session``,
+    oldest capture first, wherever they are (book_dirs); a book in both places
+    is listed once, from the first directory that has it."""
+    seen: dict = {}
+    for d in book_dirs(data_dir, env):
+        for p in sorted(d.glob(f"{underlying.lower()}_{session}_*.parquet")):
+            seen.setdefault(p.name, p)
+    return [seen[n] for n in sorted(seen)]
+
+
+def book_captured(underlying: str, session: str, data_dir=None, env=None) -> str | None:
+    """Where a capture of ``underlying`` for ``session`` is recorded (a raw book
+    or a manifest of one held privately), or None: the retry slot's test of
+    whether a book is already stored."""
+    books = find_books(underlying, session, data_dir, env)
+    if books:
+        return str(books[-1])
+    man = sorted(manifest_dir(data_dir).glob(f"{underlying.lower()}_{session}_*.json"))
+    return str(man[-1]) if man else None
+
+
+def _file_sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_manifest(pq_path, out_dir, private_repo: str) -> tuple:
+    """The public record of a raw book moved to the private store:
+    <out_dir>/<stem>.json with the book's own record (<stem>.json beside the
+    parquet: session, quote time, book state, row counts, the SHA-256 of the
+    raw response), the SHA-256 of both files, and where they are in the
+    private repository. No quote. Atomic. Returns (path, manifest)."""
+    import os
+    from pathlib import Path
+    pq_path = Path(pq_path)
+    js_path = pq_path.with_suffix(".json")
+    side = json.loads(js_path.read_text())
+    stem = pq_path.stem
+    keep = ("underlying", "session", "quote_time", "book_state", "fetched_at", "payload_timestamp",
+            "stated_delay_minutes", "underlying_last_trade_time", "underlying_price", "url", "sha256",
+            "n_bytes", "rows", "two_sided_rows", "expiries", "roots")
+    man = {"schema": MANIFEST_SCHEMA, "stem": stem, **{k: side.get(k) for k in keep},
+           "parquet_sha256": _file_sha256(pq_path), "sidecar_sha256": _file_sha256(js_path),
+           "private_repo": private_repo,
+           "private_path": f"{PRIVATE_BOOKS_SUBDIR}/{pq_path.name}",
+           "private_sidecar": f"{PRIVATE_BOOKS_SUBDIR}/{js_path.name}"}
+    d = Path(out_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / f"{stem}.json"
+    tmp = d / f".{stem}.json.tmp"
+    tmp.write_text(json.dumps(man, indent=2) + "\n")
+    os.replace(tmp, out)
+    return out, man
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────

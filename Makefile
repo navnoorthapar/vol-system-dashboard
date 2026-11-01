@@ -8,6 +8,9 @@ PYTHON     ?= python
 PYTEST      = $(PYTHON) -m pytest -p no:cacheprovider
 SITE       ?= .site-build
 OUT        ?= .reproduce
+# make reproduce STATUS=<path> also writes the result as a status JSON (the weekly
+# workflow, .github/workflows/reproduce.yml: data_store/reproduce/status.json)
+STATUS     ?=
 BENCH_JSON ?= .bench/benchmarks.json
 # Single-threaded BLAS/OpenMP and a fixed hash seed for runs whose numbers are
 # compared or published (reproduce, bench).
@@ -24,14 +27,14 @@ FAST_TESTS = joint_vol_calibration/tests/test_heston.py \
 
 .DEFAULT_GOAL := help
 .PHONY: help install install-any test test-fast test-thorough lint typecheck baselines \
-        bench bench-smoke freeze a11y recompute-audit reproduce reproduce-full mutation demo audit \
+        bench bench-smoke freeze a11y recompute-audit readme-results reproduce reproduce-full mutation demo audit \
         docker-build docker-test clean
 
 help:  ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-install:  ## exact tested environment (Linux x86_64, CPython 3.11): requirements-lock.txt
-	$(PYTHON) -m pip install -r requirements-lock.txt
+install:  ## exact tested environment (Linux x86_64, CPython 3.11): requirements-lock.txt, hash-checked
+	$(PYTHON) -m pip install --require-hashes -r requirements-lock.txt
 
 install-any:  ## any other platform (macOS arm64, Windows, Linux aarch64): resolve the ranges
 	$(PYTHON) -m pip install -r requirements-dev.txt
@@ -74,11 +77,14 @@ a11y: freeze  ## axe-core (WCAG 2.2 AA) + overflow check on the frozen site (nee
 recompute-audit: freeze  ## every number on the Overview and Surface, recomputed from data_store independently
 	$(PYTHON) scripts/ci/recompute_audit.py $(SITE)
 
+readme-results:  ## the README's figures from data_store (docs/results/readme_results.json); THROUGH=newest moves the span
+	$(PYTHON) scripts/readme_results.py --update-docs $(if $(THROUGH),--through $(THROUGH))
+
 reproduce:  ## rebuild backtest, Greeks, C7 and the v2 calibrations in a scratch copy; diff vs committed
-	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT)
+	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT) $(if $(STATUS),--status $(STATUS))
 
 reproduce-full:  ## reproduce + beta grid, C22 waterfall and the 200-path S3 null test
-	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT) --full
+	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT) --full $(if $(STATUS),--status $(STATUS))
 
 mutation:  ## curated pricer / IV-solver mutants against the property tests
 	$(PYTHON) scripts/ci/mutation_check.py
@@ -86,9 +92,9 @@ mutation:  ## curated pricer / IV-solver mutants against the property tests
 demo:  ## the dashboard on 127.0.0.1 from the committed artifacts (read-only)
 	$(PYTHON) dashboard/app.py
 
-audit:  ## known vulnerabilities in the locked set (pip-audit; report only)
-	@$(PYTHON) -c "import pip_audit" 2>/dev/null || { echo "pip-audit is not installed: pip install pip-audit==2.10.1"; exit 1; }
-	$(PYTHON) -m pip_audit -r requirements-lock.txt --no-deps --disable-pip --progress-spinner off || true
+audit:  ## known vulnerabilities in the locked set (pip-audit gate, scripts/ci/pip_audit_allowlist.json)
+	@$(PYTHON) -c "import pip_audit" 2>/dev/null || { echo "pip-audit is not installed: pip install --require-hashes -r scripts/ci/pip_audit_lock.txt"; exit 1; }
+	$(PYTHON) scripts/ci/pip_audit_gate.py
 
 docker-build:  ## the pinned image (Dockerfile)
 	docker build -t vol-system-dashboard .

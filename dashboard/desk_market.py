@@ -170,15 +170,22 @@ def yearly_means(x: pd.Series) -> list[dict]:
 
 # ── the VIX complex on the Overview (P3.5) ───────────────────────────────────
 
-def vx_curve(rows: Sequence[Mapping[str, Any]]) -> dict | None:
+def vx_curve(rows: Sequence[Mapping[str, Any]], trading_after: str | None = None) -> dict | None:
     """One session's VX monthly curve (live_monthly: front month first) and its
-    M1 → M2 slope, VX2 / VX1 − 1 (positive: contango). None without a contract."""
-    live = live_monthly(rows)
+    M1 → M2 slope, VX2 / VX1 − 1 (positive: contango). None without a contract.
+
+    ``trading_after``: the session the curve is read on, when later than the rows'
+    own (a page whose newest session is past the futures table's). A contract whose
+    final settlement is on or before it no longer trades then: it is left out of
+    the curve (listed in ``settled``), so M1 is the first contract still trading."""
+    every = live_monthly(rows)
+    live = [r for r in every if trading_after is None or r["expiry"] > trading_after]
     if not live:
         return None
     m1m2 = (live[1]["settle"] / live[0]["settle"] - 1.0) if len(live) >= 2 else None
     return {"rows": live, "n": len(live), "m1m2": m1m2,
-            "m1": live[0], "m2": live[1] if len(live) >= 2 else None}
+            "m1": live[0], "m2": live[1] if len(live) >= 2 else None,
+            "settled": [r for r in every if r not in live]}
 
 
 def ratio_view(ratio: pd.Series, threshold: float = 1.0) -> dict | None:

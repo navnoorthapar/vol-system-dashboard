@@ -139,10 +139,14 @@
 <div class="g pair">
   {% call m.panel('vx-curve', 'VX futures curve · on its own date', 's6', vc.date if vc else None) %}
     {% if vc and d.charts.vx_curve %}
-    <p class="note" id="vx-curve-age"><span class="age-{{ vc.level if vc.level in ('ok', 'warn', 'error') else 'ok' }}">Settlements of <span class="nowrap">{{ vc.date }}</span>{% if vc.age is not none %}, {{ vc.age|plural('NYSE session') }} before the market database’s <span class="nowrap">{{ vc.ref }}</span>{% endif %}</span>; the daily job does not refresh the futures table.</p>
+    <p class="note" id="vx-curve-age"><span class="age-{{ vc.level if vc.level in ('ok', 'warn', 'error') else 'ok' }}">Settlements of <span class="nowrap">{{ vc.date }}</span>{% if vc.age == 0 %}, the newest session{% elif vc.age is not none %}, {{ vc.age|plural('NYSE session') }} before the newest session, <span class="nowrap">{{ vc.ref }}</span>{% endif %}{% if vc.ref_source and vc.age is not none %} ({{ vc.ref_source }}){% endif %}</span>; the daily job stores each session’s Cboe settlements after its close.</p>
+    {% if vc.settled_text %}<p class="note" id="vx-settled">Left out: {{ vc.settled_text }}, settled by <span class="nowrap">{{ vc.cut }}</span>; M1 is the first contract still trading on it.</p>{% endif %}
     {{ m.chart(d.charts.vx_curve, 'h220 grow') }}
-    <p class="note" id="vx-m1m2"><strong>M1 → M2 {{ (vc.m1m2 * 100 if vc.m1m2 is not none else none)|signed('.2f') }}%</strong>{% if vc.m2 %} ({{ vc.m1.settle|fmt('.2f') }} → {{ vc.m2.settle|fmt('.2f') }}){% endif %}: VX2 / VX1 − 1, the second monthly contract over the first; positive is contango. Monthly contracts only (weeklies excluded), at Cboe’s daily settlement{% if vc.prev_date %}; dashed: <span class="nowrap">{{ vc.prev_date }}</span>{% endif %}. A future settles on VIX at its expiry, so this curve is not the spot term structure above and is not drawn on it.</p>
-    {% else %}<p class="note">No VX futures settlements are stored.</p>{% endif %}
+    <p class="note" id="vx-m1m2"><strong>M1 → M2 {{ (vc.m1m2 * 100 if vc.m1m2 is not none else none)|signed('.2f') }}%</strong>{% if vc.m2 %} ({{ vc.m1.settle|fmt(d.vx_fmt) }} → {{ vc.m2.settle|fmt(d.vx_fmt) }}){% endif %}: VX2 / VX1 − 1, the second monthly contract over the first; positive is contango. Monthly contracts only (weeklies excluded), at Cboe’s daily settlement as published (four decimals){% if vc.prev_date %}; dashed: <span class="nowrap">{{ vc.prev_date }}</span>{% endif %}. A future settles on VIX at its expiry, so this curve is not the spot term structure above and is not drawn on it.</p>
+    {% if vc.age != 0 %}<p class="note" id="vx-basis">VX1 − VIX is shown for a curve of the newest session; this one is of <span class="nowrap">{{ vc.date }}</span>.</p>
+    {% elif vc.basis is not none %}<p class="note" id="vx-basis"><strong>VX1 − VIX {{ vc.basis|signed('.2f') }} index pts</strong> ({{ vc.m1.settle|fmt(d.vx_fmt) }} − {{ vc.vix|fmt('.2f') }}): the front contract’s settlement (15:00 Chicago time) less VIX’s 16:15 ET close, both of <span class="nowrap">{{ vc.date }}</span>; positive: the future prices VIX above its spot level. VX1 settles on VIX’s special opening quotation of <span class="nowrap">{{ vc.m1.expiry }}</span>, {{ vc.m1.days|plural('calendar day') }} later.</p>
+    {% else %}<p class="note" id="vx-basis">VX1 − VIX: the market database has no VIX close of <span class="nowrap">{{ vc.date }}</span>.</p>{% endif %}
+    {% else %}<p class="note" id="vx-empty">{{ d.vx_empty }}</p>{% endif %}
   {% endcall %}
   {% call m.panel('vix-ratio', 'VIX / VIX3M · since ' ~ (vr.first if vr else ''), 's6', vr.last if vr else None) %}
     {% if vr and d.charts.vix_ratio %}
@@ -183,6 +187,7 @@
         <tr><th scope="row">Surface reports</th><td>{{ pl.surface_sessions|length }} sessions{% if pl.surface_sessions %}, {{ pl.surface_sessions[0] }} → {{ pl.surface_sessions[-1] }}{% endif %}</td></tr>
         <tr><th scope="row">Calibration diagnostics</th><td>{{ pl.diag_sessions|length }} sessions (σ profile, identifiability, rough Heston)</td></tr>
         <tr><th scope="row">Forward ledger</th><td>{% if pl.forward and pl.forward.state == 'ok' %}{{ pl.forward.n|plural('session') }}, {{ pl.forward.first }} → {{ pl.forward.last }}{% else %}{{ pl.forward_pending }}{% endif %}</td></tr>
+        {% if pl.deploys %}<tr id="deploy-streak"><th scope="row">Deployed (gh-pages)</th><td>{{ pl.deploys.streak|plural('consecutive NYSE session') }}, {{ pl.deploys.first }} → {{ pl.deploys.through }}</td></tr>{% endif %}
         <tr><th scope="row">Backtest window</th><td>ends {{ chrome.sources|selectattr('short', 'equalto', 'BACKTEST')|map(attribute='date')|first|fmt }}, fixed (mark-to-model)</td></tr>
       </tbody>
     </table>

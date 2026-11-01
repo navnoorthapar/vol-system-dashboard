@@ -10,7 +10,11 @@ name: Daily Market Refresh
 #          (source 'yfinance') until a later run (the book slot runs `market` again)
 #          stores Cboe's print over it. The Treasury bill/par files and NY Fed SOFR
 #          feed rates_daily, the discount curve (stale after 7 days by design).
-#          Commits the labels and the market partitions (rates_daily included).
+#          Cboe's VX futures settlements of each session since the newest stored
+#          (cloud_refresh.refresh_vx_futures; a failed or late download is a
+#          warning, never a failure of the slot; the book slot retries).
+#          Commits the labels and the market partitions (rates_daily and
+#          vix_futures_daily included).
 #
 #   book   02:30 UTC Tue-Sat   market,capture,calibrate,freeze   (+ retry 04:30 UTC)
 #          The SPX option chain needs live two-sided quotes. After 16:15 ET Cboe's book
@@ -25,7 +29,9 @@ name: Daily Market Refresh
 #          After an accepted fit the run rebuilds the session's surface report and
 #          diagnostics and the headline fit's Greeks surface and scenario grid (about 5 min).
 #          Every book run also rebuilds what an earlier run failed to build or commit
-#          (the backfill: at most 2 sessions a run).
+#          (the backfill: at most 2 sessions a run), the surface report of a session
+#          whose Cboe book passes the quote-state gates whatever its fit did, and every
+#          surface report written under an older method (surface.report.REPORT_VERSION).
 #          The retry skips what already exists (a calibration, a capture), but it is a
 #          full job: install, market step, freeze.
 #
@@ -50,6 +56,8 @@ on:
 
 permissions:
   contents: write              # commit data back to main and push gh-pages
+  issues: write                # the failure alert (scripts/ci/bot_alert.py), last step
+  actions: read                # ... which reads this workflow's earlier runs
 
 concurrency:
   group: daily-refresh
@@ -62,6 +70,9 @@ jobs:
     timeout-minutes: 45          # an accepted fit adds ~5 min of diagnostics and artifacts
     env:
       PYTHONUNBUFFERED: "1"    # keep print/log lines in step order in the job log
+    outputs:                   # for the attest-ledger job below
+      ledgers: ${{ steps.ledgers.outputs.paths }}
+      capture_sha: ${{ steps.commitcaptures.outputs.sha }}
 
     steps:
       - name: Checkout
@@ -80,8 +91,10 @@ jobs:
       # The exact set tests.yml tests. torch is the CPU wheel: the daily path needs it
       # (freezing /backtest unpickles TradeRecord, whose import chain reaches
       # models/nn_pricer.py, which imports torch at module level), but not CUDA.
+      # --require-hashes: this job can push to main and gh-pages, so it installs
+      # only the files whose SHA-256 the lock records (FUND_GRADE_PLAN 0.6).
       - name: Install dependencies (locked)
-        run: python -m pip install -r requirements-lock.txt
+        run: python -m pip install --require-hashes -r requirements-lock.txt
 
       - name: Choose steps
         id: plan
@@ -99,11 +112,87 @@ jobs:
           echo "slot=$slot" >> "$GITHUB_OUTPUT"
           echo "Slot: $slot -> steps: $steps"
 
+      # Raw Cboe books: Cboe's terms bar storing and redistributing its quotes and this
+      # repository is public (DATA_SOURCES.md). With the secrets CBOE_DATA_REPO (owner/name
+      # of a PRIVATE repository) and CBOE_DATA_TOKEN (contents read/write on it only) set,
+      # the run's raw books go there (scripts/ci/cboe_private.py) and the public commits
+      # keep a manifest of each (data_store/options/cboe_manifest/), never the quotes.
+      # The private repository is cloned into $RUNNER_TEMP, so readers of earlier books
+      # (cboe_downloader.find_books) find them through CBOE_BOOKS_DIR. configured is set
+      # before the clone: a failed clone must not route raw books to the public commits.
+      - name: Private Cboe book store
+        id: cboestore
+        continue-on-error: true
+        env:
+          CBOE_DATA_REPO: ${{ secrets.CBOE_DATA_REPO }}
+          CBOE_DATA_TOKEN: ${{ secrets.CBOE_DATA_TOKEN }}
+        run: |
+          if [ -z "$CBOE_DATA_REPO" ] || [ -z "$CBOE_DATA_TOKEN" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Raw Cboe books are committed publicly::raw Cboe option books are being committed to this public repository until the private data repository is configured (secrets CBOE_DATA_REPO and CBOE_DATA_TOKEN; see DATA_SOURCES.md)"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+          d=$(python scripts/ci/cboe_private.py checkout --dir "$RUNNER_TEMP/cboe-data" --repo "$CBOE_DATA_REPO" | tail -1)
+          echo "books_dir=$d" >> "$GITHUB_OUTPUT"
+
+      # The deploy streak the Overview prints (scripts/ci/deploy_streak.py): consecutive
+      # NYSE sessions with a deploy commit on gh-pages before this run. Commit messages
+      # only (--filter=tree:0), fetched into a scratch repository so the checkout's own
+      # remote and fetches stay as they are. The JSON is gitignored, never committed;
+      # with no file (this step failed) the site has no streak row, and nothing else.
+      - name: Deploy streak (gh-pages history)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          g="$RUNNER_TEMP/gh-pages.git"
+          rm -rf "$g" && git init -q --bare "$g"
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          for i in 1 2 3; do
+            if git -C "$g" -c http.https://github.com/.extraheader="$auth" fetch -q --no-tags \
+                 --filter=tree:0 "https://github.com/$REPO.git" gh-pages; then break; fi
+            if [ "$i" = 3 ]; then echo "::warning::could not fetch gh-pages: no deploy streak"; exit 1; fi
+            sleep $((i * 10))
+          done
+          git -C "$g" log --format=%s FETCH_HEAD | python scripts/ci/deploy_streak.py --out .deploy-streak.json
+
+      # REFRESH_SLOT: the run writes its record, data_store/runs/run_<run_utc>_<slot>.json
+      # (what ran, the calibration's outcome and the gate's reason, the chain's quote
+      # state, the captures, exit code, publishable, timings, GITHUB_SHA and
+      # GITHUB_RUN_ID), committed with the captures: the bot's history is data, not
+      # an Actions log that expires (FUND_GRADE_PLAN 0.9).
       - name: Run cloud_refresh.py
         id: refresh
         env:
           STEPS: ${{ steps.plan.outputs.steps }}
+          REFRESH_SLOT: ${{ steps.plan.outputs.slot }}
+          CBOE_BOOKS_DIR: ${{ steps.cboestore.outputs.books_dir }}
         run: python scripts/cloud_refresh.py --steps "$STEPS"
+
+      # Configured: this run's raw books go to the private repository (copied, committed
+      # and pushed with retries); only then is each checked byte-identical to its
+      # private copy, given its public manifest (data_store/options/cboe_manifest/) and
+      # removed from the public tree. If the push fails there is no manifest (a later
+      # slot captures the session again), the books stay on the runner, and every
+      # public commit and artifact below still leaves data_store/options/cboe out.
+      - name: Move this run's raw Cboe books to the private store
+        id: privatebooks
+        if: always() && steps.refresh.outcome != 'skipped' && steps.cboestore.outputs.configured == 'true'
+        env:
+          CBOE_DATA_REPO: ${{ secrets.CBOE_DATA_REPO }}
+          CBOE_DATA_TOKEN: ${{ secrets.CBOE_DATA_TOKEN }}
+          SLOT: ${{ steps.plan.outputs.slot }}
+        run: |
+          p="$RUNNER_TEMP/cboe-data"; lst="$RUNNER_TEMP/private-books.lst"
+          [ -d "$p/.git" ] || python scripts/ci/cboe_private.py checkout --dir "$p" --repo "$CBOE_DATA_REPO"
+          python scripts/ci/cboe_private.py export --dir "$p" --list "$lst"
+          if [ ! -s "$lst" ]; then echo "No new raw Cboe books."; exit 0; fi
+          python scripts/ci/cboe_private.py push --dir "$p" --message "Raw Cboe books of run ${GITHUB_RUN_ID} (${SLOT})" || {
+            echo "::error title=Raw Cboe books not stored::the private repository did not take this run's raw books; they are only on this runner (never in a public commit or artifact). A later slot inside the live book captures them again."
+            exit 1; }
+          python scripts/ci/cboe_private.py finish --dir "$p" --repo "$CBOE_DATA_REPO" --list "$lst"
 
       # Everything this run created or changed under the record's directories leaves
       # the runner first, before any gate or push can fail: on 2026-10-19, -20 and
@@ -113,12 +202,17 @@ jobs:
       - name: Bundle this run's captures
         id: bundle
         if: always() && steps.refresh.outcome != 'skipped'
+        env:
+          PRIVATE_BOOKS: ${{ steps.cboestore.outputs.configured }}
         run: |
           b="$RUNNER_TEMP/captures"
           rm -rf "$b" && mkdir -p "$b"
+          raw=()            # the artifact is public too: no raw book in it once the private store exists
+          if [ "$PRIVATE_BOOKS" = "true" ]; then raw=(':(exclude)data_store/options/cboe'); fi
           git ls-files -z --others --modified --exclude-standard -- \
             data_store/options data_store/calibrations data_store/forward data_store/market \
-            data_store/signals ':(exclude)data_store/calibrations/diagnostics' > "$RUNNER_TEMP/captures.lst"
+            data_store/signals data_store/runs ':(exclude)data_store/calibrations/diagnostics' \
+            "${raw[@]}" > "$RUNNER_TEMP/captures.lst"
           n=0
           while IFS= read -r -d '' f; do
             [ -f "$f" ] || continue
@@ -148,7 +242,12 @@ jobs:
       - name: Check the captures (integrity only)
         id: capturecheck
         if: always() && steps.refresh.outcome != 'skipped'
-        run: python scripts/ci/check_captures.py --out "$RUNNER_TEMP/captures.ok"
+        env:
+          PRIVATE_BOOKS: ${{ steps.cboestore.outputs.configured }}
+        run: |
+          flag=()
+          if [ "$PRIVATE_BOOKS" = "true" ]; then flag=(--no-raw-cboe); fi
+          python scripts/ci/check_captures.py --out "$RUNNER_TEMP/captures.ok" "${flag[@]}"
 
       - name: Commit captures
         id: commitcaptures
@@ -165,8 +264,19 @@ jobs:
           if [ "${#files[@]}" -eq 0 ]; then echo "No new captures."; exit 0; fi
           scripts/ci/commit_and_push.sh \
             "Auto-refresh session ${SESSION:-unknown} (${SLOT}): captures" \
-            "${#files[@]} new capture file(s) (Cboe books, accepted chain, fit, forward ledger); calibration ${CALIBRATION:-not-run}." \
+            "${#files[@]} new capture file(s) (Cboe books, accepted chain, fit, forward ledger, run record); calibration ${CALIBRATION:-not-run}." \
             "${files[@]}"
+
+      # The forward ledger files the capture commit took (after check_captures verified
+      # each links to the head of the chain), for the attest-ledger job below.
+      - name: New forward ledger files
+        id: ledgers
+        if: always() && steps.commitcaptures.outcome == 'success'
+        run: |
+          # comma-separated: actions/attest reads subject-path as CSV
+          paths=$(grep -E '^data_store/forward/ledger_[0-9]{4}-[0-9]{2}-[0-9]{2}\.json$' "$RUNNER_TEMP/captures.ok" | paste -sd, - || true)
+          echo "paths=$paths" >> "$GITHUB_OUTPUT"
+          echo "New ledger file(s): ${paths:-none}"
 
       # Tests against the data this run produced (the suite works on a private copy of
       # data_store and fails if anything under data_store/ changes), in three gates.
@@ -243,14 +353,18 @@ jobs:
           HEADLINE: ${{ steps.refresh.outputs.headline_calibration }}
           STEPS: ${{ steps.plan.outputs.steps }}
           RUN_UTC: ${{ steps.refresh.outputs.run_utc }}
+          PRIVATE_BOOKS: ${{ steps.cboestore.outputs.configured }}
         run: |
+          raw=()
+          if [ "$PRIVATE_BOOKS" = "true" ]; then raw=(':(exclude)data_store/options/cboe'); fi
           export REDERIVE="python scripts/cloud_refresh.py --rederive --steps '$STEPS' --now '$RUN_UTC'"
           title="Auto-refresh session ${SESSION:-unknown} (${SLOT}): labels +${LABELS_ADDED:-0}; calibration ${CALIBRATION:-not-run}"
           body="Capture files changed: ${PERSISTED:-0}. Headline calibration: ${HEADLINE:-none}."
           [ -n "$REASON" ] && [ "$REASON" != "ok" ] && body="$body Calibration reason: $REASON"
           scripts/ci/commit_and_push.sh "$title" "$body" \
             data_store/signals/regime_labels.parquet data_store/market data_store/options \
-            data_store/calibrations ':(exclude)data_store/calibrations/diagnostics' data_store/forward
+            data_store/calibrations ':(exclude)data_store/calibrations/diagnostics' data_store/forward \
+            data_store/runs "${raw[@]}"
 
       # What derives from a new fit (cloud_refresh.refresh_session_artifacts): the
       # session's surface report and diagnostics, the headline fit's Greeks surface and
@@ -320,3 +434,54 @@ jobs:
             ${{ steps.commitartifacts.outputs.sha }} (calibration ${{ steps.refresh.outputs.calibration }};
             run ${{ github.run_id }})
           cname: navnoorbawa.me          # preserve custom domain
+
+      # Two scheduled runs failed in a row: one open issue labelled bot-failure gets a
+      # comment, or is opened (scripts/ci/bot_alert.py; a manual run never alerts).
+      # Last, and continue-on-error: it comes after every commit and the deploy and
+      # can never cost either.
+      - name: Alert on repeated failure
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SLOT: ${{ steps.plan.outputs.slot }}
+        run: >
+          python scripts/ci/bot_alert.py --workflow daily_refresh.yml --run-id "$RUN_ID"
+          --event "$EVENT" --run-url "$RUN_URL" --slot "$SLOT"
+
+  # An external, independent timestamp of each new forward-ledger file (FUND_GRADE_PLAN
+  # 0.10): a Sigstore-signed build-provenance attestation, logged in the public Rekor
+  # transparency log, binding the file's SHA-256 to this workflow run and the capture
+  # commit. The ledger chain is hash-linked file to file (forward_ledger.verify_chain;
+  # check_captures.py rejects a broken link before it is committed), but the repository
+  # owner could rewrite the whole chain; a logged attestation of each head cannot be
+  # back-dated. Verify with: gh attestation verify data_store/forward/ledger_<s>.json
+  # --repo <owner>/<repo>. A job of its own so only it holds id-token: write, and
+  # continue-on-error: it can never fail the run or cost a commit or the deploy.
+  attest-ledger:
+    name: Attest new forward-ledger files
+    needs: refresh
+    if: always() && needs.refresh.outputs.ledgers != '' && needs.refresh.outputs.capture_sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write            # Sigstore signing certificate (OIDC)
+      attestations: write        # store the attestation with the repository
+    steps:
+      - name: Checkout the capture commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.refresh.outputs.capture_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: ${{ needs.refresh.outputs.ledgers }}
