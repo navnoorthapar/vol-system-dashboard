@@ -544,8 +544,8 @@ def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
             n_dep = om.vix_departures(rep)
             items.append(("surface.html#vix-replication", "VIX replicated from the stored chain",
                           [gap, shown, *([float(n_dep)] if n_dep else [])],
-                          "gap from vix_replication.json of the session Surface shows; departures are "
-                          "its listed deviations"))
+                          ("gap from vix_replication.json of the session Surface shows; departures are "
+                           "its listed deviations")))
     legacy = sum(r["legacy"] for r in f["arc"])
     cur = [r for r in f["arc"] if not r["legacy"]]
     n_ok = sum(r["ok"] for r in cur)
