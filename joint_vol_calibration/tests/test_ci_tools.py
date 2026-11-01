@@ -241,6 +241,61 @@ class TestSimulatedSession:
                                          .splitlines(), 1) if dated.search(line)]
         assert hits == []
 
+    def test_a_no_fit_run_must_skip_the_fit_and_still_build_the_surface(self, sim, tmp_path):
+        """The simulation always produced an accepted fit, so CI never saw a newest
+        surface session without one, although every Friday is one (the Saturday slot
+        finds Yahoo's book empty and skips the fit; tier 0.7 item 4 builds the surface
+        from the Cboe book anyway). Such a session failed ten presentation tests. With
+        --no-fit the book slot sees an empty Yahoo book, and the run must skip the fit,
+        keep the headline, build the session's surface with Heston marked not scored,
+        record the ledger from the Cboe book and stay publishable."""
+        s = "2026-11-02"
+        (tmp_path / "data_store" / "market" / "vix_futures_daily").mkdir(parents=True)
+        (tmp_path / "data_store" / "market" / "vix_futures_daily" / "vix_futures_daily_2026.parquet").touch()
+        surf = tmp_path / "data_store" / "surface" / s
+        surf.mkdir(parents=True)
+        why = "no joint SPX/VIX Heston fit is stored for 2026-11-02"
+        (surf / "scorecard.json").write_text(json.dumps({"models": [
+            {"model": "svi_cal", "available": True},
+            {"model": "heston_v2", "available": False, "reason": why}]}))
+        st = {"simulated": {"session": s, "headline_before": "2026-10-30", "headline_params": {}},
+              "calibration": {"status": "skipped", "reason": "no SPX option chain returned"},
+              "headline_calibration": {"date": "2026-10-30"},
+              "artifact_backfill": {"rebuilt": {s: {"surface": {"ok": True}}}},
+              "forward_ledger": {"status": "recorded"}, "capture": {"status": "captured"},
+              "market": {"vx_futures": {"last": s}}, "publishable": True}
+        assert sim.outcome_problems(st, tmp_path, no_fit=True) == []
+        # the same run is a failure of the mode that expects a new fit
+        assert sim.outcome_problems(st, tmp_path) == [
+            "the simulated fit was not accepted: skipped no SPX option chain returned"]
+        accepted = {**st, "calibration": {"status": "accepted"}}
+        assert sim.outcome_problems(accepted, tmp_path, no_fit=True)[0].startswith(
+            "the empty Yahoo book was not skipped")
+        moved = {**st, "headline_calibration": {"date": s}}
+        assert sim.outcome_problems(moved, tmp_path, no_fit=True)[0].startswith("the headline fit moved")
+        unbuilt = {**st, "artifact_backfill": {"rebuilt": {}}}
+        assert sim.outcome_problems(unbuilt, tmp_path, no_fit=True)[0].startswith(
+            f"the backfill did not build {s}'s surface")
+        (surf / "scorecard.json").write_text(json.dumps({"models": [{"model": "heston_v2",
+                                                                     "available": True}]}))
+        assert sim.outcome_problems(st, tmp_path, no_fit=True)[0].startswith(
+            f"{s}'s scorecard does not list Heston as not scored")
+        (surf / "scorecard.json").write_text(json.dumps({"models": [
+            {"model": "heston_v2", "available": False, "reason": why}]}))
+        rebuilt = {s: {"surface": {"ok": True}}, "2026-10-28": {"surface": {"ok": False, "error": "x"}}}
+        failed = {**st, "artifact_backfill": {"rebuilt": rebuilt}}
+        assert sim.outcome_problems(failed, tmp_path, no_fit=True) == ["artifact 2026-10-28 surface: x"]
+        # the Ticker the driver hands the bot lists no expiry in this mode
+        src = (ROOT / "scripts" / "ci" / "simulate_next_session.py").read_text()
+        assert "self.options = () if no_fit else" in src
+        assert '"--drive", str(status_file), *(["--no-fit"] if args.no_fit else [])' in src
+        # and CI runs it beside the run with a fit
+        import yaml
+        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text())["jobs"]
+        runs = [st.get("run", "") for j in jobs.values() for st in j.get("steps", [])]
+        assert any("simulate_next_session.py --full" in r for r in runs)
+        assert any("simulate_next_session.py --no-fit" in r for r in runs)
+
     def test_each_simulated_slot_must_leave_its_run_record(self, sim, tmp_path):
         """FUND_GRADE_PLAN 0.9: the simulation runs the close and book slots with
         REFRESH_SLOT set, so each must leave one complete record that agrees with
@@ -298,8 +353,10 @@ class TestSimulatedSession:
         assert "noisy_mid(" in src
         assert 'heston_vix_term_index(p["kappa"]' in src                # the VIX leg of the same p
         main = inspect.getsource(sim.main)
-        assert "MIN_PARAM_MOVE" in main
-        assert "param_moves(" in main
+        assert "outcome_problems(" in main                              # whose checks follow
+        checks = inspect.getsource(sim.outcome_problems)
+        assert "MIN_PARAM_MOVE" in checks
+        assert "param_moves(" in checks
 
 
 # ── merge_main_data.py ────────────────────────────────────────────────────────

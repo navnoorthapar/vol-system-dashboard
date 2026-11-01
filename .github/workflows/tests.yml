@@ -154,6 +154,54 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # The same, on a session whose Heston fit is skipped: the book slot finds Yahoo's
+  # book empty (as the Saturday slot does after every Friday), no fit is stored, and
+  # the backfill builds the session's surface from its Cboe book with no Heston row.
+  # Such a session failed ten presentation tests (2026-10-30, rebuilt on wave 1), so
+  # the site would not have deployed on any weekend; the job above always fits.
+  simulate-no-fit:
+    name: next-session simulation (the bot's gates on a session without a fit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Install dependencies (locked)
+        run: python -m pip install --require-hashes -r requirements-lock.txt
+
+      - name: Simulate a session without a fit, then the gates
+        run: python scripts/ci/simulate_next_session.py --no-fit --out "$RUNNER_TEMP/sim"
+
+      - name: Report
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/sim/report.md" ]; then
+            { echo "## Next-session simulation without a fit"; cat "$RUNNER_TEMP/sim/report.md"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the simulation's status and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: simulate-no-fit-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/sim/report.md
+            ${{ runner.temp }}/sim/status.json
+            ${{ runner.temp }}/sim/logs
+          if-no-files-found: ignore
+          retention-days: 14
+
   lint:
     name: lint and type gates (ruff, mypy)
     runs-on: ubuntu-latest
