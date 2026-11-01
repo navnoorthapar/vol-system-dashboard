@@ -139,10 +139,14 @@ def test_every_lock_pin_is_hashed_and_every_install_requires_hashes():
 def test_lock_keeps_the_security_floors():
     """C23-E2: pip-audit found advisories in idna 3.11, urllib3 2.6.3 and
     werkzeug 3.1.8; requirements.txt floors them and the lock must honour the
-    floors (a recompile that drops one fails here)."""
+    floors (a recompile that drops one fails here). The audit gate's first run
+    found PYSEC-2026-4320 in certifi 2026.2.25 (a root whose intermediates' keys
+    were compromised, in the bundle the bot's downloads trust); its fix,
+    2026.10.18, left the 14-day release cooldown on 2026-11-01 and is floored
+    the same way, so the allowlist entry that excepted it is gone."""
     from packaging.version import Version
 
-    floors = {"idna": "3.15", "urllib3": "2.8.0", "werkzeug": "3.1.9"}
+    floors = {"idna": "3.15", "urllib3": "2.8.0", "werkzeug": "3.1.9", "certifi": "2026.10.18"}
     req = (ROOT / "requirements.txt").read_text()
     pins = _lock_pins()
     for name, floor in floors.items():
