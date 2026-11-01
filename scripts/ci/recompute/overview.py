@@ -30,7 +30,7 @@ from bs4 import Tag
 
 from . import overview_math as om
 from .core import DATE, Audit, norm, numbers_in, rounds_to, text_of
-from .data import Store, chain_words, sessions_between
+from .data import Store, chain_stamp, chain_words, fit_chain_inputs, sessions_between
 
 P_BADGE, P_FIND, P_KEY = "page badge", "findings", "key results"
 P_REG, P_TS, P_PDV = "regime", "term structure", "implied vs forecast"
@@ -729,7 +729,7 @@ def check_key_results(a: Audit, store: Store, f: Facts) -> None:
     if sh and sh["cur"]["mhs"] is not None:
         surface_card(a, store, sh, card.get("surface.html#scorecard"))
     if jr:
-        joint_card(a, f, jr, card.get("calibration.html#rough-vs-heston"))
+        joint_card(a, store, f, jr, card.get("calibration.html#rough-vs-heston"))
     if f["inf"] and f["bt"]:
         backtest_card(a, f["inf"], f["bt"], card.get("research.html#inference"))
 
@@ -771,7 +771,7 @@ def surface_card(a: Audit, store: Store, sh: dict[str, Any], c: Tag | None) -> N
     a.text(P_KEY, "surface card: source", part(c, ".src"), f"data_store/surface/{sh['sess']}/scorecard.json")
 
 
-def joint_card(a: Audit, f: Facts, jr: dict[str, Any], c: Tag | None) -> None:
+def joint_card(a: Audit, store: Store, f: Facts, jr: dict[str, Any], c: Tag | None) -> None:
     """Heston's out-of-sample RMSE on the headline session, rough Heston beside it, the
     counts over diagnosed sessions and the ranges (with κ's curvature SE)."""
     cur, head = jr["cur"], f["head"]
@@ -781,8 +781,13 @@ def joint_card(a: Audit, f: Facts, jr: dict[str, Any], c: Tag | None) -> None:
     detail += [cur["session"], cur["joint_rough_oos"]]
     detail += [cur["joint_rough_H"]] if cur.get("joint_rough_H") is not None else []
     detail += [float(jr["lower"]), float(jr["n"]), float(jr["same"])]
+    own = next((r for r in reversed(f["gated"]) if r["session"] == cur["session"]), None)
+    stamp = chain_stamp(fit_chain_inputs(store, own["cal"], own["session"])) if own else None
+    detail += [f" Fit chain: {stamp}."] if stamp else []
     el = part(c, ".result-d")
     said(a, P_KEY, "joint fit card: detail", el, detail, "diagnostics/summary.json")
+    says(a, P_KEY, "joint fit card: its fit's chain (chain_diagnostics)", el, f" Fit chain: {stamp}.",
+         stamp is not None)
     says(a, P_KEY, "joint fit card", el, "(σ on its box cap)", "sigma" in (cur.get("on_bound") or []))
     says(a, P_KEY, "joint fit card", el, "on its floor", h_side(cur) == "floor")
     says(a, P_KEY, "joint fit card", el, "(= Heston)", h_side(cur) == "ceiling")
@@ -1306,6 +1311,11 @@ def check_fit(a: Audit, store: Store, f: Facts) -> None:
         a.num(P_FIT, f"{key} value", sp, v)
     check_surface_line(a, store, f, sec)
     check_constraints(a, f, sec, box)
+    stamp = chain_stamp(fit_chain_inputs(store, cal, head["session"]))
+    fc = sec.select_one("#fit-chain")
+    if present(a, P_FIT, "the fit's chain", fc, stamp is not None) and stamp and fc is not None:
+        said(a, P_FIT, "the fit's chain (its chain_diagnostics)", fc, [stamp])
+        a.text(P_FIT, "the fit's chain (its chain_diagnostics)", fc, f"Fit chain: {stamp}.")
 
 
 def check_surface_line(a: Audit, store: Store, f: Facts, sec: Tag) -> None:
@@ -1323,10 +1333,14 @@ def check_surface_line(a: Audit, store: Store, f: Facts, sec: Tag) -> None:
     if not present(a, P_FIT, "surface line", el, cm is not None) or cm is None or el is None or sess is None:
         return
     age = sessions_between(sess, f["ref_mkt"])
-    said(a, P_FIT, "1M ATMF, RR25, BF25 (SVI-cal, 30 days) and age", el,
+    sj = store.json(f"surface/{sess}/surface.json")
+    stamp = chain_stamp(sj.get("inputs") or {}, sj.get("universe") or {})
+    said(a, P_FIT, "1M ATMF, RR25, BF25 (SVI-cal, 30 days), age and the surface's chain", el,
          [f"at {CM_DAYS} days", cm["atmf"], *[x for x in (cm["rr25"], cm["bf25"]) if x is not None], sess,
-          *([float(age)] if age else [])],
+          *([float(age)] if age else []), *([stamp] if stamp else [])],
          "linear in total variance at fixed forward delta between the bracketing expiries")
+    if stamp:
+        says(a, P_FIT, "surface line: its chain (surface.json inputs)", el, f"; {stamp})", True)
     says(a, P_FIT, "surface line", el, "RR25 —", cm["rr25"] is None)
     a.text(P_FIT, "surface age wording", el,
            "the newest session" if age == 0 else f"{om.plural(age, 'session')} old", contains=True)

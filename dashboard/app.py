@@ -2016,6 +2016,14 @@ def load_page3() -> dict[str, Any]:
                     for k in ("kappa", "theta", "sigma", "rho", "v0"))
             except Exception as exc:
                 _logger.info("headline comparison unavailable: %s", exc)
+        # the chain the source fit was made on (tier 0.2): the Greeks are that fit's
+        d["fit_chain_stamp"] = None
+        src_file = DATA / "calibrations" / str(prov.get("source_calibration") or "")
+        if prov.get("source_calibration") and src_file.is_file():
+            with _loader_boundary(d, f"the Greeks' source fit ({src_file.name})"):
+                scal = _load_pickle(src_file)
+                d["fit_chain_stamp"] = chain_stamp(
+                    fit_chain_record(scal, _calibration_session(scal, src_file)))
         surface_date = _date_str(prov.get("spot_date")) or d["as_of"]
         ref = _latest_market_session()
         item = _staleness("greeks", "Greeks surface", surface_date, ref)
@@ -3542,6 +3550,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
         fit_chain = None
     d["chain_badge"] = chain_badge(fit_chain) if fit_chain else None
     d["chain_sentence"] = chain_sentence(fit_chain) if fit_chain else None
+    d["fit_chain_stamp"] = chain_stamp(fit_chain) if fit_chain else None
+    d["fit_chain_foot"] = chain_foot(fit_chain, "Fit chain") if fit_chain else None
     own_chain = next((s for s in desk_inputs if s["session"] == session), None)
     d["smile_book"] = None
     if own_chain and not same_chain(fit_chain, own_chain["surface"]):
@@ -3748,6 +3758,9 @@ def calibration_extras(d: dict, cal: dict) -> None:
         d["smiles"].append({
             "expiry": exp, "T_days": T_days, "n": a.get("n"), "source": source, "note": note,
             "badge": badge, "note_short": note_short, "k_range": k_rng, "y_range": y_rng,
+            # its source line: the book its quotes come from, else the chain the fit was made on
+            "src": (chain_foot(surf.get("surface"), "Quotes") if source == "quotes"
+                    else d.get("fit_chain_foot")),
             "spec": charts.xy(
                 f"chart-smile-{exp}", f"Smile {exp} ({_fmt(T_days, '.0f')} days)",
                 x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True, "label": "k"},
@@ -4973,6 +4986,9 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
         side = {"floor": " on its floor", "ceiling": " (= Heston)"}.get(jr["rough_H_side"] or "", "")
         h_txt = f"H {_fmt(jr['rough_H'], '.2f')}{side}" if jr["rough_H"] is not None else "H —"
         n_txt = f"the {_fmt(p2.get('n_oos'), ',')}" if p2.get("session") == jr["session"] else "the"
+        # the chain that session's fit was made on (tier 0.2)
+        stamp = (p2.get("fit_chain_stamp") if p2.get("session") == jr["session"]
+                 else chain_stamp(fit_chain_of(jr["session"])))
         out.append({
             "key": "Joint SPX/VIX fit · out of sample",
             "value": _fmt(jr["heston_oos"], ".2f"), "unit": "vol pts, Heston",
@@ -4980,7 +4996,8 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
                        f"indices in the objective{bound}. Rough Heston on the same quotes: "
                        f"{_fmt(jr['rough_oos'], '.2f')} "
                        f"({h_txt}); lower on {jr['n_lower']} of {jr['n_sessions']} sessions, and on "
-                       f"{jr['n_same']} it returns H = ½, i.e. Heston."),
+                       f"{jr['n_same']} it returns H = ½, i.e. Heston."
+                       + (f" Fit chain: {stamp}." if stamp else "")),
             "ci": (f"Range over {jr['n_sessions']} sessions: Heston {jr['heston_range']}, rough Heston "
                    f"{jr['rough_range']} vol pts"
                    + (f"; κ ±{_fmt(jr['kappa_rse'] * 100, '.0f')}% (Gauss–Newton curvature scale)"
@@ -4991,7 +5008,9 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
         out.append({"key": "Joint SPX/VIX fit · out of sample",
                     "value": _fmt(p2["spx_oos_rmse"], ".2f"), "unit": "vol pts, Heston",
                     "detail": (f"SPX IV RMSE on the {_fmt(p2.get('n_oos'), ',')} quotes outside the fit "
-                               f"({p2.get('session')}), with the four VIX indices in the objective."),
+                               f"({p2.get('session')}), with the four VIX indices in the objective."
+                               + (f" Fit chain: {p2['fit_chain_stamp']}." if p2.get("fit_chain_stamp")
+                                  else "")),
                     "ci": None, "ci_note": ("rough Heston and the range over sessions need the calibration "
                                             "diagnostics (diagnostics/summary.json), not yet generated"),
                     "href": "calibration.html#oos",
@@ -5408,6 +5427,7 @@ def load_overview() -> dict[str, Any]:
                                        "calib_age", "model_version", "oos_rows", "n_oos", "vvix")}
     d["fit"]["tiles"] = p2.get("param_tiles") or []
     d["fit"]["ridge"] = p2.get("ridge")
+    d["fit"]["chain"] = p2.get("fit_chain_stamp")
     p4 = None
     with _loader_boundary(d, "backtest engine results (full_results.pkl)"):
         st = _load_pickle(DATA / "backtest" / "full_results.pkl")
@@ -5501,6 +5521,8 @@ def load_overview() -> dict[str, Any]:
             cm = desk_surface.constant_maturity(
                 desk_surface.delta_grid(surf["surface"], surf["residuals"], surf.get("vix")))
             d["surface_line"] = surface_state_line(cm, surf["session"], _latest_market_session())
+            if d["surface_line"]:
+                d["surface_line"]["chain"] = chain_stamp(surf["surface"])
     return d
 
 
@@ -6171,6 +6193,37 @@ def chain_source(surface_json: dict) -> list[str] | None:
     return [pv["name"], *pv["badge"]] if pv else None
 
 
+# Tier 0.2: every number read off a session's quote chain carries that chain's
+# source and quote time where it is shown (in its panel, row or sentence), not
+# only in the page's badge: a panel linked to on its own, a Model Risk row or an
+# Overview line was read without it. test_dashboard.py enumerates them.
+def chain_stamp(surface_json: dict | None) -> str | None:
+    """'Cboe, quotes at 2026-10-30 23:49 UTC', 'Yahoo Finance download, fetched
+    2026-10-30 08:51 UTC': the chain's name and quote-time clause, for a sentence."""
+    pv = chain_provenance(surface_json or {})
+    return f"{pv['name']}, {pv['badge'][0]}" if pv else None
+
+
+def chain_foot(surface_json: dict | None, label: str = "Chain") -> list[str] | None:
+    """['Chain: Cboe', 'quotes at 2026-10-30 23:49 UTC']: a panel's source line, the
+    chain badge's parts without its counts (the panel macro's ``src``)."""
+    src = chain_source(surface_json or {})
+    return [f"{label}: {src[0]}", *src[1:]] if src else None
+
+
+def chain_short(surface_json: dict | None) -> str | None:
+    """'Cboe', 'Yahoo download', 'Yahoo close': a table cell naming a session's chain."""
+    pv = chain_provenance(surface_json or {})
+    return pv["short"] if pv else None
+
+
+def fit_chain_of(session: str | None) -> dict | None:
+    """fit_chain_record of the stored gate-passing fit of ``session``, None without one."""
+    row = next((r for r in scan_calibrations() if r["session"] == session and r["legacy"] is False
+                and r["ok"]), None) if session else None
+    return fit_chain_record(_load_pickle(row["path"]), session) if row else None
+
+
 # the chain a fit was made on, as the scorecard records its vendor (fit_chain_source)
 FIT_CHAINS = {"yahoo": "Yahoo download", "cboe": "Cboe book"}
 
@@ -6375,7 +6428,8 @@ def surface_comparison(head: str, inputs: Sequence[dict]) -> dict | None:
     earlier = compared_sessions(head, stored)
     if head not in grids or not earlier:
         return None
-    views = [{"session": old, "gap": session_age(old, head),
+    by = {s["session"]: s["surface"] for s in inputs}
+    views = [{"session": old, "gap": session_age(old, head), "chain": chain_stamp(by.get(old)),
               "rows": desk_surface.cm_delta(grids[head]["cm"], grids[old]["cm"])} for old in earlier]
     return {"head": head, "default": earlier[0], "views": views, "grids": grids,
             "n_earlier": len(stored), "lags": list(COMPARE_LAGS)}
@@ -6551,6 +6605,10 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["chain_badge"] = chain_badge(sj, [n for s in desk_inputs if s["session"] != session
                                             for n in [session_expiries(s["surface"])] if n is not None])
         d["expiries_by_session"] = {s["session"]: session_expiries(s["surface"]) for s in desk_inputs}
+        d["chain_by_session"] = {s["session"]: chain_short(s["surface"]) for s in desk_inputs}
+        # every panel below is read off this session's chain; the comparison names each session's
+        d["chain_foot"] = chain_foot(sj)
+        d["chain_foot_head"] = chain_foot(sj, f"Chain of {session}")
         cmp_ = surface_comparison(session, desk_inputs)
         every_cm = [g["cm"] for g in (cmp_ or {}).get("grids", {}).values()]
         d["state_tiles"] = surface_state_tiles(cm, listed, every_cm, surf.get("vix"))
@@ -7555,6 +7613,8 @@ def load_model_risk() -> dict[str, Any]:
     def fit_hist(k):
         return [(s_, v[k]) for s_, v in gated]
     fit_art = f"data_store/calibrations/{p2.get('calib_file') or 'joint_cal_<session>.pkl'}"
+    # a number of the fit says which chain it was fitted on (tier 0.2)
+    fit_on = f" Fit chain: {p2['fit_chain_stamp']}." if p2.get("fit_chain_stamp") else ""
     add(INV_CALIBRATOR, "Headline fit age (NYSE sessions)", _num(p2.get("calib_age")),
         _fmt(p2.get("calib_age")),
         "calib_age", fit_art, "Newest gate-passing fit against the newest session with data.", digits=".0f")
@@ -7563,23 +7623,24 @@ def load_model_risk() -> dict[str, Any]:
         pab if pab is not None else float(len(p2.get("pinned_params") or [])),
         ", ".join(p2.get("active_constraints") or []) or "none", "params_at_bound", fit_art,
         "A parameter on its bound is set by the box, not the market." + box_refit_note(
-            p2.get("vvix_tradeoff") or [], p2.get("session")), history=fit_hist("params_at_bound"),
+            p2.get("vvix_tradeoff") or [], p2.get("session")) + fit_on, history=fit_hist("params_at_bound"),
         digits=".0f")
     add(INV_CALIBRATOR, "Out-of-sample SPX IV RMSE (vol pts)", head.get("oos_rmse"),
         _fmt(head.get("oos_rmse"), ".2f"),
-        "oos_rmse", fit_art, f"{_fmt(p2.get('n_oos'), ',')} quotes not used in the fit.",
+        "oos_rmse", fit_art, f"{_fmt(p2.get('n_oos'), ',')} quotes not used in the fit." + fit_on,
         history=fit_hist("oos_rmse"))
     add(INV_CALIBRATOR, "Worst short-dated expiry OOS RMSE (≤ 30 days)", head.get("short_oos_rmse"),
         (f"{_fmt(head['short_oos_rmse'], '.2f')} ({head['short_expiry']})"
          if head.get("short_oos_rmse") is not None else "—"), "short_oos_rmse", fit_art,
-        "One-factor Heston misses the short end; see the calibration page.",
+        "One-factor Heston misses the short end; see the calibration page." + fit_on,
         history=fit_hist("short_oos_rmse"))
     add(INV_CALIBRATOR, "VIX index RMSE (index pts)", head.get("vix_rmse"),
         _fmt(head.get("vix_rmse"), ".2f"),
-        "vix_rmse", fit_art, "^VIX9D, ^VIX, ^VIX3M, ^VIX6M against the model.", history=fit_hist("vix_rmse"))
+        "vix_rmse", fit_art, "^VIX9D, ^VIX, ^VIX3M, ^VIX6M against the model." + fit_on,
+        history=fit_hist("vix_rmse"))
     add(INV_CALIBRATOR, "Feller condition (diagnostic, not imposed)", None,
         f"{p2.get('feller_state') or '—'}, margin {_fmt(p2.get('feller_margin'), '+.2f')}", "", fit_art,
-        "Not a no-arbitrage condition; reported, not limited.", status="info", key="feller")
+        "Not a no-arbitrage condition; reported, not limited." + fit_on, status="info", key="feller")
     # M19: the rate reference of the headline fit: the Treasury zero curve, or ^IRX if the curve was refused
     rk = p2.get("r_ref_kind")
     rk_text = {"treasury_curve": "Treasury zero curve", "irx": "^IRX"}.get(str(rk), str(rk))
@@ -7696,11 +7757,13 @@ def load_model_risk() -> dict[str, Any]:
              + (f"; {fit_book_clause(fit_chain)}" if fit_chain else "") + "."),
             history=surf_hist("median_abs_hs"), digits=".1f")
         vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
+        book = chain_stamp(surf.get("surface"))
+        on_book = f" Chain: {book}." if book else ""
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",
             today["vix_rep_gap"], signed(today["rep_gap"], ".2f") if today["rep_gap"] is not None else "—",
             "vix_rep_gap", sart + "vix_replication.json",
             f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}; "
-            "a gap points at a thin or stale strip.",
+            "a gap points at a thin or stale strip." + on_book,
             history=surf_hist("rep_gap"), two_sided=True)
         cert = (((surf.get("surface") or {}).get("surfaces") or {}).get("svi_cal") or {}).get(
             "arbitrage_free_certified")
@@ -7722,7 +7785,7 @@ def load_model_risk() -> dict[str, Any]:
             + (f" Single-quote outliers: {n_bad} of its {len(lv)} largest mid violations (bad quote "
                + legs[0] + (f" and {len(legs) - 1} more leg{'s' if len(legs) > 2 else ''}"
                             if len(legs) > 1 else "")
-               + "), counted in the share." if n_bad else ""),
+               + "), counted in the share." if n_bad else "") + on_book,
             history=surf_hist("arb_exec_share"), digits=".1f")
     else:
         for mid_, chk, key_ in ((INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)",

@@ -148,6 +148,41 @@ def chain_words(inputs: dict, universe: dict | None = None) -> tuple[str, str, l
     return name, clause, [clause]
 
 
+# chain_words' names in the short form a table cell uses ('Cboe' stays 'Cboe')
+SHORT_NAMES = {"Yahoo Finance download": "Yahoo download", "Yahoo Finance close snapshot": "Yahoo close"}
+
+
+def chain_stamp(inputs: dict, universe: dict | None = None) -> str | None:
+    """'Cboe, quotes at 2026-10-30 23:49 UTC': the chain's name and its quote-time
+    clause (the first badge part), as a page sentence or row names the chain (tier 0.2)."""
+    w = chain_words(inputs, universe)
+    return f"{w[0]}, {w[2][0]}" if w else None
+
+
+def chain_short(inputs: dict, universe: dict | None = None) -> str | None:
+    """'Cboe', 'Yahoo download' or 'Yahoo close': the Surface history's Chain cell."""
+    w = chain_words(inputs, universe)
+    return SHORT_NAMES.get(w[0], w[0]) if w else None
+
+
+def fit_chain_inputs(store: Store, cal: dict, session: str) -> dict:
+    """The chain a joint fit was made on, as chain_words reads a surface's inputs: the
+    fit's own chain_diagnostics (vendor, quote or fetch time, where T runs from), its
+    vendor else the one source of the stored chain it was fitted on
+    (options/spx_<spx_snapshot_session or session>.parquet)."""
+    raw = cal.get("chain_diagnostics")
+    diag: dict = raw if isinstance(raw, dict) else {}
+    src = diag.get("source")
+    if not src:
+        snap = str(cal.get("spx_snapshot_session") or session)[:10]
+        path = store.root / "options" / f"spx_{snap}.parquet"
+        if path.exists():
+            col = pd.read_parquet(path, columns=["source"])["source"].dropna().astype(str).unique()
+            src = col[0] if len(col) == 1 else None
+    return {"source": src, "quote_time": diag.get("quote_time"), "fetched_at": diag.get("fetched_at"),
+            "t_origin_basis": diag.get("t_origin_basis")}
+
+
 def _record(root: Path, table: str) -> pd.DataFrame:
     files = sorted((root / "market" / table).glob(f"{table}_*.parquet"))
     if not files:

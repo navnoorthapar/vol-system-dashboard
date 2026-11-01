@@ -320,8 +320,11 @@ def validate_surface_json(obj: dict, session: str) -> None:
 
 def surface_fit_inputs(data_dir: Path, session: str) -> dict:
     """What a session's surface was fitted on (surface/<session>/surface.json):
-    ``rule`` (fit_set.rule, which quotes were held out), ``source`` and
-    ``quote_time`` (inputs). Empty when the file does not exist."""
+    ``rule`` (fit_set.rule, which quotes were held out), ``source``,
+    ``quote_time``, ``fetched_at`` and ``t_origin_basis`` (inputs). Empty when the
+    file does not exist. Without ``fetched_at`` a Yahoo download recorded since
+    2026-10-27 (its fetch instant in fetched_at, no quote time) read as a close
+    snapshot with no quote time."""
     path = Path(data_dir) / "surface" / session / "surface.json"
     if not path.exists():
         return {}
@@ -331,7 +334,8 @@ def surface_fit_inputs(data_dir: Path, session: str) -> dict:
     fit_set: dict = obj["fit_set"] if isinstance(obj.get("fit_set"), dict) else {}
     inputs: dict = obj["inputs"] if isinstance(obj.get("inputs"), dict) else {}
     return {"rule": fit_set.get("rule"), "source": inputs.get("source"),
-            "quote_time": inputs.get("quote_time"), "t_origin_basis": inputs.get("t_origin_basis")}
+            "quote_time": inputs.get("quote_time"), "fetched_at": inputs.get("fetched_at"),
+            "t_origin_basis": inputs.get("t_origin_basis")}
 
 
 def validate_vix_replication(obj: dict, session: str) -> None:
