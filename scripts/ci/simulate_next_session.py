@@ -472,6 +472,21 @@ def slot_capture_problems(close_st: dict, st: dict, book_state: str | None,
     return problems
 
 
+def book_problems(tree: Path, status_file: Path) -> list[str]:
+    """slot_capture_problems on what the simulated slots wrote: the book slot's
+    status (``status_file``, with the session and the book state the feed showed
+    at its instant, which drive records), the close slot's beside it
+    (status_close.json) and the chain the session's surface.json in ``tree``
+    records."""
+    st = json.loads(status_file.read_text()) if status_file.exists() else {}
+    sim = st.get("simulated") or {}
+    close_file = status_file.with_name("status_close.json")
+    close_st = json.loads(close_file.read_text()) if close_file.exists() else {}
+    sj = tree / "data_store" / "surface" / str(sim.get("session")) / "surface.json"
+    chain = (json.loads(sj.read_text()).get("inputs") or {}).get("chain") if sj.exists() else None
+    return slot_capture_problems(close_st, st, sim.get("book_slot_state"), chain)
+
+
 def _pytest(cwd: Path, files: list, log: Path) -> tuple:
     t0 = time.perf_counter()
     with open(log, "w") as fh:
@@ -525,9 +540,7 @@ def main(argv=None) -> int:
         problems.append(f"forward ledger: {st.get('forward_ledger')}")
     close_file = status_file.with_name("status_close.json")
     close_st = json.loads(close_file.read_text()) if close_file.exists() else {}
-    sj = tree / "data_store" / "surface" / str(sim.get("session")) / "surface.json"
-    chain = (json.loads(sj.read_text()).get("inputs") or {}).get("chain") if sj.exists() else None
-    problems += slot_capture_problems(close_st, st, sim.get("book_slot_state"), chain)
+    problems += book_problems(tree, status_file)
     vx = (st.get("market") or {}).get("vx_futures") or {}
     if vx.get("last") != sim.get("session") or not any(
             (tree / "data_store" / "market" / "vix_futures_daily").glob("vix_futures_daily_*.parquet")):

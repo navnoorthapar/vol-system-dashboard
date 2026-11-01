@@ -123,28 +123,37 @@ def test_surface_fit_mask_alternates_strikes_and_drops_flagged(sq):
 
 
 @pytest.mark.parametrize(("book_state", "chain", "noted"), [
-    ("closing", {"quote_time": "2026-10-30T08:51:33Z"}, True),    # a pre-QUANT-01 fit: its download clock
-    ("closing", {"fetched_at": "2026-10-30T08:51:33Z"}, True),    # Fri 04:51 ET: the overnight book
-    ("closing", {"fetched_at": "2026-10-29T22:00:00Z"}, False),   # Thu 18:00 ET: still the closing book
-    ("gth", {"fetched_at": "2026-10-30T08:51:33Z"}, False),       # scored on the overnight book itself
+    ("closing", {"quote_time": "2026-10-19T08:51:33Z"}, True),    # a pre-QUANT-01 fit: its download clock
+    ("closing", {"fetched_at": "2026-10-19T08:51:33Z"}, True),    # Mon 04:51 ET: the overnight book
+    ("closing", {"fetched_at": "2026-10-17T02:00:00Z"}, False),   # Fri 22:00 ET: still the closing book
+    ("gth", {"fetched_at": "2026-10-19T08:51:33Z"}, False),       # scored on the overnight book itself
     ("closing", {}, False),                                       # no download time recorded
 ])
-def test_a_fit_made_overnight_and_scored_on_the_closing_book_says_so(book_state, chain, noted):
+def test_a_fit_made_overnight_and_scored_on_the_closing_book_says_so(
+        sq, tmp_path, book_state, chain, noted):
     """FUND_GRADE_PLAN 0.8: a session's surface is now built from its closing book
     when one is stored, while the bot still fits Heston to the Yahoo chain it
     downloads overnight. The Heston row then says the fit's chain was downloaded
     after the closing book had given way to the overnight one, so part of its error
-    on these quotes is the market's move between the two."""
-    from types import SimpleNamespace
+    on these quotes is the market's move between the two. Driven through the
+    Heston row (heston_v2_factory) on SESSION, a Friday, scored as a Cboe book in
+    ``book_state``, with its committed fit's chain record given ``chain``'s clock."""
+    import dataclasses
+    import pickle
 
-    ctx = SimpleNamespace(sq=SimpleNamespace(session="2026-10-29", inputs={"book_state": book_state},
-                                             diagnostics={"source": "cboe"}))
-    note = sc._fit_time_note(chain, ctx)
-    assert bool(note) is noted
-    if noted:
-        assert note.startswith("; that chain was downloaded at 2026-10-30 08:51 UTC, after the closing "
-                               "book scored here had given way to the overnight one")
-    # the Heston row's note on a fit made on another book carries it
-    row = sc._fit_book_note({"chain_diagnostics": {"source": "yfinance", **chain}}, ctx)
-    assert row.startswith(". The fit was made on the session's Yahoo chain")
-    assert row.endswith(note)
+    cal = sc.load_v2_calibration(SESSION)
+    diag = {k: v for k, v in (cal.get("chain_diagnostics") or {}).items()
+            if k not in ("fetched_at", "quote_time")}
+    with open(tmp_path / f"joint_cal_{SESSION}.pkl", "wb") as fh:
+        pickle.dump({**cal, "chain_diagnostics": {**diag, "source": "yfinance", **chain}}, fh)
+    here = dataclasses.replace(sq, inputs={**sq.inputs, "book_state": book_state},
+                               diagnostics={**sq.diagnostics, "source": "cboe"})
+    flag = np.zeros(len(here.quotes), dtype=bool)
+    ctx = sc.ScoreContext(here, flag, sc.surface_fit_mask(here.quotes, flag), calibrations_dir=tmp_path)
+    row = sc.heston_v2_factory(ctx).description
+    assert ". The fit was made on the session's Yahoo chain" in row
+    said = ("; that chain was downloaded at 2026-10-19 08:51 UTC, after the closing book scored here "
+            "had given way to the overnight one, so part of its error here is the market's move "
+            "between the two")
+    assert row.endswith(said) is noted
+    assert ("had given way" in row) is noted

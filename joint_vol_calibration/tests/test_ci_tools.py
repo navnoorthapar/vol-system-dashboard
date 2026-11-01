@@ -266,53 +266,61 @@ class TestSimulatedSession:
         assert "run_record_problems(" in main
         assert "check_captures.py" in main
 
-    def test_the_close_slot_runs_the_workflows_steps_and_must_store_the_closing_book(self, sim):
+    def test_the_close_slot_runs_the_workflows_steps_and_must_store_the_closing_book(self, sim, tmp_path):
         """FUND_GRADE_PLAN 0.8: the simulation ran the close slot as 'market,labels'
         written into the driver, so a close-slot step the workflow added was never run
         before merge. It now reads the close slot's steps from the workflow (with the
-        closebook step), replays each slot's book at that slot's instant, and fails
-        unless the close slot stored the closing books, the book slot captured the
-        overnight ones (after a Friday, when the feed still shows the closing book,
-        found the close slot's stored instead), the forward ledger traded on the book
-        slot's book and the session's surface was built from the closing book."""
-        import inspect
+        closebook step) and fails unless the close slot stored the closing books, the
+        book slot captured the overnight ones (after a Friday, when the feed still
+        shows the closing book, found the close slot's stored instead), the forward
+        ledger traded on the book slot's book and the session's surface was built from
+        the closing book. Checked here on the status files and surface.json the
+        simulated slots write (book_problems, which main applies); the driver that
+        writes them runs only in the simulation itself (CI's simulate job)."""
         steps = sim.slot_steps(ROOT / ".github" / "workflows" / "daily_refresh.yml", "close")
         assert "closebook" in steps.split(",")
-        src = inspect.getsource(sim.drive)
-        assert 'clock["now"] = close' in src
-        assert 'replayed_capture(cboe, und, frame, meta, session, clock["now"])' in src
-        assert '"book_slot_state": cboe.feed_book_state(now, session)' in src
-        assert "slot_capture_problems(" in inspect.getsource(sim.main)
 
-        d = "/x/data_store/options/cboe"
+        s, d = "2026-10-29", "/x/data_store/options/cboe"
+        status = tmp_path / "status.json"
 
-        def slot(status, state, stamp, ledger=None):
-            caps = {u: {"status": status, "file": f"{d}/{u.lower()}_2026-10-29_{stamp}.parquet",
-                        **({"book_state": state} if status == "captured" else {})} for u in ("SPX", "VIX")}
-            return {"capture": {"status": status, "captures": caps},
+        def slot(status_, state, stamp, ledger=None):
+            caps = {u: {"status": status_, "file": f"{d}/{u.lower()}_{s}_{stamp}.parquet",
+                        **({"book_state": state} if status_ == "captured" else {})} for u in ("SPX", "VIX")}
+            return {"capture": {"status": status_, "captures": caps},
                     **({"forward_ledger": {"book_file": f"options/cboe/{ledger}"}} if ledger else {})}
 
+        def problems(close, book, feed_state, chain):
+            """book_problems on the files the simulated run would leave."""
+            status.write_text(json.dumps({**book, "simulated": {"session": s, "book_slot_state": feed_state}}))
+            close_file = status.with_name("status_close.json")
+            close_file.unlink(missing_ok=True)
+            if close is not None:
+                close_file.write_text(json.dumps(close))
+            sj = tmp_path / "tree" / "data_store" / "surface" / s / "surface.json"
+            sj.parent.mkdir(parents=True, exist_ok=True)
+            sj.write_text(json.dumps({"inputs": {"chain": chain}}))
+            return sim.book_problems(tmp_path / "tree", status)
+
         close = slot("captured", "closing", "220700Z")
-        surface = "data_store/options/cboe/spx_2026-10-29_220700Z.parquet"
+        surface = f"data_store/options/cboe/spx_{s}_220700Z.parquet"
         # a Monday-Thursday session: the book slot captures the overnight books
-        gth = slot("captured", "gth", "023000Z", ledger="spx_2026-10-29_023000Z.parquet")
-        assert sim.slot_capture_problems(close, gth, "gth", surface) == []
+        gth = slot("captured", "gth", "023000Z", ledger=f"spx_{s}_023000Z.parquet")
+        assert problems(close, gth, "gth", surface) == []
         # after a Friday the feed still shows the closing book: found stored, not fetched again
-        fri = slot("exists", None, "220700Z", ledger="spx_2026-10-29_220700Z.parquet")
-        assert sim.slot_capture_problems(close, fri, "closing", surface) == []
-        assert "want the gth books captured" in sim.slot_capture_problems(close, fri, "gth", surface)[0]
-        assert "want the close slot's books found stored" in sim.slot_capture_problems(
-            close, gth, "closing", surface)[0]
-        # the close slot stored nothing, the ledger or the surface on the wrong book
-        assert "close slot capture" in sim.slot_capture_problems({}, gth, "gth", surface)[0]
+        fri = slot("exists", None, "220700Z", ledger=f"spx_{s}_220700Z.parquet")
+        assert problems(close, fri, "closing", surface) == []
+        assert "want the gth books captured" in problems(close, fri, "gth", surface)[0]
+        assert "want the close slot's books found stored" in problems(close, gth, "closing", surface)[0]
+        # the close slot stored nothing (no status file), the ledger or the surface on the wrong book
+        assert "close slot capture" in problems(None, gth, "gth", surface)[0]
         other = slot("captured", "gth", "023000Z", ledger="spx_x.parquet")
-        assert sim.slot_capture_problems(close, other, "gth", surface) == [
+        assert problems(close, other, "gth", surface) == [
             ("the forward ledger traded on options/cboe/spx_x.parquet, not the book slot's "
-             "spx_2026-10-29_023000Z.parquet")]
-        yahoo = "data_store/options/spx_2026-10-29.parquet"
-        assert sim.slot_capture_problems(close, gth, "gth", yahoo) == [
+             f"spx_{s}_023000Z.parquet")]
+        yahoo = f"data_store/options/spx_{s}.parquet"
+        assert problems(close, gth, "gth", yahoo) == [
             (f"the session's surface was built from {yahoo}, not its closing book "
-             "spx_2026-10-29_220700Z.parquet")]
+             f"spx_{s}_220700Z.parquet")]
 
     def test_a_replayed_book_has_the_state_its_quote_time_gives(self, sim):
         """The simulated 2026-10-30 session (a Friday) failed the data gate: the replay
