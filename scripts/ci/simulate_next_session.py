@@ -57,10 +57,21 @@ Friday session built that way failed ten presentation tests (pages and tests
 that assumed a Heston row, and pages that cited different sessions), so the
 site would not have deployed on any weekend.
 
-    python scripts/ci/simulate_next_session.py [--out DIR] [--full] [--keep] [--no-fit]
+With --force-fail the run is made to fail (FUND_GRADE_PLAN 0.4): the close
+slot runs with Yahoo's SPX download raising, as in an outage, so the market
+step fails hard and the slot exits 1 with a complete run record saying so.
+The workflow's last step (`if: failure()`) then runs scripts/ci/bot_alert.py;
+here that script, taken from the copy, is run on a fake run history (its gh
+runner injected, nothing sent): with the scheduled run before this one also
+failed it must open the one bot-failure issue (label, then issue), and with
+that run a success it must do nothing. No fit, no gates: about a minute, so
+test_ci_tools.py runs this mode in full.
+
+    python scripts/ci/simulate_next_session.py [--out DIR] [--full] [--keep] [--no-fit | --force-fail]
 
 Exit 1 when the simulated run does not accept (with --no-fit: skip) the fit and
-record the session, or when any gate fails. Nothing outside --out is written.
+record the session, or when any gate fails; with --force-fail, when the run does
+not fail or the alert would not open the issue. Nothing outside --out is written.
 About 10 minutes (+9 with --full) on 4 CPUs; the diagnostics take about 4.
 """
 from __future__ import annotations
@@ -206,7 +217,11 @@ def _patch(module, **functions) -> None:
 
 # ── the driver: runs INSIDE the copy (python <copy>/scripts/ci/simulate_next_session.py --drive) ──
 
-def drive(status_file: Path, no_fit: bool = False) -> int:
+# --force-fail: what the outage raises (the run must fail on it, and say so)
+OUTAGE = "simulated outage (--force-fail): Yahoo Finance unreachable"
+
+
+def drive(status_file: Path, no_fit: bool = False, force_fail: bool = False) -> int:
     root = ROOT
     sys.path.insert(0, str(root))
     import importlib.util
@@ -294,6 +309,10 @@ def drive(status_file: Path, no_fit: bool = False) -> int:
     _patch(dl, download_spx_ohlcv=spx_dl, download_tbill_rate=tbill_dl,
            download_vix_term_structure=lambda start, end: ts_frame(start, end, "yfinance"),
            download_vix_index=lambda start, end: vd_frame(start, end, "yfinance"))
+    if force_fail:
+        def outage(*args, **kwargs):
+            raise OSError(OUTAGE)
+        _patch(dl, download_spx_ohlcv=outage)
     _patch(cboe, download_vix_term_structure_history=(
         lambda start=None, end=None, tickers=None: ts_frame(start or "2000-01-01", end or session, "cboe")),
         download_vix_history=lambda: vd_frame("2000-01-01", session, "cboe"))
@@ -382,6 +401,13 @@ def drive(status_file: Path, no_fit: bool = False) -> int:
     code_close = cr.main(["--steps", "market,labels", "--status-file", str(status_file.with_name(
         "status_close.json"))], now_utc=close)
     print(f"close slot exit {code_close}", flush=True)
+    if force_fail:
+        # the failed close slot is the run: its status is the one the outer run reads
+        st = json.loads(status_file.with_name("status_close.json").read_text())
+        st["simulated"] = {"session": session, "after": last, "now_utc": close.isoformat(),
+                           "force_fail": True, "seconds": round(time.perf_counter() - t0, 1)}
+        status_file.write_text(json.dumps(st, indent=2, default=str))
+        return code_close
     os.environ["REFRESH_SLOT"] = "book"
     code = cr.main(["--steps", "market,capture,calibrate,freeze", "--status-file", str(status_file)],
                    now_utc=now, ticker_factory=Ticker)
@@ -477,6 +503,91 @@ def outcome_problems(st: dict, tree: Path, no_fit: bool = False) -> list[str]:
     return problems
 
 
+# the fake history's run ids: this run, and the scheduled run before it
+ALERT_RUN_ID, ALERT_PREV_ID = 9000002, 9000001
+
+
+def alert_check(bot_alert: Path, st: dict, earlier_conclusion: str,
+                slot: str = "close") -> tuple[dict, list[list[str]]]:
+    """What scripts/ci/bot_alert.py (the file ``bot_alert``) does at the end of the
+    failed run ``st`` (the workflow's `if: failure()` step, a scheduled run of the
+    ``slot``), on a fake history: this run (still in progress, as it is when its last
+    step runs), the scheduled run before it, which ended ``earlier_conclusion``, and a
+    success before that. Its gh runner is replaced by one that answers from that
+    history, finds no open issue, and records every call: nothing is sent.
+    Returns (alert()'s result, the gh calls)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("bot_alert_sim", bot_alert)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"cannot load {bot_alert}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    url = "https://github.invalid/actions/runs/"
+    history = [
+        {"databaseId": ALERT_RUN_ID, "event": "schedule", "status": "in_progress", "conclusion": "",
+         "createdAt": st.get("run_utc"), "url": f"{url}{ALERT_RUN_ID}"},
+        {"databaseId": ALERT_PREV_ID, "event": "schedule", "status": "completed",
+         "conclusion": earlier_conclusion, "createdAt": "the slot before", "url": f"{url}{ALERT_PREV_ID}"},
+        {"databaseId": ALERT_PREV_ID - 1, "event": "schedule", "status": "completed",
+         "conclusion": "success", "createdAt": "two slots before", "url": f"{url}{ALERT_PREV_ID - 1}"}]
+    calls: list[list[str]] = []
+
+    def runner(args):
+        calls.append(list(args))
+        verb = tuple(args[:2])
+        if verb == ("run", "list"):
+            return json.dumps(history)
+        if verb == ("issue", "list"):
+            return "[]"
+        if verb == ("label", "create"):
+            return ""
+        if verb == ("issue", "create"):
+            return "https://github.invalid/issues/1\n"
+        raise AssertionError(f"unexpected gh call: {args}")
+    res = mod.alert(str(ALERT_RUN_ID), "schedule", f"{url}{ALERT_RUN_ID}", slot=slot,
+                    workflow="daily_refresh.yml", runner=runner, sleep=lambda s: None)
+    return res, calls
+
+
+def force_fail_problems(code: int, st: dict, tree: Path) -> tuple[list[str], list[tuple]]:
+    """--force-fail: the run failed on the outage and recorded it, and bot_alert.py
+    (the copy's) opens the bot-failure issue after two failed scheduled runs in a
+    row and does nothing after one. Returns (problems, report rows)."""
+    problems: list[str] = []
+    errs = [str(e) for e in st.get("errors") or []]
+    if code == 0 or st.get("exit_code") != 1:
+        problems.append(f"the forced failure did not fail the run (exit {code}, status exit "
+                        f"{st.get('exit_code')}): the alert step would not run")
+        return problems, []
+    if not any(OUTAGE in e for e in errs):
+        problems.append(f"the run failed, but not on the forced outage: {errs}")
+    if st.get("publishable"):
+        problems.append("the failed run is marked publishable")
+    problems += run_record_problems(tree, {"close": st})
+    label = "bot-failure"
+    rows: list[tuple] = []
+    script = tree / "scripts" / "ci" / "bot_alert.py"
+    try:
+        res, calls = alert_check(script, st, "failure")
+        res1, calls1 = alert_check(script, st, "success")
+    except Exception as e:  # noqa: BLE001 (reported: the check failed, whatever raised)
+        return [*problems, f"bot_alert.py raised on the fake history: {type(e).__name__}: {e}"], rows
+    made = [c for c in calls if c[:2] == ["issue", "create"]]
+    if res.get("action") != "created" or res.get("streak") != 2 or len(made) != 1:
+        problems.append(f"two failed scheduled runs in a row did not open one issue: {res}, gh calls {calls}")
+    elif not ("--label" in made[0] and made[0][made[0].index("--label") + 1] == label
+              and any(c[:3] == ["label", "create", label] for c in calls)
+              and f"runs/{ALERT_PREV_ID}" in made[0][made[0].index("--body") + 1]):
+        problems.append(f"the issue is not the {label} issue naming both failed runs: {made[0]}")
+    rows.append(("failure alert (the scheduled run before also failed)", 0, None,
+                 f"{res.get('action')} issue {res.get('issue')} (streak {res.get('streak')}, label {label})"))
+    if res1.get("action") != "none" or any(c[0] in ("issue", "label") for c in calls1):
+        problems.append(f"one failed run opened or touched an issue: {res1}, gh calls {calls1}")
+    rows.append(("failure alert (the run before succeeded)", 0, None,
+                 f"{res1.get('action')} (streak {res1.get('streak')})"))
+    return problems, rows
+
+
 def _pytest(cwd: Path, files: list, log: Path) -> tuple:
     t0 = time.perf_counter()
     with open(log, "w") as fh:
@@ -491,12 +602,16 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, default=None, help="scratch directory (default: a temp dir)")
     ap.add_argument("--full", action="store_true", help="also run the whole suite in the copy")
     ap.add_argument("--keep", action="store_true", help="keep the copy")
-    ap.add_argument("--no-fit", action="store_true",
-                    help="Yahoo's book empty (the Saturday slot): no fit, the surface from the Cboe book")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--no-fit", action="store_true",
+                      help="Yahoo's book empty (the Saturday slot): no fit, the surface from the Cboe book")
+    mode.add_argument("--force-fail", action="store_true",
+                      help="Yahoo down in the close slot: the run must fail and bot_alert.py, on a fake "
+                           "history of two failed scheduled runs, must open the bot-failure issue")
     ap.add_argument("--drive", type=Path, default=None, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if args.drive:
-        return drive(args.drive, no_fit=args.no_fit)
+        return drive(args.drive, no_fit=args.no_fit, force_fail=args.force_fail)
 
     out = Path(args.out or tempfile.mkdtemp(prefix="sim-next-session-")).resolve()
     tree = out / "tree"
@@ -511,11 +626,18 @@ def main(argv=None) -> int:
     status_file = out / "status.json"
     with open(out / "logs" / "bot.log", "w") as fh:
         r = subprocess.run([sys.executable, str(tree / "scripts" / "ci" / "simulate_next_session.py"),
-                            "--drive", str(status_file), *(["--no-fit"] if args.no_fit else [])],
+                            "--drive", str(status_file), *(["--no-fit"] if args.no_fit else []),
+                            *(["--force-fail"] if args.force_fail else [])],
                            cwd=tree, env=env, stdout=fh, stderr=subprocess.STDOUT, check=False)
-    problems = []
+    problems: list[str] = []
     st = json.loads(status_file.read_text()) if status_file.exists() else {}
     sim = st.get("simulated", {})
+    if args.force_fail:
+        problems, rows = force_fail_problems(r.returncode, st, tree)
+        rows.insert(0, ("bot run (forced failure: Yahoo's SPX download raises)", r.returncode,
+                        sim.get("seconds"), f"session {sim.get('session')}: errors {st.get('errors')}"))
+        return _report(out, tree, rows, problems, args.keep,
+                       "The run failed as forced, and the alert opens the bot-failure issue.")
     cal = st.get("calibration") or {}
     if r.returncode != 0:
         problems.append(f"cloud_refresh exited {r.returncode}: {st.get('errors')}")
@@ -552,12 +674,17 @@ def main(argv=None) -> int:
         rows.append((name, code, secs, tail))
         if code != 0:
             problems.append(f"{name} failed ({tail}); log {log}")
+    return _report(out, tree, rows, problems, args.keep)
+
+
+def _report(out: Path, tree: Path, rows: list, problems: list[str], keep: bool,
+            passed: str = "All gates pass.") -> int:
     report = ["| step | exit | seconds | result |", "|---|---|---|---|"]
     report += [f"| {a} | {b} | {c} | {d} |" for a, b, c, d in rows]
-    report += ["", *(f"- PROBLEM: {x}" for x in problems)] if problems else ["", "All gates pass."]
+    report += ["", *(f"- PROBLEM: {x}" for x in problems)] if problems else ["", passed]
     (out / "report.md").write_text("\n".join(report) + "\n")
     print("\n".join(report), flush=True)
-    if not args.keep and not problems:
+    if not keep and not problems:
         shutil.rmtree(tree, ignore_errors=True)
     return 1 if problems else 0
 

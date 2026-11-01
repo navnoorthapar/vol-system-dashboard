@@ -11,6 +11,8 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
   * simulate_next_session.py (CI's simulate job): the simulated session's
     book is priced by parameters moved off the headline fit, with noise, so
     a test pinning a headline-derived value fails there, not in the bot.
+    Its --force-fail mode, run here in full, fails the run and checks that
+    bot_alert.py would open the bot-failure issue after two failures.
   * merge_main_data.py (merging live main's bot data into a branch that
     restated the record): only the re-derivable data files may conflict,
     they resolve to the branch's version, and main's rows are re-derived
@@ -320,6 +322,66 @@ class TestSimulatedSession:
         main = inspect.getsource(sim.main)
         assert "run_record_problems(" in main
         assert "check_captures.py" in main
+
+    def test_a_forced_failure_fails_the_run_and_the_alert_opens_the_issue(self, tmp_path):
+        """FUND_GRADE_PLAN 0.4: the failure alert was tested only on a fake history
+        (TestBotAlert), never after a run of the bot that failed. --force-fail runs
+        the close slot of the simulated next session in a copy of this checkout with
+        Yahoo's SPX download raising: the run must exit 1 on that outage with a
+        complete run record, and the copy's bot_alert.py, on a fake history (its gh
+        runner injected), must open the one bot-failure issue when the scheduled run
+        before also failed and do nothing when it succeeded. About 15 seconds."""
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "simulate_next_session.py"),
+                            "--force-fail", "--out", str(tmp_path)], capture_output=True, text=True,
+                           timeout=900, check=False)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        report = (tmp_path / "report.md").read_text()
+        assert "| bot run (forced failure: Yahoo's SPX download raises) | 1 |" in report
+        assert "simulated outage (--force-fail)" in report
+        assert "created issue" in report
+        assert "(streak 2, label bot-failure)" in report
+        assert "| failure alert (the run before succeeded) | 0 | None | none (streak 1) |" in report
+        assert "PROBLEM" not in report
+        st = json.loads((tmp_path / "status.json").read_text())
+        assert st["exit_code"] == 1
+        assert st["simulated"]["force_fail"] is True
+        assert not (tmp_path / "tree").exists()                       # removed when it passes
+
+    def test_the_forced_failure_check_fails_when_the_run_or_the_alert_does_not(self, sim, tmp_path):
+        """The checks behind --force-fail, on a hand-made failed run: they pass with
+        the repository's bot_alert.py and fail when the run did not fail, when it
+        failed on something else, without its run record, or when the alert would
+        wait for a third failure or open an issue after one."""
+        import shutil
+        (tmp_path / "scripts" / "ci").mkdir(parents=True)
+        script = tmp_path / "scripts" / "ci" / "bot_alert.py"
+        shutil.copy(ROOT / "scripts" / "ci" / "bot_alert.py", script)
+        (tmp_path / "data_store" / "runs").mkdir(parents=True)
+        run_utc = "2026-11-02T23:07:00+00:00"
+        st = {"run_utc": run_utc, "exit_code": 1, "publishable": False,
+              "errors": [f"SPX OHLCV download failed: {sim.OUTAGE}"]}
+        assert len(sim.force_fail_problems(1, st, tmp_path)[0]) == 1          # no run record
+        (tmp_path / "data_store" / "runs" / "run_x_close.json").write_text(json.dumps(
+            {"slot": "close", "run_utc": run_utc, "complete": True, "exit_code": 1, "calibration": None}))
+        problems, rows = sim.force_fail_problems(1, st, tmp_path)
+        assert problems == []
+        assert [r[3] for r in rows] == [
+            "created issue https://github.invalid/issues/1 (streak 2, label bot-failure)", "none (streak 1)"]
+        assert sim.force_fail_problems(0, {**st, "exit_code": 0}, tmp_path)[0][0].startswith(
+            "the forced failure did not fail the run")
+        assert sim.force_fail_problems(1, {**st, "errors": ["freeze failed"]}, tmp_path)[0][0].startswith(
+            "the run failed, but not on the forced outage")
+        src = script.read_text()
+
+        def edit(new):                 # same size and second as the cached bytecode: drop it
+            script.write_text(new)
+            shutil.rmtree(script.parent / "__pycache__", ignore_errors=True)
+        edit(src.replace("ALERT_AFTER = 2 ", "ALERT_AFTER = 3 "))
+        assert sim.force_fail_problems(1, st, tmp_path)[0][0].startswith(
+            "two failed scheduled runs in a row did not open one issue")
+        edit(src.replace("ALERT_AFTER = 2 ", "ALERT_AFTER = 1 "))
+        assert any(x.startswith("one failed run opened or touched an issue")
+                   for x in sim.force_fail_problems(1, st, tmp_path)[0])
 
     def test_a_replayed_book_has_the_state_its_quote_time_gives(self, sim):
         """The simulated 2026-10-30 session (a Friday) failed the data gate: the replay
