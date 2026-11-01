@@ -4931,6 +4931,17 @@ def test_freeze_refuses_a_data_file_without_a_heatmaps_details(dash, freezer, tm
     out = tmp_path / "site"
     assert freezer.freeze(str(out), dash) == 1
     assert not out.exists() or not any(out.iterdir())
+    # an entry without its detail template or its cells (the readout then threw on
+    # every hover and described the previous cell) is refused the same way
+    for broken in ({"cells": []}, {"detail": "{0}"}, {"detail": 1, "cells": []}):
+        def bad(kind, session, obj, broken=broken):
+            heat = dict(obj.get("heat") or {})
+            if "iv-heatmap" in heat:
+                heat["iv-heatmap"] = broken
+            return orig(kind, session, {**obj, "heat": heat} if "heat" in obj else obj)
+        monkeypatch.setattr(dash, "publish_json", bad)
+        out = tmp_path / f"site-{len(broken)}-{min(broken)}"
+        assert freezer.freeze(str(out), dash) == 1, broken
     page = '<table class="heat" id="iv-heatmap" data-src="data/x-0123456789abcdef.json" data-integrity="a">'
     assert freezer._heat_ids(page + '<p data-id="no">', "data/x-0123456789abcdef.json") == ["iv-heatmap"]
 

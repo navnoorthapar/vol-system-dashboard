@@ -70,7 +70,7 @@
       {{ m.vs_table(cp.head, v) }}
     </div>
     {% endfor %}
-    <p class="note" id="surface-change-picks">Compared: the newest earlier session and the newest stored at least {% for g in cp.lags %}{{ g }}{{ ', ' if loop.revindex > 2 else (' and ' if not loop.last else '') }}{% endfor %} NYSE sessions back (about a week, a month and a quarter), {{ cp.views|length }} of the {{ cp.n_earlier }} earlier sessions stored. At most {{ cp.lags|length + 1 }} are compared, so the page keeps one size as sessions accrue; the ranges under the tiles at the top use every stored session.</p>
+    <p class="note" id="surface-change-picks">Compared: the newest earlier session and the newest stored at least {% for g in cp.lags %}{{ g }}{{ ', ' if loop.revindex > 2 else (' and ' if not loop.last else '') }}{% endfor %} NYSE sessions back (about a week, a month and a quarter), {{ cp.views|length }} of the {{ cp.n_earlier }} earlier sessions stored. At most {{ cp.lags|length + 1 }} are compared; the ranges under the tiles at the top use every stored session.</p>
     {% if d.charts.rr_term %}<h3 class="sub-head" id="rr-term">25Δ risk reversal by expiry, this session and those compared</h3>
     {{ m.chart(d.charts.rr_term, 'h260 grow') }}
     <p class="note" id="rr-term-note">SVI-cal surface, listed expiries; {{ d.session }} solid, the sessions compared grey, the one chosen under “Against an earlier session” dashed. A gap is a wing extrapolated beyond the quoted strikes.</p>{% endif %}
