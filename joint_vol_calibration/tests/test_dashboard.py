@@ -2754,7 +2754,10 @@ def test_the_smile_tabs_name_each_expiry_and_a_settlement_only_from_its_occ_root
     N', and the days sit in an <i> whose 'd' desk.css writes and names ' days' (a
     screen reader read '30d')."""
     css = (ROOT / "dashboard" / "static" / "desk.css").read_text()
-    assert re.search(r'\.exp-strip i::after\s*\{\s*content:\s*"d"\s*/\s*" days";\s*\}', css)
+    # a plain "d" first: an engine without content's alternative text drops that
+    # declaration and keeps the plain one, rather than printing the bare number
+    assert re.search(r'\.exp-strip i::after\s*\{\s*content:\s*"d";'
+                     r'\s*content:\s*"d"\s*/\s*" days";\s*\}', css)
     for n, roots in ((17, False), (45, True)):
         (tmp_path / f"n{n}").mkdir()
         monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path / f"n{n}", n, roots))
@@ -3815,7 +3818,13 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
         # once the Cboe book (8,819 quotes) was scored
         # (the bot's 2026-10-28 session: −0.180998 against −0.180999)
         assert [m[0] for m in mids] == pytest.approx([float(k) for k in q["k"]], abs=1e-6), s["name"]
-        assert [p[1] for p in s["data"]] == pytest.approx([float(v) * 100 for v in q["model_iv"]], abs=1e-4)
+        # a quote where the model has no IV (NaN in the residual table: a deep wing the
+        # model cannot price) is a gap in the series, not a point
+        want = [float(v) * 100 if np.isfinite(v) else None for v in q["model_iv"]]
+        got = [p[1] for p in s["data"]]
+        assert [g is None for g in got] == [w is None for w in want], s["name"]
+        priced = [w for w in want if w is not None]
+        assert [g for g in got if g is not None] == pytest.approx(priced, abs=1e-4)
         assert [v for p in by[(e, "ba")]["data"] for v in p[1:]] == pytest.approx(
             [v for b, a in zip(q["bid_iv"], q["ask_iv"]) for v in (b * 100, a * 100)], abs=1e-5)
 
