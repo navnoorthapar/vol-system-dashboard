@@ -9411,8 +9411,11 @@ def test_model_risk_lists_breaches_first_and_counts_them_in_its_filters(dash, pa
     assert statuses == sorted(statuses, key=_SEVERITY.index)
     d = dash.load_model_risk()
     n_breach = d["rag_counts"]["breach"]
-    assert n_breach >= 1
+    # how many checks breach is the data's to say (the VX lag breached every session
+    # until the daily job stored settlements; 2026-10-30 has none): the order holds
+    # whatever the tally, and a breach is never below another status
     assert statuses[:n_breach] == ["breach"] * n_breach
+    assert "breach" not in statuses[n_breach:]
     inv = [m["id"] for m in d["inventory"]] + [v["id"] for v in d["vendor_inputs"]] + ["Data"]
     for st in _SEVERITY:
         models = [m["model"] for m in d["monitors"] if m["status"] == st]
