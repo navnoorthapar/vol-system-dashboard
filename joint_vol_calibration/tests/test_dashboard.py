@@ -9411,9 +9411,15 @@ def test_model_risk_lists_breaches_first_and_counts_them_in_its_filters(dash, pa
     assert statuses == sorted(statuses, key=_SEVERITY.index)
     d = dash.load_model_risk()
     n_breach = d["rag_counts"]["breach"]
-    assert n_breach >= 1
     assert statuses[:n_breach] == ["breach"] * n_breach
     inv = [m["id"] for m in d["inventory"]] + [v["id"] for v in d["vendor_inputs"]] + ["Data"]
+    if not n_breach:
+        # The tally is the bot's: the record through 2026-10-30 has no BREACH, and asking
+        # for one failed this presentation test on it. The order is then checked on the
+        # page's own rows with the last one made a BREACH: it must come first.
+        rows_ = [{**m, "status": "breach" if i == len(d["monitors"]) - 1 else m["status"]}
+                 for i, m in enumerate(d["monitors"])]
+        assert dash.desk_monitor.order_checks(rows_, inv)[0]["id"] == d["monitors"][-1]["id"]
     for st in _SEVERITY:
         models = [m["model"] for m in d["monitors"] if m["status"] == st]
         assert models == sorted(models, key=inv.index), st
