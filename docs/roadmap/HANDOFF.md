@@ -59,12 +59,12 @@ Every commit subject carries its item ID, for example `(R3-D4)` or `A1-F16:`. Sk
 All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log. Nothing open here.
 
 ### B. Round-2 backlog still open
-- **C3 (F20):** In the Surface tail-probability table, ∫p and E[S_T/F] are 1.0000 in every row.
+- **C3 (F20):** In the Surface tail-probability table, ∫p and E[S_T/F] are 1.0000 in every row. **Done 2026-10-29 (PR #15).**
   - Replace both with one 'distribution check' column: max(|∫p−1|, |E[S_T/F]−1|) in scientific notation.
-- **C1 (F11):** The Overview prints 'rv₂₀ 9.75%' next to 'RV21 9.67%'.
+- **C1 (F11):** The Overview prints 'rv₂₀ 9.75%' next to 'RV21 9.67%'. **Done 2026-10-29 (PR #15).**
   - Add an rv20 glossary entry (dashboard/desk_glossary.py, taken from the code that computes it).
   - Label each number '20-session' or '21-session'.
-- **C2 (F17):**
+- **C2 (F17):** **Done 2026-10-29 (PR #15).**
   - The quote-grade surface row of the freshness table shows '—' for its age. Compute it in NYSE sessions like the other rows.
   - The status strip's SURFACE date shows its age.
 - **C4 (F19):** At 390 and 320 px, captions inside horizontal scrollers carry the scroll shadow, with ~50 px before the header. Move the caption outside the shadow and keep the gap at 12 px or less.
@@ -78,7 +78,7 @@ All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log
     - research.html 409,472 → 352,817 B; calibration.html 345,279 → 252,687 B (17-expiry store).
     - How: the smile's every-expiry quotes, the heatmap cells' readout numbers and the 3D points moved to one hashed session data file (`data/surface-<session>-<sha256[:16]>.json`, 527,509 B / 209,006 B gzipped at 45 expiries), fetched once after the smile's first draw; compact spec JSON without the fields the page renders as HTML; colour classes; one bucket table. No displayed number changed.
     - Budgets: pytest on synthetic 17/45/80-expiry sessions (≤ 7,000 B an expiry, ≤ 300,000 B at 17; research ≤ 400,000 B) and on synthetic stores with N and N + 1 earlier sessions (no growth past the four compared); CI's a11y job runs `scripts/ci/page_budget.py`: 450,000 B at 45 expiries, + 7,000 B an expiry past and − 5,500 B an expiry short (296,000 B at 17), n read from the page; it prints the gzipped size at level 6, ungated. The committed-fixture freeze test holds surface.html to the same formula (it was a flat 600,000 B). The bot's deploy is not gated on it.
-- **A3 (no-JS):** With JS off, surface.html is wider than the viewport.
+- **A3 (no-JS):** With JS off, surface.html is wider than the viewport. **Done 2026-10-29 (PR #15).**
   - Every page at 320, 390 and 1440 px with JS off must have scrollWidth ≤ innerWidth.
   - Add that check to scripts/ci/a11y/a11y.mjs.
   - **w3/surface (2026-10-31):** no page overflows with JS off at 320/390/1440 px on the 17- and 45-expiry builds. Without JS the smile's per-expiry bucket rows are one table, a row group per expiry, in a labelled, focusable region bounded to 60% of the screen; a11y.mjs checks it (one row group per tab).
@@ -98,16 +98,16 @@ All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log
     - After the fixes (2026-10-31, load average 1.0–2.2 on 4 shared CPUs): switch / click-to-chart 16 / 41 ms at 1×, 40 / 151 ms at 4× (45 expiries); 16 / 39 and 32 / 133 ms (17). Surface tab stops 226 at 1440 px and 221 at 390 px (45 expiries), 228 / 222 (17).
 
 ### C. Round-3 critic findings still open (low)
-- **T11:** Model Risk V1 history drops the sign, because app.py stores abs(gap). Store the signed gap and apply abs only in the limit check.
-- **T10:** calibration.html calls the VIX-index leg 'the model's expected average vol'. It is 100·√(expected average variance).
+- **T11:** Model Risk V1 history drops the sign, because app.py stores abs(gap). Store the signed gap and apply abs only in the limit check. **Done 2026-10-29 (PR #15).**
+- **T10:** calibration.html calls the VIX-index leg 'the model's expected average vol'. It is 100·√(expected average variance). **Done 2026-10-29 (PR #15).**
 - **R3-D7:** The delta grid and the #heat heatmap share the cividis ramp on different domains. Use one shared, clamped domain.
-- **R3-D12:** The cone table's SESSIONS column prints 9.0, 9.7 … while the caption says 'rounded'. Print the integer window used.
-- **R3-D11:**
+- **R3-D12:** The cone table's SESSIONS column prints 9.0, 9.7 … while the caption says 'rounded'. Print the integer window used. **Done 2026-10-29 (PR #15).**
+- **R3-D11:** **Done 2026-10-29 (PR #15).**
   - At 320 px KPI ranges break mid-value. Add white-space:nowrap on .kpi-range.
   - At 390 px an odd last KPI tile spans the row.
 - **R3-D8:** Reader-facing text uses code identifiers and ASCII math ('svi.butterfly_certificate', '>=', '1e-4', 'w_(i+1) - w_i'). Rewrite it in the house style.
 - **R3-D10:** At 1440 the ticker wraps to two rows. Fit it on one.
-- **R3-D9:** In the Research β table, the uppercase transform turns β into 'Β'. Wrap it in `<span class="sym">`.
+- **R3-D9:** In the Research β table, the uppercase transform turns β into 'Β'. Wrap it in `<span class="sym">`. **Done 2026-10-29 (PR #15).**
 
 ### D. Loose ends the round-3 engineers recorded
 - **Surface 'Model descriptions'** still say the Heston fit was 'DE + L-BFGS-B', but the 2026-10-26 fit used multi-start TRF.
@@ -117,11 +117,11 @@ All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log
   - Store the outlier flag for every violating row in the surface report, so the share can exclude them.
 - **Two CSV buttons gave no download** within 3 s in a test script: Surface's static-arbitrage constraint-rows table, and Research's 21-day realised-vol forecast table. Investigate both.
 - **At 1440 px** the s4 table's 'At bid/ask' column runs past its panel, and the residuals heatmap beside it stretches to ~1,349 px while the disclosure is closed.
-- **calibration.html (~line 345)** still prints a raw 'E[VIX_T]' in a note. Use the |subs filter.
+- **calibration.html (~line 345)** still prints a raw 'E[VIX_T]' in a note. Use the |subs filter. **Done 2026-10-29 (PR #15).**
 - **docs/roadmap/ui_plan.json** holds stale P2.5 acceptance text ('tile shows 95.0'). It is history; update or annotate it.
 - **`make reproduce`** (rebuilds the backtest, Greeks, C7 and the v2 calibrations, then diffs against what is committed) was not re-run after round 3. Run it.
 - **docs/model_validation/README.md line ~171** still says M14 replicates the VIX '(Cboe rules)'; the site now says 'the Cboe formula, with its listed departures' (T3). Align the doc, and note the departures count is 12 on 2026-10-26 (6 deviations + 6 gap notes), not 8.
-- **The Calibration page's census sentence** ('k of k fits pass') was not reworded with the Overview's (T2). Reword it the same way.
+- **The Calibration page's census sentence** ('k of k fits pass') was not reworded with the Overview's (T2). Reword it the same way. **Done 2026-10-29 (PR #15).**
 - **B1/B2 (cone and frontier labels)** were fixed in the chart specs with spec-level tests; no pixel-level browser measurement of label rectangles at 390–1920 px was added. Add one to the interact gate.
 
 ### E. Owner decisions (ask the owner; do not decide alone)
@@ -226,6 +226,44 @@ python scripts/ci/simulate_next_session.py --full                               
   - Commits 4a8d085 (at most four compared sessions), fd250ee (ruff gate), a0366c5 (budget sloped below 45; gzip printed at level 6), f779b51 (heatmap readout hang; freeze checks heat entries), da37873 (audit: schema and session per reader, typed readout numbers), e3b72ec (two-line expiry strip, "Expiry k of N", year marks, "days"), 6fe8e3e (heat grids: hidden tab, focus, scroll padding).
   - Acceptance on the 17- and 45-expiry builds: axe 0, interact 0 failures, audit 7,685 / 15,997 checks with 0 mismatches, page budget ok (267,068 / 421,799 B).
   - Open: the owner decisions added to E (page growth from the "Every session" table, the gzip figure, AM / PM tags) and D3's 4× target.
+- **2026-10-29, fund-grade session 1 (tier 0): batch 1 shipped; wave 1 integrated; wave 2 and the Surface rework in progress.**
+  - **Shipped to main, bot green, live site on 2026-10-28 and audit-clean:**
+    - **PR #15 (fund-grade batch 1).**
+      - Tier 0.1: the independent recompute audit. It covers 100% of the numbers on Overview and Surface, about 11,900 checks, and gates tests.yml and the bot's deploy.
+      - The site renders from the committed record (`app.record_db`), and chain provenance is stated truthfully.
+      - `commit_and_push.sh` no longer exits 0 after a failed re-derive.
+      - The 2026-10-27/28 robustness fixes:
+        - the σ panel shows the newest diagnosed fit while the headline's diagnostics are pending;
+        - an unreplicated VIX says why;
+        - an expiry with no fit-set quote is left out of the surface (with its reason) instead of failing the session;
+        - half-spreads are packed at 10⁻⁸ vol pts.
+      - Items T11, T10, R3-D9, R3-D12, R3-D11, C1, C2, C3 and A3, and the census wording.
+    - **PR #16 (owner):** the rough-Heston tail mask that ended the diagnostics timeouts. This branch's own fix for the same bug was dropped in favour of it.
+    - **PR #17:** the pages named H = ½ (Heston) a "0.02 floor"; they now name the side of the bound. Two deploy-gate tests compared rounded k and whole-page digits.
+    - **Checks:** run 139 succeeded and deployed. The recompute audit against the live pages passes 11,933 of 11,933.
+  - **Integrated on `w1/integrate`, not yet shipped:**
+    - w1/ops: tier 0.3, 0.4, 0.6, 0.9, 0.10, the 0.11 growth gate, and the private Cboe store.
+    - w1/surface-source: tier 0.7 and the producer half of 0.2.
+    - w1/truth-in-text: inventory prose, captions, README, validation pack, Model Risk coverage, corrections round C24.
+  - **What blocks shipping it:**
+    - A full Cboe book has about 45 expiries; at that size the Surface page fails CI's interaction gate, and surface.html grows to 1.67 MB. The rework (plan in the session's `surface_plan.md`) is being built on `w3/surface`.
+    - The README's results must move to a committed snapshot, or the backfill's rebuilds turn tests.yml red.
+  - **In progress:**
+    - w1/vx-complex: the VX futures refresh and its labels.
+    - Wave 2: tier 0.5 (per-term rates and capture time in the VIX replication), 0.8 (a same-instant VIX reference), 0.2's enumerating badge test and 0.4's forced-failure check.
+  - **Owner decisions raised (section E):**
+    - Fit on the Yahoo chain and score on the Cboe book (as built), or fit on the Cboe book too.
+    - Reproducing Cboe-sourced sessions will depend on the private store once raw books move there.
+    - A failed private push loses that run's raw books (no public artifact as a fallback).
+    - The PR growth gate has no override for files added under data_store/, and its size limit is 2 MB.
+    - Page budgets: corrections.html at 150 KB; Model Risk budgeted per history dot.
+    - Whether the research classifier, and the VX futures table the bot does not refresh, count as "by design" breaches.
+    - D3's 100 ms at 4× CPU is out of reach while ECharts draws the chart (its `setOption` alone takes 70–300 ms at 4×); restate the target.
+  - **Next step:**
+    - Merge w3/surface and wave 2 into `w1/integrate`, verify it (tests, audit, gates, simulation), and ship it.
+    - Extend the recompute audit to Calibration, Research, Risk and Model Risk.
+    - Run the four-critic review and record the medians in FUND_GRADE_PLAN.md §6.
+    - Then tier 1.
 
 - **2026-10-27, 09:05 UTC, first build session, final entry.**
   - **Shipped to main today** (PRs #11, #12, #13 and the final batch): the deploy unblock on the
