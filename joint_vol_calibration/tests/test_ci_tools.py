@@ -1368,6 +1368,36 @@ class TestPageBudget:
             assert f"{gz:,} bytes gzipped at level {pb.GZIP_LEVEL}" in msg, msg
             assert pb.main([str(site)]) == (0 if ok else 1)
 
+    def test_the_budget_grows_with_the_default_expirys_quotes_and_the_stored_sessions(self, monkeypatch,
+                                                                                    tmp_path):
+        """D2 check: four compared sessions and a 30-day default expiry of 582 quotes
+        (2026-12-31 on the 2026-10-28 book) put the 45-expiry page at 454,224 bytes, over
+        a budget that counted only expiries, and the a11y job would have gone red about
+        2026-12-01 with no markup change. The default expiry's quotes (drawn from the
+        page) and the "Every session" rows grow with the data, so the budget grows
+        with them; the markup's own weight is still held to the expiry formula."""
+        pb = _load("scripts/ci/page_budget.py", "page_budget_under_test", monkeypatch)
+        assert pb.budget(45) == pb.budget(45, pb.DEFAULT_QUOTES, pb.HISTORY_ROWS) == 450_000
+        assert pb.budget(45, 582, 14) == (450_000 + pb.PER_DEFAULT_QUOTE * (582 - pb.DEFAULT_QUOTES)
+                                          + pb.PER_HISTORY_ROW * (14 - pb.HISTORY_ROWS))
+        status = ('<p class="exp-status js-only" id="slices-status" role="status" data-from="x">Expiry 16 of '
+                  '45 · 2026-12-31 · Thu · 30 days · F 7,745.53 · 582 quotes · median half-spread 0.05 '
+                  'vol pts</p>')
+        rows = "".join(f"<tr><td>2026-10-{i + 1:02d}</td></tr>" for i in range(14))
+        table = ('<table class="tbl" id="surface-history-table"><caption>c</caption><thead><tr><th>S</th>'
+                 f'</tr></thead><tbody>{rows}</tbody></table>')
+        for size, ok in ((454_224, True), (pb.budget(45, 582, 14) + 1, False)):
+            page = _surface_page(45, size - len(status.encode()) - len(table))
+            page = page.replace("</html>", status + table + "</html>")
+            site = tmp_path / f"s{size}"
+            site.mkdir()
+            (site / "surface.html").write_text(page, encoding="utf-8")
+            assert len((site / "surface.html").read_bytes()) == size
+            assert pb.counts(page) == (45, 582, 14)
+            got, msg = pb.check(site)
+            assert got is ok, msg
+            assert "a 582-quote default expiry and 14 stored sessions" in msg
+
     def test_its_tab_pattern_is_the_surface_templates(self, monkeypatch):
         pb = _load("scripts/ci/page_budget.py", "page_budget_under_test", monkeypatch)
         tpl = (ROOT / "dashboard" / "templates" / "surface.html").read_text()
