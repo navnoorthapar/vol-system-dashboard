@@ -3930,7 +3930,13 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
         # once the Cboe book (8,819 quotes) was scored
         # (the bot's 2026-10-28 session: −0.180998 against −0.180999)
         assert [m[0] for m in mids] == pytest.approx([float(k) for k in q["k"]], abs=1e-6), s["name"]
-        assert [p[1] for p in s["data"]] == pytest.approx([float(v) * 100 for v in q["model_iv"]], abs=1e-4)
+        # a model price whose IV cannot be inverted (NaN in the residual table: the simulated
+        # 2026-11-02 Heston fit on four deep out-of-the-money puts of one-week expiries) is a
+        # gap in the series, not a point
+        got, want = [p[1] for p in s["data"]], [float(v) * 100 for v in q["model_iv"]]
+        assert [g is None for g in got] == [not np.isfinite(w) for w in want], s["name"]
+        finite = [w for w in want if np.isfinite(w)]
+        assert [g for g in got if g is not None] == pytest.approx(finite, abs=1e-4), s["name"]
         assert [v for p in by[(e, "ba")]["data"] for v in p[1:]] == pytest.approx(
             [v for b, a in zip(q["bid_iv"], q["ask_iv"]) for v in (b * 100, a * 100)], abs=1e-5)
 
