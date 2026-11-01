@@ -347,6 +347,23 @@ class TestSimulatedSession:
             states[session] = cap.book_state
         assert states == {"2026-10-29": "gth", "2026-10-30": "closing"}
 
+    def test_the_close_slots_replay_is_a_different_listing_from_the_book_slots(self, sim):
+        """The simulated session's closing and overnight books were two replays of one
+        committed file, with the same line counts, so the presentation gate's check of
+        the Overview's books passed on a weekday session here and failed in the bot.
+        The close slot's replay now leaves out the furthest expiry's lines."""
+        import pandas as pd
+
+        from joint_vol_calibration.config import DATA_DIR
+        books = sorted((DATA_DIR / "options" / "cboe").glob("spx_*.parquet"))
+        if not books:
+            pytest.skip("no committed Cboe book")
+        frame = pd.read_parquet(books[-1])
+        closing = sim.closing_listing(frame)
+        assert 0 < len(closing) < len(frame)
+        assert closing["expiry"].nunique() == frame["expiry"].nunique() - 1
+        assert closing["expiry"].max() < frame["expiry"].max()
+
     def test_the_driver_prices_book_and_vix_indices_with_the_moved_parameters(self, sim):
         import inspect
         src = inspect.getsource(sim.drive)

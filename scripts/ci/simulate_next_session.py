@@ -177,6 +177,17 @@ def replayed_capture(cboe, und: str, frame, meta: dict, session: str, now):
         n_bytes=int(meta["n_bytes"]))
 
 
+def closing_listing(frame):
+    """The close slot's replayed closing book: the committed book less the lines of its
+    furthest expiry, so the session's two replayed books differ in lines and expiries as a
+    real session's do (2026-10-30's closing book: 27,760 SPX lines over 53 expiries; the
+    overnight books before it about 28,700-29,000). Two replays of one file had the same
+    counts, so a check that took one book's counts for the other's passed here and failed
+    in the bot (the presentation gate on a session with both books, FUND_GRADE_PLAN 0.8)."""
+    last = frame["expiry"].max()
+    return frame[frame["expiry"] != last].reset_index(drop=True)
+
+
 def copy_checkout(src: Path, dst: Path) -> None:
     """The working tree's tracked files and its new, not ignored ones (so a local
     run sees uncommitted work), made a git repository."""
@@ -347,11 +358,14 @@ def drive(status_file: Path) -> int:
     # the instant of the slot running: each slot's replayed book is the one the
     # delayed feed shows then (the close slot's closing book, the book slot's GTH book)
     clock = {"now": now}
+    close_slot = {"on": False}                  # the close slot replays a closing_listing
 
     def capture(und, now_=None, **kw):
         if und not in replay:
             raise OSError(f"no committed {und} capture to replay")
         frame, meta = replay[und]
+        if close_slot["on"]:
+            frame = closing_listing(frame)
         return replayed_capture(cboe, und, frame, meta, session, clock["now"])
     _patch(cboe, capture_option_chain=capture)
 
@@ -386,13 +400,13 @@ def drive(status_file: Path) -> int:
         hour=18, minute=7, tzinfo=oc.NY_TZ).astimezone(UTC)
     # Each slot writes its run record (data_store/runs/) as the workflow's slots do.
     os.environ["REFRESH_SLOT"] = "close"
-    clock["now"] = close
+    clock["now"], close_slot["on"] = close, True
     code_close = cr.main(["--steps", slot_steps(root / ".github" / "workflows" / "daily_refresh.yml",
                                                 "close"),
                           "--status-file", str(status_file.with_name("status_close.json"))], now_utc=close)
     print(f"close slot exit {code_close}", flush=True)
     os.environ["REFRESH_SLOT"] = "book"
-    clock["now"] = now
+    clock["now"], close_slot["on"] = now, False
     code = cr.main(["--steps", "market,capture,calibrate,freeze", "--status-file", str(status_file)],
                    now_utc=now, ticker_factory=Ticker)
     code = max(code, code_close)
