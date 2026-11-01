@@ -619,6 +619,44 @@ def test_a_closing_book_in_the_private_store_is_found(tmp_path, monkeypatch):
     assert sq.inputs["closing_books"] == 1
 
 
+def test_a_surface_built_from_a_privately_held_book_passes_the_artifact_gate(tmp_path, monkeypatch):
+    """MAJOR 3 of the 0.8 review: with the private book store set up, a book the
+    surface is built from is not in the public tree by the time the artifact gate
+    runs (the workflow moves each run's raw books to the private repository and
+    leaves a manifest of each). surface.json names the book by its file name,
+    data_store/options/cboe/<name> (options/cboe/<name> in the private
+    repository), with the hash of its bytes; the gate looked for the raw book and
+    its sidecar in the public tree, so every Cboe-built surface failed it and the
+    backfill would retry it on every run. The gate now accepts the book's manifest
+    when it records the same file (parquet_sha256) and the same sidecar fields."""
+    from joint_vol_calibration.data import cboe_downloader as cd
+    from joint_vol_calibration.tests.test_session_artifacts import surface_input_problems
+
+    gth = "2026-10-19T02:30:00Z"            # Sun 22:30 ET: GTH for Monday, after Friday SESSION
+    path, _ = _capture_store(tmp_path, monkeypatch, gth, book_state="gth")
+    closing = _second_capture(path, f"spx_{SESSION}_221000Z", "2026-10-16T21:55:00Z", "closing",
+                              "2026-10-16T22:10:00Z")
+    private = tmp_path / "private" / "options" / "cboe"
+    private.mkdir(parents=True)
+    for f in (closing, closing.with_suffix(".json")):
+        f.rename(private / f.name)
+    monkeypatch.setenv(cd.BOOKS_DIR_ENV, str(private))
+    inp = report.run_session(SESSION, models=["essvi"])["surface"]["inputs"]       # surface.json's
+    assert inp["chain"] == f"data_store/options/cboe/{closing.name}"
+    repo = tmp_path / "repo"                 # the public tree: no raw book of the session
+    assert f"{inp['chain']} is not committed" in surface_input_problems(inp, SESSION, repo)
+    # cboe_private.py finish: the book's public record, once the private repository holds it
+    man, rec = cd.write_manifest(private / closing.name, repo / "data_store" / "options" / "cboe_manifest",
+                                 "owner/cboe-books")
+    assert surface_input_problems(inp, SESSION, repo) == []
+    man.write_text(json.dumps({**rec, "parquet_sha256": "0" * 64}))          # another file's record
+    assert surface_input_problems(inp, SESSION, repo) == [
+        f"the manifest {man.name}'s parquet_sha256 is not inputs.chain_sha256: it records another file"]
+    man.write_text(json.dumps({**rec, "book_state": "gth"}))
+    assert surface_input_problems(inp, SESSION, repo) == [
+        "inputs.book_state 'closing' is not its manifest's 'gth'"]
+
+
 @pytest.mark.parametrize(("quote_time", "empty_atm", "why"), [
     ("2026-10-16T19:00:00Z", False, "before the 2026-10-16 close"),        # 15:00 ET
     ("2026-10-17T00:30:00Z", True, "not a live book"),                     # no near-ATM bids

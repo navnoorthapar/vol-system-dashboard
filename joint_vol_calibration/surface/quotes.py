@@ -281,6 +281,10 @@ def select_session_chain(session: str, spot: float, r_clean, *,
                               f"{clean.diagnostics['near_atm_two_sided_share']:.1%} of near-ATM "
                               "lines two-sided)"
                               + (f"; refused: {'; '.join(refused)}" if refused else "")),
+            # the book's name in either store (options/cboe/<name> in the private
+            # repository); once it is held there, its public record is the manifest
+            # data_store/options/cboe_manifest/<stem>.json, whose parquet_sha256 the
+            # artifact gate matches against chain_sha256
             "chain": f"data_store/options/cboe/{path.name}", "chain_sha256": file_sha256(path),
             "raw_sha256": side.get("sha256"), "book_state": side.get("book_state"),
             "fetched_at": side.get("fetched_at"), "capture_rows": side.get("rows"),
