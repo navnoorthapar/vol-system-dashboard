@@ -878,30 +878,46 @@ def _ledger_books(session: str, yahoo: "dict | None"):
     then data_store/options/cboe), then the Yahoo chain the calibrate step
     downloaded (``yahoo``: recalibrate_heston's ``book_out``).
 
-    A closing book comes after the session's other Cboe books: the ledger
-    trades on the book slot's book, quoted after the close its signals use
-    (the Global Trading Hours book; after a Friday or a holiday eve that is
-    the closing book), not on the closing book the close slot stores for the
-    session's surface and VIX replication, whose quotes are the close's own."""
+    The ledger's pre-registered protocol trades on the book slot's book: its
+    Cboe capture, else its Yahoo download. After a Monday-Thursday session that
+    capture is the overnight (Global Trading Hours) book, which opens at 20:15 ET
+    that evening; the closing book the close slot stores for the session's
+    surface and VIX replication is a different book, so it comes after the Yahoo
+    chain, used only when neither of the book slot's books is (FUND_GRADE_PLAN
+    0.8). After a Friday or a holiday eve the feed still shows the closing book
+    when the book slot runs (the next overnight book opens only on the evening
+    before the next session): there the closing book is the book slot's book and
+    keeps its place before the Yahoo chain."""
     import pandas as pd
 
     from joint_vol_calibration.data import cboe_downloader as cboe
-    books = cboe.find_books("SPX", session, data_dir=DATA)
-    for pq_path in sorted(books, key=lambda p: cboe.recorded_book_state(p) == CLOSING_BOOK):
+    from joint_vol_calibration.data import option_chain as oc
+
+    def cboe_book(pq_path):
         js = pq_path.with_suffix(".json")
         side = json.loads(js.read_text()) if js.exists() else {}
         raw = pd.read_parquet(pq_path)
         qt = side.get("quote_time")
         if not qt and "quote_time" in raw.columns and raw["quote_time"].notna().any():
             qt = str(raw["quote_time"].dropna().iloc[0])
-        yield {"raw": raw, "quote_time": qt, "symbol": None,
-               "meta": {"source": "cboe", "file": f"options/cboe/{pq_path.name}",
-                        "raw_sha256": side.get("sha256"), "book_state": side.get("book_state"),
-                        "rows": len(raw)}}
+        return {"raw": raw, "quote_time": qt, "symbol": None,
+                "meta": {"source": "cboe", "file": f"options/cboe/{pq_path.name}",
+                         "raw_sha256": side.get("sha256"), "book_state": side.get("book_state"),
+                         "rows": len(raw)}}
+
+    books = cboe.find_books("SPX", session, data_dir=DATA)
+    overnight_opens_tonight = oc.gth_window(oc.next_session(session))[0].date().isoformat() == session
+    after_yahoo = [p for p in books
+                   if overnight_opens_tonight and cboe.recorded_book_state(p) == CLOSING_BOOK]
+    for pq_path in books:
+        if pq_path not in after_yahoo:
+            yield cboe_book(pq_path)
     if yahoo and yahoo.get("raw") is not None and len(yahoo["raw"]):
         yield {"raw": yahoo["raw"], "quote_time": yahoo.get("quote_time"), "symbol": yahoo.get("symbol"),
                "meta": {"source": "yahoo", "symbol": yahoo.get("symbol"), "rows": len(yahoo["raw"]),
                         "fetched_at": yahoo.get("fetched_at")}}
+    for pq_path in after_yahoo:
+        yield cboe_book(pq_path)
 
 
 def _with_open_expiries(raw, expiries, symbol, ticker_factory, attempts: int = 3, pause: float = 2.0):
@@ -952,8 +968,9 @@ def record_forward_ledger(session: str, yahoo: "dict | None" = None, directory=N
     book's bid/ask, the open ones marked, hash-chained to the previous ledger
     (data_store/forward/ledger_<session>.json).
 
-    The book is the first of _ledger_books (the session's full Cboe capture,
-    else the Yahoo chain plus the open positions' expiries) that is quoted at
+    The book is the first of _ledger_books (the book slot's full Cboe capture,
+    else the Yahoo chain plus the open positions' expiries, else a weekday's
+    closing book from the close slot) that is quoted at
     or after the 16:00 ET close (a Yahoo chain records no quote time: it must
     have been downloaded after the close) and passes the calibration's own quote-state
     gate (near-ATM two-sided share >= option_chain.MIN_TWO_SIDED_SHARE). The

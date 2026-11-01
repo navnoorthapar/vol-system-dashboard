@@ -799,6 +799,49 @@ def test_the_closebook_step_does_not_store_a_closing_book_that_is_not_live(env, 
     assert any("SPX rejected (not a live book" in w for w in st["warnings"])
 
 
+def test_the_ledger_keeps_the_book_slots_books_before_a_weekday_closing_book(env, monkeypatch):
+    """MINOR 4 of the 0.8 review: the forward ledger's pre-registered protocol
+    trades on the book slot's book, its Cboe capture else its Yahoo chain. On a
+    Monday-Thursday session the close slot now also stores the closing book; when
+    the book slot's capture failed, that closing book was taken ahead of the Yahoo
+    chain. It now comes after it, and is used only when the Yahoo chain is not a
+    live book either. After a Friday the closing book is the book slot's own book
+    (the overnight book opens only on Sunday evening) and keeps its place."""
+    import dataclasses
+    clock = {"now": datetime(2026, 9, 24, 0, 5, 5, tzinfo=UTC)}      # Wed 20:05:05 ET: closing book
+
+    def close_slot_only(und, now=None, **kw):
+        if clock["now"] >= NOW:                                     # the book slot's download fails
+            raise OSError("cdn.cboe.com unreachable")
+        cap = _full_spx_capture() if und == "SPX" else _live_capture(und)
+        return _capture_fetched_at(cap, clock["now"])
+    monkeypatch.setattr(cboe, "capture_option_chain", close_slot_only)
+    _fit_fails(monkeypatch)
+    _accepted_pickle(env, "2026-09-22")
+    status = env.DATA.parent / "status_close.json"
+    env.main(["--steps", "market,labels,closebook", "--status-file", str(status)], now_utc=clock["now"])
+    closing = json.loads(status.read_text())["capture"]["captures"]["SPX"]
+    assert (closing["status"], closing["book_state"]) == ("captured", "closing")
+    clock["now"] = NOW                                              # Wed 21:30 ET: the book slot
+    _, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    assert st["capture"]["captures"]["SPX"]["status"] == "failed"
+    assert st["forward_ledger"]["status"] == "recorded", st["forward_ledger"]
+    assert st["forward_ledger"]["book"] == "yahoo"                  # not the close slot's closing book
+    # neither of the book slot's books is live: the closing book, rather than no ledger
+    (env.DATA / "forward" / f"ledger_{SESSION}.json").unlink()
+    _, st = _run(env, "market,capture,calibrate", ticker=_EmptyBookTicker)
+    assert st["forward_ledger"]["book_file"] == f"options/cboe/{pathlib.Path(closing['file']).name}"
+    # Friday 2026-09-18: the closing book is the book slot's own, ahead of the Yahoo chain
+    fri = "2026-09-18"
+    cap = dataclasses.replace(_full_spx_capture(session=fri, quote_time="2026-09-18T22:10:00Z"),
+                              book_state="closing", fetched_at="2026-09-19T06:30:00Z")
+    pq_path, _ = cboe.save_capture(cap, env.DATA / "options" / "cboe")
+    raw = _full_spx_capture(session=fri).frame
+    led = env.record_forward_ledger(fri, {"source": "yahoo", "raw": raw, "symbol": "^SPX",
+                                          "quote_time": None, "fetched_at": "2026-09-19T06:30:00Z"})
+    assert (led["book"], led["book_file"]) == ("cboe", f"options/cboe/{pq_path.name}")
+
+
 def test_the_closebook_step_stores_nothing_once_the_feed_shows_another_book(env, monkeypatch):
     """A close slot that GitHub starts after the feed has moved to the Global
     Trading Hours book stores nothing (skipped, with the reason): the book slot
