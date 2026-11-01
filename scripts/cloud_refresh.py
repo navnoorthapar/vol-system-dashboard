@@ -726,7 +726,9 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None,
     book, the regular session's last quotes, which the feed can show from the
     16:15 ET close until Global Trading Hours open at 20:15 ET (all weekend
     after a Friday): "skipped" when the clock says the feed shows another
-    book, and a download that turns out to be another book is not stored.
+    book, and a download that turns out to be another book is not stored. A
+    closing book that fails the quote-state gate (_live_book_refusal: emptied
+    or one-sided) is "rejected" with the reason and not stored.
 
     Returns {"status": captured|exists|partial|skipped|failed, "reason",
     "session", "files", "captures": {und: {...}}}. Never raises: a failure
@@ -790,6 +792,12 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None,
                 st["captures"][und] = {"status": "skipped", "reason": why, "summary": summ}
                 log.info("  Cboe %s capture not stored: %s", und, why)
                 continue
+            dead = _live_book_refusal(cap, expected) if closing_only else None
+            if dead:
+                # an emptied or one-sided closing book: never used, so never committed
+                st["captures"][und] = {"status": "rejected", "reason": dead, "summary": summ}
+                log.warning("  Cboe %s closing book not stored: %s", und, dead)
+                continue
             pq_path, js_path = cboe.save_capture(cap, d)
             st["captures"][und] = {"status": "captured", "file": str(pq_path),
                                    **{k: summ[k] for k in ("quote_time", "book_state", "rows",
@@ -818,6 +826,33 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None,
     st["reason"] = "; ".join(f"{u} {c['status']}" + (f" ({c['reason']})" if c.get("reason") else "")
                              for u, c in st["captures"].items())
     return st
+
+
+def _live_book_refusal(cap, session: str) -> "str | None":
+    """Why the closebook step does not store ``cap`` (None: it stores it): the
+    quote-state gate a book must pass to build the session's surface or trade
+    the forward ledger (option_chain.clean_option_chain's near-ATM two-sided
+    share, forward_ledger.book_share_refusal: at least
+    option_chain.MIN_TWO_SIDED_SHARE of the lines within 3% of the underlying's
+    price two-sided), applied to the capture before it is written. Whether the
+    weekday closing book stays two-sided until Global Trading Hours open is not
+    yet observed; one that has emptied would only add about 0.9 MB of unusable
+    quotes to the public record every weekday. A book the gate cannot be
+    applied to is not stored either: the book slot's book is the session's
+    fallback."""
+    from joint_vol_calibration.backtest import forward_ledger as fl
+    from joint_vol_calibration.data import option_chain as oc
+    try:
+        clean = oc.clean_option_chain(cap.frame, session, float(cap.underlying_price),
+                                      quote_time=cap.quote_time, fetched_at=cap.fetched_at)
+    except Exception as e:  # noqa: BLE001 (reported as the refusal)
+        return f"the quote-state gate could not be applied to it ({type(e).__name__}: {e})"
+    why = fl.book_share_refusal(clean)
+    if why is None:
+        return None
+    n = (clean.diagnostics or {}).get("n_near_atm")
+    return (f"{why}: {n} near-ATM lines, the quote-state gate needs "
+            f"{oc.MIN_TWO_SIDED_SHARE:.0%} two-sided")
 
 
 def _discard_partial_capture(d: pathlib.Path, cap, cboe) -> None:

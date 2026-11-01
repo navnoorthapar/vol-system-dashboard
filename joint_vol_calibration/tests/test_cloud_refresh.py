@@ -713,7 +713,7 @@ def test_the_close_slot_stores_the_closing_book_and_the_book_slot_the_overnight_
 
     def fake(und, now=None, **kw):
         calls.append(und)
-        cap = _full_spx_capture() if und == "SPX" else _capture(und)
+        cap = _full_spx_capture() if und == "SPX" else _live_capture(und)
         return _capture_fetched_at(cap, clock["now"])
     monkeypatch.setattr(cboe, "capture_option_chain", fake)
     _fit_fails(monkeypatch)
@@ -751,6 +751,52 @@ def test_the_close_slot_stores_the_closing_book_and_the_book_slot_the_overnight_
     code, st = _run(env, "capture")
     assert st["capture"]["status"] == "exists"
     assert calls == ["SPX", "VIX", "SPX", "VIX"]
+
+
+def _live_capture(und, session=SESSION):
+    """_capture with its strikes about the underlying's price: a two-sided book
+    by the quote-state gate (every near-ATM line two-sided)."""
+    import dataclasses
+    cap = _capture(und, session=session)
+    return dataclasses.replace(cap, underlying_price=float(cap.frame["strike"].mean()))
+
+
+def test_the_closebook_step_does_not_store_a_closing_book_that_is_not_live(env, monkeypatch, capsys):
+    """MAJOR 2 of the 0.8 review: the closebook step stored any closing book of
+    the session, even an emptied or one-sided one, which no surface or ledger
+    can use (it fails their quote-state gate) and which would add about 0.9 MB of
+    raw quotes to the public record every weekday. It now applies that gate
+    first: a book whose near-ATM lines are not two-sided is rejected with the
+    reason, which the run record keeps and a warning annotation shows; the
+    other underlying's live book is stored."""
+    import dataclasses
+    at = datetime(2026, 9, 24, 0, 5, 5, tzinfo=UTC)                # Wed 20:05:05 ET: the closing book
+
+    def fake(und, now=None, **kw):
+        if und == "SPX":                                           # asks only: the book has emptied
+            cap = _full_spx_capture()
+            cap = dataclasses.replace(cap, frame=cap.frame.assign(bid=0.0))
+        else:
+            cap = _live_capture(und)
+        return _capture_fetched_at(cap, at)
+    monkeypatch.setattr(cboe, "capture_option_chain", fake)
+    monkeypatch.setenv("REFRESH_SLOT", "close")
+    status = env.DATA.parent / "status_close.json"
+    env.main(["--steps", "closebook", "--status-file", str(status)], now_utc=at)
+    st = json.loads(status.read_text())
+    capt = st["capture"]
+    assert capt["status"] == "partial", capt
+    spx, vix = capt["captures"]["SPX"], capt["captures"]["VIX"]
+    assert spx["status"] == "rejected"
+    assert spx["reason"].startswith("not a live book (0% of near-ATM lines two-sided)")
+    assert (vix["status"], vix["book_state"]) == ("captured", "closing")
+    d = env.DATA / "options" / "cboe"
+    assert [p.name.split("_")[0] for p in d.glob("*.parquet")] == ["vix"]
+    rec = json.loads(next((env.DATA / "runs").glob("run_*_close.json")).read_text())
+    assert rec["capture"]["captures"]["SPX"]["status"] == "rejected"
+    assert rec["capture"]["captures"]["SPX"]["reason"] == spx["reason"]
+    assert "::warning title=Cboe capture::" in capsys.readouterr().out
+    assert any("SPX rejected (not a live book" in w for w in st["warnings"])
 
 
 def test_the_closebook_step_stores_nothing_once_the_feed_shows_another_book(env, monkeypatch):
