@@ -7038,20 +7038,21 @@ def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(d
     the departures (the rate, the quote time, the forward, PM lines for AM
     monthlies, ...). Both now say 'the Cboe formula, with N listed departures
     (Surface)', N counted from that list on the rendered Surface page. The
-    Overview's item is on the headline fit's session (the newest surface session
-    unless that one has no fit), so its N is that session's replication's."""
+    Overview's item links to that page, so it cites the session Surface shows (the
+    newest surface session, with or without a fit; no Heston figure sits beside the
+    replication): with 2026-10-30 built without a fit it cited 2026-10-29's +0.28 and
+    6 departures beside a Surface page showing 2026-10-30's +1.32 and 3."""
     m = re.search(r"<summary>Where the replication departs from Cboe</summary>(.*?)</details>",
                   pages["/surface"], re.DOTALL)
     rep = json.loads(_surface_file("vix_replication.json").read_text())
-    ov = json.loads(_overview_surface_file(dash, "vix_replication.json").read_text())
-    n_ov = len(ov.get("deviations") or [])
+    shown = _surface_file("vix_replication.json").parent.name
     works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
-    if (ov["indices"].get("VIX") or {}).get("gap_vs_official") is not None and n_ov:
-        assert f"by the Cboe formula, with {dash.plural(n_ov, 'listed departure')} (Surface)." in works
-    else:
-        assert "listed departure" not in works
+    gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
+    if gap is not None:
+        assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
+                f"{shown}, by the Cboe formula") in _tight(works)
     if m is None:       # no replication on this session: no claim either way
-        assert "listed departure" not in pages["/model-risk"]
+        assert "listed departure" not in pages["/"] + pages["/model-risk"]
         return
     n = len(re.findall(r"<li>", m.group(1)))
     assert n > 0
@@ -7063,6 +7064,8 @@ def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(d
                       pages["/surface"], re.DOTALL)
     assert (notes is not None) == bool(rep.get("gap_notes"))
     tail = f"with {n} listed departure{'' if n == 1 else 's'} (Surface)"
+    if gap is not None:
+        assert f"by the Cboe formula, {tail}." in works
     mr = _visible_text(pages["/model-risk"])
     assert f"Cboe VIX formula on the stored two-sided chain, {tail}; a gap points" in mr
     for html in (pages["/"], pages["/model-risk"]):
@@ -8473,6 +8476,29 @@ def test_the_overview_and_calibration_cite_the_fit_when_the_newest_surface_has_n
     fit_cal = dash._load_pickle(data / "calibrations" / f"joint_cal_{fit}.pkl")
     for part in _fit_chain_parts(data, fit_cal, fit):
         assert part in text, (part, text)
+
+
+def test_the_overview_replication_item_cites_the_session_surface_shows(dash, no_fit):
+    """The Overview's 'VIX replicated from the stored chain' item links to Surface's
+    #vix-replication, which shows the newest surface session. It cited the headline
+    fit's session instead, so with the newest session built without a fit it read
+    '+1.32 index pts … on 2026-10-29, … with 6 listed departures (Surface)' beside a
+    Surface page showing 2026-11-02's +1.92 and 3 departures. No Heston figure is
+    paired with the replication, so the item now cites the session Surface shows:
+    its gap, its date, and N counted from the departures that page lists."""
+    data, newest = no_fit["data"], no_fit["session"]
+    rep = json.loads((data / "surface" / newest / "vix_replication.json").read_text())
+    gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
+    works = _tight(" ".join(_visible_text("<body>" + it) for it in _findings(no_fit["/"])[0][2]))
+    if gap is None:
+        assert "VIX replicated from the stored chain" not in works
+        return
+    m = re.search(r"<summary>Where the replication departs from Cboe</summary>(.*?)</details>",
+                  no_fit["/surface"], re.DOTALL)
+    n = len(re.findall(r"<li>", m.group(1))) if m else 0
+    tail = f", with {dash.plural(n, 'listed departure')} (Surface)" if n else ""
+    assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
+            f"{newest}, by the Cboe formula{tail}.") in works, works
 
 
 def _fit_chain_parts(data: Path, cal: dict, session: str) -> list[str]:

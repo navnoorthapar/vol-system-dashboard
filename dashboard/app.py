@@ -5076,8 +5076,10 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
             f"median {_fmt(sr['median_abs_hs'], '.2f')} half-spreads from the mid, "
             f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask, on the held-out strikes of "
             f"{sr['session']}{newer}."))
+        # the replication of the session Surface shows (the newest surface session): no
+        # Heston figure sits beside it, and the item links to that page's replication
         try:
-            rep = artifacts.load_surface(DATA, sr["session"])
+            rep = artifacts.load_surface(DATA)
         except artifacts.ArtifactError:
             rep = {}
         indices = ((rep.get("vix") or {}).get("indices") or {}) if rep.get("state") == "ok" else {}
@@ -5087,7 +5089,7 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
             works.append(item(
                 "VIX replicated from the stored chain", "surface.html#vix-replication",
                 f"{signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
-                f"{sr['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."))
+                f"{rep['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."))
     arc = p2.get("archive") or {}
     if arc.get("n_legacy") is not None:
         # The job stores a fit only when it passes the gate, so 'k of k current fits

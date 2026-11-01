@@ -516,9 +516,10 @@ Item = tuple[str, str, Parts, str]          # (link, lead, parts, note)
 
 
 def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
-    """'Works': the surface on held-out strikes, the VIX replication (its stored gap
-    checked against replicated − official close), the gate, and Heston's ATM skew
-    when it is within 10% of the market's at every listed expiry."""
+    """'Works': the surface on held-out strikes (the headline fit's session), the VIX
+    replication of the session Surface shows (its stored gap checked against replicated
+    − official close), the gate, and Heston's ATM skew when it is within 10% of the
+    market's at every listed expiry."""
     items: list[Item] = []
     sh = surface_headline(f)
     if sh and sh["cur"]["mhs"] is not None:
@@ -526,7 +527,10 @@ def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
         items.append(("surface.html#scorecard", "Arbitrage-free SVI surface",
                       [c["mhs"], c["inside"], sh["sess"], *([sh["newer"]] if sh["newer"] else [])],
                       "scorecard.json out_of_sample of the headline fit's session"))
-        rp = f"surface/{sh['sess']}/vix_replication.json"
+        # the replication of the session the Surface page shows (the newest surface session),
+        # which the item links to, not the headline fit's: no Heston figure is paired with it
+        shown = store.surface_sessions()[-1]
+        rp = f"surface/{shown}/vix_replication.json"
         rep = store.json(rp) if (store.root / rp).exists() else {}
         ix = (rep.get("indices") or {}).get("VIX") or {}
         gap = om.finite(ix.get("gap_vs_official"))
@@ -539,8 +543,9 @@ def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
                       rep_v - off)
             n_dep = om.vix_departures(rep)
             items.append(("surface.html#vix-replication", "VIX replicated from the stored chain",
-                          [gap, sh["sess"], *([float(n_dep)] if n_dep else [])],
-                          "gap from vix_replication.json; departures are its listed deviations"))
+                          [gap, shown, *([float(n_dep)] if n_dep else [])],
+                          "gap from vix_replication.json of the session Surface shows; departures are "
+                          "its listed deviations"))
     legacy = sum(r["legacy"] for r in f["arc"])
     cur = [r for r in f["arc"] if not r["legacy"]]
     n_ok = sum(r["ok"] for r in cur)

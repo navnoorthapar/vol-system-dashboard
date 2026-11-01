@@ -939,6 +939,38 @@ class TestRecomputeAudit:
         assert sh["newer"] is None
         assert ov.NEWER.startswith("the headline fit’s session (Surface shows the newer")
 
+    def test_its_replication_item_is_the_session_surface_shows(self, monkeypatch, tmp_path):
+        """The Overview's VIX-replication item links to Surface, which shows the newest
+        surface session, and no Heston figure is paired with it, so the page cites that
+        session's replication even when the headline fit's session is older. The audit
+        expected the headline fit's session's gap, date and departures; it now expects the
+        session Surface shows (the newest stored surface session)."""
+        import importlib
+
+        from bs4 import BeautifulSoup
+
+        rc = _recompute(monkeypatch)
+        ov = importlib.import_module("recompute.overview")
+        for s, gap, devs in (("2026-10-29", 1.32, 6), ("2026-11-02", 1.92, 3)):
+            d = tmp_path / "surface" / s
+            d.mkdir(parents=True)
+            for name in ("residuals.parquet", "surface.json"):
+                (d / name).write_text("")
+            (d / "vix_replication.json").write_text(json.dumps({
+                "indices": {"VIX": {"gap_vs_official": gap, "replicated": 20.0 + gap, "official": 20.0}},
+                "deviations": [f"departure {i}" for i in range(devs)]}))
+
+        def row(s, m, mhs):
+            return {"session": s, "model": m, "n": 10, "mhs": mhs, "inside": 30.0, "butterfly": 0,
+                    "calendar": 0}
+        f = {"scores": [row("2026-10-29", "svi_cal", 1.74), row("2026-10-29", "heston_v2", 10.1),
+                        row("2026-11-02", "svi_cal", 1.56)],
+             "head": {"session": "2026-10-29"}, "arc": [], "skew": None}
+        a = rc.core.Audit("t", BeautifulSoup("", "lxml"))
+        items = {link: parts for link, _, parts, _ in ov.works_items(a, rc.data.Store(tmp_path), f)}
+        assert items["surface.html#vix-replication"] == [1.92, "2026-11-02", 3.0]
+        assert items["surface.html#scorecard"][2:] == ["2026-10-29", "2026-11-02"]
+
     def test_it_checks_the_overviews_stale_fit_banner_and_its_cause(self, monkeypatch, tmp_path):
         """A Friday without a fit followed by a skipped one left the headline fit 2 NYSE
         sessions old; the Overview then shows a stale banner the audit never checked, its
