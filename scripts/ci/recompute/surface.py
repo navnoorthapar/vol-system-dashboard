@@ -2083,6 +2083,7 @@ def history(a: Audit, c: Ctx) -> None:
     if not same_len(a, P_HIST, "rows", trs, idx):
         return
     gaps = False
+    unfit: list[str] = []
     for tr, r in zip(trs, list(reversed(idx))):
         name = r["session"]
         x = by.get(name)
@@ -2101,6 +2102,8 @@ def history(a: Audit, c: Ctx) -> None:
             v = M.num(o.get("median_abs_hs"))
             cell(a, P_HIST, f"{name} {M.label(m)} OOS median |z| (its scorecard.json)", td[3 + i], v)
             gaps |= v is None
+            if v is None and m.lower().startswith("heston"):
+                unfit.append(name)
             if x is not None and x.sc and v is not None:
                 a.num(P_HIST, f"{name} {M.label(m)} OOS median |z| (its residual table)", td[3 + i],
                       oos_stats(c, m, x)["median_abs_hs"])
@@ -2123,12 +2126,47 @@ def history(a: Audit, c: Ctx) -> None:
             cell(a, P_HIST, f"{name} β estimator on the DB chain (— when its implied spot is off the close)",
                  td[j + 3], be["ratio"] if be else None)
     note = a.one("#surface-history p.note")
-    nums(a, P_HIST, "note (sessions)", note, [len(idx)])
+    why = unfitted_causes(c.store, unfit)
+    nums(a, P_HIST, "note (sessions; the run records' reasons)", note,
+         [len(idx), *(v for v, _, _ in numbers_in(why))], dates=["-".join(d) for d in DATE.findall(why)])
     a.equal(P_HIST, "note: what a dash in a model's column means (shown when a cell is one)",
             HIST_DASH in text_of(note) if note is not None else None, gaps)
+    a.equal(P_HIST, "note: why Heston has no fit, where the run records say (data_store/runs)",
+            text_of(note).split(HIST_UNFIT, 1)[1] if HIST_UNFIT in text_of(note) else "",
+            f"{norm(why)}." if why else "")
 
 
 HIST_DASH = "A dash in a model’s column: the model is not scored on that session"
+HIST_UNFIT = "Where the job’s run records say why Heston has none: "
+
+
+def unfitted_causes(store: Store, sessions: Sequence[str]) -> str:
+    """Why the history's sessions without a Heston figure have no fit, rebuilt from the
+    job's run records (data_store/runs/run_*.json, schema run_ledger/1, by run time):
+    per session the newest run that tried to fit it and stored nothing, a rejection
+    first; sessions grouped by what happened and the reason recorded, in session order
+    of each group's first; a session no record names is left out."""
+    recs = []
+    for path in sorted((store.root / "runs").glob("run_*.json")):
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("schema") == "run_ledger/1" and rec.get("run_utc"):
+            recs.append(rec)
+    recs.sort(key=lambda r: str(r["run_utc"]))
+    groups: dict[tuple[str, str], list[str]] = {}
+    for s in sorted(set(sessions)):
+        on = [r["calibration"] for r in recs if isinstance(r.get("calibration"), dict)
+              and str(r["calibration"].get("session")) == s
+              and r["calibration"].get("status") in ("rejected", "skipped", "failed")]
+        if on:
+            cal = ([x for x in on if x["status"] == "rejected"] or on)[-1]
+            groups.setdefault((cal["status"], str(cal.get("reason") or "no reason recorded").rstrip(".")),
+                              []).append(s)
+    lead = {"rejected": "the gate rejected the fit of ", "skipped": "the job did not fit "}
+    return "; ".join((f"{lead[k]}{', '.join(ss)}" if k in lead else f"the fit of {', '.join(ss)} failed")
+                     + f" — {why}" for (k, why), ss in groups.items())
 
 
 def history_models(c: Ctx) -> list[str]:

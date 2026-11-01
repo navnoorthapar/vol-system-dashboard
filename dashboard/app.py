@@ -906,6 +906,29 @@ def _run_record_cause(session: str, records: list[dict]) -> str | None:
     return f"{head}{more}; the {session} fit is shown."
 
 
+def unfitted_causes(sessions: Iterable[str], records: list[dict]) -> str:
+    """Why sessions have no Heston fit, from the job's run records as the stale
+    banner reads them (_run_record_cause): for each session, the newest run that
+    tried to fit it and stored nothing, a rejection first, grouped by what
+    happened and the reason recorded: 'the gate rejected the fit of 2026-11-02 —
+    kappa pinned at bound (kappa=0.10); the job did not fit 2026-10-30 — no SPX
+    option chain returned'. A session no run record names is left out; '' when none is
+    named. The Surface history's note said each dash's scorecard 'says why',
+    and the scorecard says only that no fit is stored."""
+    groups: dict[tuple[str, str], list[str]] = {}
+    for s in sorted(set(sessions)):
+        tried = [r for r in records if str((r.get("calibration") or {}).get("session")) == s
+                 and r["calibration"].get("status") in ("rejected", "skipped", "failed")]
+        if not tried:
+            continue
+        c = ([r for r in tried if r["calibration"]["status"] == "rejected"] or tried)[-1]["calibration"]
+        why = str(c.get("reason") or "no reason recorded").rstrip(".")
+        groups.setdefault((str(c["status"]), why), []).append(s)
+    said = {"rejected": "the gate rejected the fit of {}", "skipped": "the job did not fit {}",
+            "failed": "the fit of {} failed"}
+    return "; ".join(f"{said[k].format(', '.join(ss))} — {why}" for (k, why), ss in groups.items())
+
+
 def calibration_stale_cause(session: str | None, data_dir: Path | None = None,
                             rows: list[dict] | None = None) -> str | None:
     """Why the headline fit is older than the newest session, from what the store holds.
@@ -6908,6 +6931,10 @@ def surface_extras(d: dict, surf: dict) -> None:
         mk = history_model_keys(models, (r["model"] for r in oos_all))
         d["history_models"] = [{"key": m, "label": model_short(m)} for m in mk]
         d["history_gaps"] = any(oos_by.get((r["session"], m)) is None for r in idx for m in mk)
+        # why Heston has no figure on a session, where the job's run records say
+        hk = heston_model_key(mk)
+        unfit = [r["session"] for r in idx if hk and oos_by.get((r["session"], hk)) is None]
+        d["history_unfitted"] = unfitted_causes(unfit, load_run_records(DATA)) if unfit else ""
         d["surface_history"] = [{"session": r["session"], "n": r.get("n_quotes"),
                                  "arb_out": r.get("arbitrage_quotes_outside_spread"),
                                  "vix_rep": _num(r.get("vix_replicated")),

@@ -917,6 +917,35 @@ class TestRecomputeAudit:
         assert S.history_models(ns(s=own, all=[own])) == ["essvi", "svi", "svi_cal"]
         assert "the model is not scored on that session" in S.HIST_DASH
 
+    def test_its_history_note_gives_the_run_records_reason_for_a_session_without_a_fit(self, monkeypatch,
+                                                                                       tmp_path):
+        """The Surface history's note now says why a session has no Heston figure where the
+        job's run records say (a rejection first, else the newest run that stored no fit),
+        grouped by what happened and the recorded reason. The audit rebuilds that text from
+        data_store/runs itself, so its sessions and numbers are checked, not only counted."""
+        import importlib
+
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        for i, (s, status, why) in enumerate((
+                ("2026-10-30", "skipped", "no SPX option chain returned"),
+                ("2026-11-02", "rejected", "kappa pinned at bound (kappa=0.10)."),
+                ("2026-11-02", "skipped", "a later slot found no book"),
+                ("2026-11-06", "skipped", "no SPX option chain returned"),
+                ("2026-11-09", "ok", None))):
+            (runs / f"run_{i}.json").write_text(json.dumps({
+                "schema": "run_ledger/1", "run_utc": f"2026-11-1{i}T00:00:00+00:00",
+                "calibration": {"session": s, "status": status, "reason": why}}))
+        (runs / "run_9.json").write_text("not json")
+        store = rc.data.Store(tmp_path)
+        assert S.unfitted_causes(store, ["2026-11-06", "2026-10-30", "2026-11-02", "2026-11-09"]) == (
+            "the job did not fit 2026-10-30, 2026-11-06 — no SPX option chain returned; "
+            "the gate rejected the fit of 2026-11-02 — kappa pinned at bound (kappa=0.10)")
+        assert S.unfitted_causes(store, ["2026-11-09"]) == ""
+        assert S.HIST_UNFIT == "Where the job’s run records say why Heston has none: "
+
     def test_its_overview_cites_the_fit_and_names_a_newer_surface_session(self, monkeypatch):
         """The Overview's surface item and key result cite the headline fit's session (the
         surface and Heston on one session's quotes). When a newer surface session has no

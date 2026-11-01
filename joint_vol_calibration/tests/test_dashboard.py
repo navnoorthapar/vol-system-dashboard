@@ -8330,7 +8330,8 @@ def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
     scorecard lists Heston as not scored, with the producer's reason and note, and its
     residual table and index row hold no Heston rows; the headline fit is an earlier
     session's. Made from the newest committed surface session by leaving out its fit
-    and its Heston rows. Returns (data dir, that session)."""
+    and its Heston rows, with the run record the bot writes for a fit its gate
+    rejected. Returns (data dir, that session)."""
     from types import SimpleNamespace
     from typing import Any
 
@@ -8340,14 +8341,20 @@ def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
     data.mkdir()
     newest = _surface_file("scorecard.json").parent.name
     for child in SHIPPED.iterdir():
-        if child.name not in ("calibrations", "surface"):
+        if child.name not in ("calibrations", "surface", "runs"):
             (data / child.name).symlink_to(child)
     for sub, keep in (("calibrations", lambda c: c.name != f"joint_cal_{newest}.pkl"),
-                      ("surface", lambda c: c.name not in (newest, "index.json"))):
+                      ("surface", lambda c: c.name not in (newest, "index.json")),
+                      ("runs", lambda c: True)):
         (data / sub).mkdir()
-        for child in (SHIPPED / sub).iterdir():
+        for child in (SHIPPED / sub).iterdir() if (SHIPPED / sub).is_dir() else []:
             if keep(child):
                 (data / sub / child.name).symlink_to(child)
+    # the run record of the fit the gate rejected (scripts/cloud_refresh.py run_record)
+    (data / "runs" / f"run_{newest.replace('-', '')}T235959Z_book.json").write_text(json.dumps({
+        "schema": "run_ledger/1", "run_utc": f"{newest}T23:59:59+00:00", "slot": "book",
+        "session": newest, "calibration": {"session": newest, "status": "rejected",
+                                           "reason": "kappa pinned at bound (kappa=0.10)"}}))
     d = data / "surface" / newest
     shutil.copytree(SHIPPED / "surface" / newest, d)
     sc = json.loads((d / "scorecard.json").read_text())
@@ -8437,6 +8444,33 @@ def test_a_surface_session_without_a_fit_keeps_heston_in_the_history(dash, no_fi
         assert rows[s_][col] == dash._fmt(oos.get((s_, "heston_v2")), ".2f"), s_
     note = re.search(r'id="surface-history".*?<p class="note">(.*?)</p>', html, re.DOTALL).group(1)
     assert "A dash in a model’s column: the model is not scored on that session" in _html_unescape(note)
+
+
+def test_the_surface_history_gives_the_run_records_reason_for_a_session_without_a_fit(dash, no_fit):
+    """The history note said a dash's session's scorecard 'says why', but the scorecard
+    says only that no fit is stored ('rejected by its gate or not run'), and on a Friday
+    the fit is one session old, so no stale banner gives the reason either. The note now
+    reads the job's run records as the banner does: on the no-fit view, whose run record
+    says the gate rejected the newest session's fit, it names that session and the
+    recorded reason."""
+    data, newest = no_fit["data"], no_fit["session"]
+    rec = json.loads(next((data / "runs").glob(f"run_{newest.replace('-', '')}T*_book.json")).read_text())
+    why = rec["calibration"]["reason"].rstrip(".")
+    note = re.search(r'id="surface-history".*?<p class="note">(.*?)</p>', no_fit["/surface"], re.DOTALL)
+    text = _visible_text("<body>" + note.group(1))
+    assert "scorecard says why" not in text
+    assert (f"A dash in a model’s column: the model is not scored on that session. Where the job’s run "
+            f"records say why Heston has none: the gate rejected the fit of {newest} — {why}.") in text, text
+    def run(s, status, why):
+        return {"calibration": {"session": s, "status": status, "reason": why}}
+    assert dash.unfitted_causes(["2026-10-30", "2026-11-02", "2026-11-06"], [
+        run("2026-10-30", "skipped", "no SPX option chain returned"),
+        run("2026-11-02", "rejected", "kappa pinned at bound."),
+        run("2026-11-02", "skipped", "a later slot"),
+        run("2026-11-06", "skipped", "no SPX option chain returned"),
+    ]) == ("the job did not fit 2026-10-30, 2026-11-06 — no SPX option chain returned; "
+           "the gate rejected the fit of 2026-11-02 — kappa pinned at bound")
+    assert dash.unfitted_causes(["2026-10-30"], []) == ""
 
 
 def test_the_overview_and_calibration_cite_the_fit_when_the_newest_surface_has_none(dash, no_fit):
