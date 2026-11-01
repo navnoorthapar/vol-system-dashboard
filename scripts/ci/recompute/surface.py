@@ -2187,6 +2187,13 @@ def history(a: Audit, c: Ctx) -> None:
     gap_by_book(a, c, [by.get(r["session"]) for r in idx])
 
 
+GAP_NOTE_CLOSING = "A closing book is set against the Cboe close"
+GAP_NOTE_NO_CLOSING = "No session here was built from a closing book"
+GAP_NOTE_OVERNIGHT = "An overnight book was quoted hours after the close"
+GAP_NOTE_YAHOO = "A Yahoo chain records no quote time"
+GAP_NOTE_OTHER = "Another Cboe book was quoted"
+
+
 def gap_by_book(a: Audit, c: Ctx, sessions: list[M.Session | None]) -> None:
     """FUND_GRADE_PLAN 0.8: the replication gap (replicated − the DB's Cboe close) of the
     sessions in index.json, grouped by the book each was built from (M.replication_book):
@@ -2215,7 +2222,16 @@ def gap_by_book(a: Audit, c: Ctx, sessions: list[M.Session | None]) -> None:
             nums(a, P_HIST, f"{book}: range of the gap (lowest, highest)", td[3], [xs[0], xs[-1]])
         else:
             a.text(P_HIST, f"{book}: range (one session)", td[3], "—")
-    statics(a, P_HIST, "gap-by-book note", a.one("#vix-gap-by-book-note"), [])
+    note = a.one("#vix-gap-by-book-note")
+    statics(a, P_HIST, "gap-by-book note", note, [])
+    # the note explains the books in the table, and no other
+    books = {b for b, _ in want}
+    for phrase, shown in ((GAP_NOTE_CLOSING, M.BOOK_CLOSING in books),
+                          (GAP_NOTE_NO_CLOSING, M.BOOK_CLOSING not in books),
+                          (GAP_NOTE_OVERNIGHT, M.BOOK_OVERNIGHT in books),
+                          (GAP_NOTE_YAHOO, M.BOOK_YAHOO in books), (GAP_NOTE_OTHER, M.BOOK_OTHER in books)):
+        a.equal(P_HIST, f"gap-by-book note: {'says' if shown else 'does not say'} {phrase!r}",
+                phrase in text_of(note), shown)
 
 
 # ── the page ──────────────────────────────────────────────────────────────────

@@ -1988,6 +1988,17 @@ def test_the_vix_gap_is_given_by_the_book_each_session_was_built_from(dash, page
         assert row[2] == dash.signed(w["median"], ".2f")
         assert row[3] == ("—" if w["lo"] is None else
                           f"{dash.signed(w['lo'], '.2f')} to {dash.signed(w['hi'], '.2f')}")
+    # the note below explains the books in the table and no other (the live page had only
+    # Yahoo-chain rows under a note about closing and overnight books)
+    note = re.search(r'<p class="note" id="vix-gap-by-book-note">(.*?)</p>', html, re.DOTALL)
+    text = _html.unescape(re.sub(r"\s+", " ", note.group(1)))
+    in_table = {w["book"] for w in want}
+    for book, phrase in (("closing", "A closing book is set against the Cboe close"),
+                         ("overnight", "An overnight book was quoted hours after the close"),
+                         ("yahoo", "A Yahoo chain records no quote time"),
+                         ("other", "Another Cboe book was quoted")):
+        assert (phrase in text) is (book in in_table), book
+    assert ("No session here was built from a closing book" in text) is ("closing" not in in_table)
     # the tile: the range over the sessions of the page's own book
     newest = max(s for s in hist)
     own = books.get(newest)

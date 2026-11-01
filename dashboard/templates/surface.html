@@ -264,7 +264,8 @@
       <tbody>{% for g in d.vix_gap_by_book %}<tr><td>{{ g.label }}</td><td class="num">{{ g.n|fmt(',') }}</td><td class="num">{{ g.median|signed('.2f') }}</td><td class="num">{% if g.lo is not none %}<span class="nowrap">{{ g.lo|signed('.2f') }} to {{ g.hi|signed('.2f') }}</span>{% else %}—{% endif %}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
-    <p class="note" id="vix-gap-by-book-note">Only a closing book is set against the Cboe close at the instant that close is computed, so its gap is the replication’s own error. An overnight book was quoted hours after the close, so its gap also holds the market’s move overnight; a Yahoo chain records no quote time, so when its quotes stood is unknown.</p>
+    {% set gap_books = d.vix_gap_by_book|map(attribute='book')|list %}
+    <p class="note" id="vix-gap-by-book-note">{% if 'closing' in gap_books %}A closing book is set against the Cboe close at the instant that close is computed, so its gap is the replication’s own error.{% else %}No session here was built from a closing book, the one book set against the Cboe close at the instant that close is computed.{% endif %}{% if 'overnight' in gap_books %} An overnight book was quoted hours after the close, so its gap also holds the market’s move overnight.{% endif %}{% if 'yahoo' in gap_books %} A Yahoo chain records no quote time; the bot’s are downloaded overnight, hours after the close, so their gap may hold the overnight move too.{% endif %}{% if 'other' in gap_books %} Another Cboe book was quoted neither at the close nor overnight.{% endif %}</p>
     {% endif %}
   {% endcall %}{% endif %}
 </div>
