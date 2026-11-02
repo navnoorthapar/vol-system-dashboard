@@ -651,6 +651,8 @@ def test_each_session_names_the_book_its_vix_gap_was_measured_on():
             {"book": ds.BOOK_YAHOO, "gap": 0.09}, {"book": ds.BOOK_CLOSING, "gap": -0.05},
             {"book": ds.BOOK_OVERNIGHT, "gap": -0.35}, {"book": ds.BOOK_OVERNIGHT, "gap": 0.28},
             {"book": ds.BOOK_YAHOO, "gap": None}, {"book": None, "gap": 0.5}]
+    for i, r in enumerate(rows):
+        r["session"] = f"2026-10-{20 - i:02d}"     # listed newest first: each book's are given oldest first
     got = ds.gap_by_book(rows)
     assert [g["book"] for g in got] == [ds.BOOK_CLOSING, ds.BOOK_OVERNIGHT, ds.BOOK_YAHOO]
     for g in got:
@@ -659,4 +661,7 @@ def test_each_session_names_the_book_its_vix_gap_was_measured_on():
         assert g["n"] == len(xs)
         assert g["median"] == pytest.approx(float(np.median(xs)))
         assert (g["lo"], g["hi"]) == ((xs[0], xs[-1]) if len(xs) > 1 else (None, None))
+        # the sessions it is taken over (tier 0.2: the page declares their chains)
+        assert g["sessions"] == sorted(r["session"] for r in rows
+                                       if r["book"] == g["book"] and r["gap"] is not None)
     assert ds.gap_by_book([]) == []

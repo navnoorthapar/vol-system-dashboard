@@ -259,9 +259,9 @@
     <p class="note">{{ d.surface_history|length }} session{{ '' if d.surface_history|length == 1 else 's' }} with a stored chain: a range across sessions, not a sampling interval. The tiles at the top give each model’s range over these sessions (dashed rule).{% if d.history_gaps %} A dash in a model’s column: the model is not scored on that session.{% if d.history_unfitted %} Where the job’s run records say why Heston has none: {{ d.history_unfitted }}.{% endif %}{% endif %}</p>
     {% if d.vix_gap_by_book %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="VIX replication gap by book (scrollable)">
-    <table class="tbl dense" id="vix-gap-by-book"><caption>VIX replicated − Cboe close over the sessions above, by the book each was built from (index points)</caption>
+    <table class="tbl dense" id="vix-gap-by-book"><caption>VIX replicated − Cboe close over the sessions above, by the book each was built from (index points); each session’s chain is named in its row above</caption>
       <thead><tr><th scope="col">Book</th><th scope="col" class="num">Sessions</th><th scope="col" class="num">Median</th><th scope="col" class="num">Range</th></tr></thead>
-      <tbody>{% for g in d.vix_gap_by_book %}<tr><td>{{ g.label }}</td><td class="num">{{ g.n|fmt(',') }}</td><td class="num">{{ g.median|signed('.2f') }}</td><td class="num">{% if g.lo is not none %}<span class="nowrap">{{ g.lo|signed('.2f') }} to {{ g.hi|signed('.2f') }}</span>{% else %}—{% endif %}</td></tr>{% endfor %}</tbody>
+      <tbody>{% for g in d.vix_gap_by_book %}<tr data-chain-over="{% for s_ in g.sessions %}surface:{{ s_ }}{{ ' ' if not loop.last }}{% endfor %}"><td>{{ g.label }}</td><td class="num">{{ g.n|fmt(',') }}</td><td class="num">{{ g.median|signed('.2f') }}</td><td class="num">{% if g.lo is not none %}<span class="nowrap">{{ g.lo|signed('.2f') }} to {{ g.hi|signed('.2f') }}</span>{% else %}—{% endif %}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
     {% set gap_books = d.vix_gap_by_book|map(attribute='book')|list %}

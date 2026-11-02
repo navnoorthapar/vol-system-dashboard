@@ -514,22 +514,24 @@ def replication_book(inputs: Mapping | None) -> str | None:
 
 def gap_by_book(rows: Iterable[Mapping]) -> list[dict]:
     """The replication gap's distribution by book over the stored sessions:
-    [{"book", "label", "n", "median", "lo", "hi"}] from rows carrying "book"
-    (replication_book) and "gap" (replicated − Cboe close), one entry per book
-    with at least one session, in BOOK_LABELS order; lo and hi are None for a
-    single session (a range needs two)."""
-    by: dict[str, list[float]] = {}
+    [{"book", "label", "n", "median", "lo", "hi", "sessions"}] from rows carrying
+    "book" (replication_book), "gap" (replicated − Cboe close) and "session", one
+    entry per book with at least one session, in BOOK_LABELS order; lo and hi are
+    None for a single session (a range needs two); "sessions" are the sessions it
+    is taken over, oldest first (the page declares their chains: tier 0.2)."""
+    by: dict[str, list[tuple[float, str]]] = {}
     for r in rows:
         g = _num(r.get("gap"))
         if r.get("book") in BOOK_LABELS and g is not None:
-            by.setdefault(str(r["book"]), []).append(g)
+            by.setdefault(str(r["book"]), []).append((g, str(r.get("session") or "")))
     out = []
     for book, label in BOOK_LABELS.items():
-        xs = sorted(by.get(book, []))
+        xs = sorted(g for g, _ in by.get(book, []))
         if xs:
             two = len(xs) > 1
             out.append({"book": book, "label": label, "n": len(xs), "median": float(np.median(xs)),
-                        "lo": xs[0] if two else None, "hi": xs[-1] if two else None})
+                        "lo": xs[0] if two else None, "hi": xs[-1] if two else None,
+                        "sessions": sorted(s for _, s in by[book])})
     return out
 
 

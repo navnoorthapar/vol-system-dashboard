@@ -2011,9 +2011,15 @@ def test_the_vix_gap_is_given_by_the_book_each_session_was_built_from(dash, page
     col = _table_heads(html, "surface-history-table").index("Book")
     for session, row in hist.items():
         assert row[col] == ds.BOOK_LABELS.get(books.get(session) or "", "—"), session
-    want = ds.gap_by_book([{"book": books.get(s), "gap": g} for s, g in gaps.items()])
+    want = ds.gap_by_book([{"book": books.get(s), "gap": g, "session": s} for s, g in gaps.items()])
     got = cells("vix-gap-by-book")
     assert [r[0] for r in got] == [w["label"] for w in want]
+    # tier 0.2: each row declares the sessions it is taken over (data-chain-over), whose
+    # chains their history rows above name: those of its book with a gap, by the record
+    over = re.findall(r'<tr data-chain-over="([^"]*)">', re.search(
+        r'<table[^>]*id="vix-gap-by-book".*?</table>', html, re.DOTALL).group(0))
+    assert over == [" ".join(f"surface:{s}" for s in sorted(gaps) if books.get(s) == w["book"])
+                    for w in want]
     for row, w in zip(got, want):
         assert row[1] == f"{w['n']:,}"
         assert row[2] == dash.signed(w["median"], ".2f")
@@ -9065,7 +9071,10 @@ def _key_chain(dash, data: Path, key: str) -> dict | None:
 
 # Every panel, page head, Model Risk check, Overview finding and result card declares in
 # data-chain what its numbers are read off: chain keys, 'parts' (its own elements carry
-# keys) or 'none'. A 'none' is listed here with why; any other unit is checked.
+# keys) or 'none'. A 'none' is listed here with why; any other unit is checked. In a
+# 'parts' unit every table with an id declares its rows (a key each, or data-chain-over:
+# the sessions a row aggregating over them is taken over, each named in its own row of
+# the panel), or itself 'none', listed here as 'table:<id>'.
 _BACKTEST = "the backtest, marked at β·VIX with no option prices"
 _NO_CHAIN_UNITS: dict[str, dict[str, str]] = {
     "/": {
@@ -9089,7 +9098,8 @@ _NO_CHAIN_UNITS: dict[str, dict[str, str]] = {
         "limits"), _BACKTEST) | {
         "benchmarks": "Cboe strategy index levels, not an option chain",
         "forecast": "vol forecasts of SPX closes", "research-classifier": "a classifier of rule labels",
-        "label-history": "rule labels"},
+        "label-history": "rule labels",
+        "table:vrp-beta-table": "β·VIX against realised vol of SPX closes, β fixed: no option chain"},
     "/model-risk": {
         "page-head": "counts of checks and models", "inventory": "the model inventory's prose",
         "definitions": "the glossary", "check-calib-age": "a count of NYSE sessions",
@@ -9165,6 +9175,16 @@ def _chain_audit(dash, data: Path, route: str, html: str) -> tuple[list, dict]:
             if not [x for s in scope for x in s.select("[data-chain]")
                     if x.get("data-chain") not in ("none", "parts")]:
                 bad.append((route, uid, "'parts' with no part that names a chain"))
+            # its tables: each row names its chain or the sessions it is taken over (the
+            # by-book gap table), or the table reads no chain (a chart's own data table,
+            # without an id, repeats the chart's, whose unit is checked)
+            for t in (t for s in scope for t in s.select("table[id]")):
+                if t.get("data-chain") == "none":
+                    if f"table:{t['id']}" not in exempt:
+                        bad.append((route, uid, f"table #{t['id']} says it reads no chain but is not listed"))
+                elif any(not tr.get("data-chain") and not tr.get("data-chain-over")
+                         for tr in t.select("tbody tr")):
+                    bad.append((route, uid, f"table #{t['id']} has a row that declares no chain"))
         elif missing := names(" ".join(_own_text(s) for s in scope), dc):
             bad.append((route, uid, "does not name", missing))
     # every other element with keys, inside a unit or not (a row, caption, line or history
@@ -9175,6 +9195,17 @@ def _chain_audit(dash, data: Path, route: str, html: str) -> tuple[list, dict]:
             continue
         if missing := names(_own_text(el), dc):
             bad.append((route, el.get("id") or el.name, "does not name", missing,
+                        re.sub(r"\s+", " ", el.get_text(" "))[:120]))
+    # a row taken over several sessions' chains (data-chain-over: the Surface's gap by book)
+    # names none itself: each must be a key a row of its own panel declares, and names
+    for el in soup.select("main [data-chain-over]"):
+        over = str(el["data-chain-over"]).split()
+        panel = el.find_parent("section")
+        declared = {k for x in (panel.select("[data-chain]") if panel is not None else [])
+                    for k in str(x["data-chain"]).split()}
+        if not over or [k for k in over if k not in declared]:
+            bad.append((route, el.get("id") or el.name, "taken over chains its panel does not name",
+                        [k for k in over if k not in declared] or "no key",
                         re.sub(r"\s+", " ", el.get_text(" "))[:120]))
     return bad, keys_of
 
