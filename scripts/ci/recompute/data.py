@@ -172,6 +172,16 @@ def chain_short(inputs: dict, universe: dict | None = None) -> str | None:
     return f"{SHORT_NAMES.get(w[0], w[0])}, {w[2][0]}, {w[2][-1]}" if w else None
 
 
+def book_short(quote_time: Any, rows: Any, two_sided_rows: Any) -> str:
+    """'Cboe, quotes at 2026-10-30 23:49 UTC, 98.2% of its lines two-sided': a stored
+    Cboe book as the Overview's pipeline panel names it (tier 0.2), its two-sided share
+    from its lines (a book's record holds no near-the-money share)."""
+    share = (f"{float(two_sided_rows) / float(rows) * 100:.1f}% of its lines two-sided"
+             if rows and two_sided_rows is not None else "two-sided share not recorded")
+    clause = f"quotes at {_utc_minutes(quote_time)}" if quote_time else "no quote time"
+    return f"Cboe, {clause}, {share}"
+
+
 def fit_chain_inputs(store: Store, cal: dict, session: str) -> dict:
     """The chain a joint fit was made on, as chain_words reads a surface's inputs: the
     fit's own chain_diagnostics (vendor, quote or fetch time, where T runs from), its

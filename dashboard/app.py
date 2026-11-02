@@ -6178,7 +6178,11 @@ def chain_provenance(surface_json: dict) -> dict | None:
     pv = _chain_provenance(inp, uni, src)
     sh = _num(inp.get("near_atm_two_sided_share"))
     sh = _num(uni.get("near_atm_two_sided_share")) if sh is None else sh
+    # a stored Cboe book's record (book_chain_record) holds its lines and two-sided
+    # lines, not the near-the-money share its quote-state gate reads
+    rows, two = _num(inp.get("book_rows")), _num(inp.get("book_two_sided_rows"))
     pv["share"] = (f"{_fmt(sh * 100, '.1f')}% two-sided near the money" if sh is not None
+                   else f"{_fmt(two / rows * 100, '.1f')}% of its lines two-sided" if rows and two is not None
                    else "two-sided share not recorded")
     return pv
 
@@ -6283,10 +6287,28 @@ def fit_chain_of(session: str | None) -> dict | None:
 #   options:<session>  the stored chain data_store/options/spx_<session>.parquet itself
 #   live               the live Yahoo capture behind β (BETA_LIVE_CAPTURE)
 #   ledger:<session>   the book the forward ledger of that session marks on
+#   book:<name>        a stored Cboe book (options/cboe/<name>.json, or the manifest
+#                      options/cboe_manifest/<name>.json of one held privately)
 # Several keys are space-separated. 'parts' marks a unit whose chain-derived numbers sit
 # in elements of their own with a key; 'none' a unit with no number read off a chain.
 CHAIN_KEY_LABELS = {"surface": "Chain", "fit": "Fit chain", "cal": "Fit chain", "options": "Chain",
-                    "live": "Chain", "ledger": "Marks"}
+                    "live": "Chain", "ledger": "Marks", "book": "Book"}
+
+
+def book_chain_record(name: str, data_dir: Path | None = None) -> dict | None:
+    """A stored Cboe book in surface.json's shape, from its record: beside the raw
+    book (data_store/options/cboe/<name>.json) or the manifest of one held in the
+    private store (options/cboe_manifest/<name>.json, the same fields): Cboe, its
+    quote time, and its lines and two-sided lines (the Overview's pipeline panel
+    prints those counts)."""
+    for sub in ("cboe", "cboe_manifest"):
+        path = Path(data_dir or DATA) / "options" / sub / f"{name}.json"
+        if path.exists():
+            rec = json.loads(path.read_text())
+            return {"inputs": {"source": "cboe", "quote_time": rec.get("quote_time"),
+                               "book_rows": rec.get("rows"), "book_two_sided_rows": rec.get("two_sided_rows"),
+                               "chain": f"data_store/options/{sub}/{name}.json"}, "universe": {}}
+    return None
 
 
 def options_chain_record(session: str) -> dict | None:
@@ -6340,6 +6362,8 @@ def chain_of_key(key: str) -> dict | None:
         return live_chain_record()
     if kind == "ledger":
         return ledger_chain_record(arg)
+    if kind == "book":
+        return book_chain_record(arg)
     raise ValueError(f"unknown chain key {key!r}")
 
 

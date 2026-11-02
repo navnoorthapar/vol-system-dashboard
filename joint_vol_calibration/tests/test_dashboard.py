@@ -3317,12 +3317,18 @@ def test_overview_names_both_books_of_a_session_with_a_closing_and_an_overnight_
 
     orig = dash.latest_cboe_captures
     monkeypatch.setattr(dash, "latest_cboe_captures", lambda data_dir=None: orig(tmp_path))
+    book = dash.book_chain_record                           # each book's chain read from its record
+    monkeypatch.setattr(dash, "book_chain_record", lambda name, data_dir=None: book(name, tmp_path))
     row = _pipeline_books_text(_visible_text(dash.app.test_client().get("/").get_data(as_text=True)))
-    assert row == (f"SPX {s}: 27,753 lines (27,262 two-sided, 45 expiries), quotes 2026-11-02 23:52:05 UTC "
-                   "(closing book) and 28,734 lines (27,614 two-sided, 45 expiries), quotes 2026-11-03 "
-                   f"07:16:06 UTC (overnight book); VIX {s}: 1,519 lines (1,394 two-sided, 45 expiries), "
-                   "quotes 2026-11-02 23:52:06 UTC (closing book) and 1,520 lines (1,378 two-sided, 45 "
-                   "expiries), quotes 2026-11-03 07:16:04 UTC (overnight book)")
+    row = re.sub(r" ;", ";", row)                 # the text read puts a space where a book's element ends
+    # tier 0.2: each book names its chain, vendor, quote time and two-sided share
+    assert row == (f"SPX {s}: 27,753 lines (27,262 two-sided, 45 expiries), Cboe, quotes at 2026-11-02 23:52 "
+                   "UTC, 98.2% of its lines two-sided (closing book) and 28,734 lines (27,614 two-sided, 45 "
+                   "expiries), Cboe, quotes at 2026-11-03 07:16 UTC, 96.1% of its lines two-sided (overnight "
+                   f"book); VIX {s}: 1,519 lines (1,394 two-sided, 45 expiries), Cboe, quotes at 2026-11-02 "
+                   "23:52 UTC, 91.8% of its lines two-sided (closing book) and 1,520 lines (1,378 two-sided, "
+                   "45 expiries), Cboe, quotes at 2026-11-03 07:16 UTC, 90.7% of its lines two-sided "
+                   "(overnight book)")
 
 
 def test_overview_pipeline_panel_prints_the_deploy_streak(dash, tmp_path, monkeypatch):
@@ -3340,7 +3346,7 @@ def test_overview_pipeline_panel_prints_the_deploy_streak(dash, tmp_path, monkey
         resp = dash.app.test_client().get("/")
         assert _errors(resp) == errors0                      # the streak file is never a loader error
         html = resp.get_data(as_text=True)
-        m = re.search(r'<tr id="deploy-streak">(.*?)</tr>', html, re.DOTALL)
+        m = re.search(r'<tr id="deploy-streak"[^>]*>(.*?)</tr>', html, re.DOTALL)
         return " ".join(_visible_text("<body>" + m.group(1)).split()) if m else None
 
     assert row() is None                                     # no file: no row, no error
@@ -8928,8 +8934,9 @@ def _vendor_store(dash, tmp_path: Path, vendor: str, no_diag: bool = False) -> t
     data = tmp_path / "data_store"
     data.mkdir()
     for child in SHIPPED.iterdir():
-        if child.name not in ("surface", "calibrations"):
+        if child.name not in ("surface", "calibrations", "options"):
             (data / child.name).symlink_to(child)
+    _link_options(data, two_books=vendor == "cboe")
     (data / "calibrations").mkdir()
     for child in (SHIPPED / "calibrations").iterdir():
         if child.name != "diagnostics":
@@ -8963,9 +8970,40 @@ def _vendor_store(dash, tmp_path: Path, vendor: str, no_diag: bool = False) -> t
     return data, moved
 
 
+def _link_options(data: Path, two_books: bool) -> None:
+    """``data``/options as committed, linked file by file. ``two_books``: the newest
+    session with SPX books stored also holds an overnight (Global Trading Hours) book
+    after its closing one, as the book slot stores one after a weekday close slot
+    (FUND_GRADE_PLAN 0.8; the Overview's pipeline panel then names both), unless it
+    has one already: a record beside the newest book, quoted three hours later."""
+    (data / "options").mkdir()
+    for child in (SHIPPED / "options").iterdir():
+        if child.name != "cboe":
+            (data / "options" / child.name).symlink_to(child)
+    cb = data / "options" / "cboe"
+    cb.mkdir()
+    for child in (SHIPPED / "options" / "cboe").iterdir():
+        (cb / child.name).symlink_to(child)
+    recs = {p.stem: json.loads(p.read_text()) for p in cb.glob("spx_*.json")}
+    if not two_books or not recs:
+        return
+    newest = max(str(r["session"]) for r in recs.values())
+    mine = [r for r in recs.values() if str(r["session"]) == newest]
+    if any(r.get("book_state") == "gth" for r in mine):
+        return
+    base = max(mine, key=lambda r: str(r["quote_time"]))
+    qt = pd.Timestamp(base["quote_time"]) + pd.Timedelta(hours=3)
+    fetched = qt + pd.Timedelta(minutes=15)
+    (cb / f"spx_{newest}_{fetched:%H%M%S}Z.json").write_text(json.dumps(
+        {**base, "book_state": "gth", "quote_time": f"{qt:%Y-%m-%dT%H:%M:%S}Z",
+         "fetched_at": f"{fetched:%Y-%m-%dT%H:%M:%S}Z", "rows": int(base["rows"]) + 974,
+         "two_sided_rows": int(base["two_sided_rows"]) + 345}))
+
+
 # the states the bot publishes that change which chain a number is read off: the newest
-# sessions Yahoo downloads or Cboe books, and a newest fit whose diagnostics timed out
-# (the joint-fit card then reads the newest diagnosed session's fit)
+# sessions Yahoo downloads or Cboe books (with a closing and an overnight book), and a
+# newest fit whose diagnostics timed out (the joint-fit card then reads the newest
+# diagnosed session's fit)
 _CHAIN_VIEWS = {"yahoo": ("yahoo", False), "cboe": ("cboe", False), "yahoo-no-diagnostics": ("yahoo", True)}
 
 
@@ -9061,6 +9099,12 @@ def _key_chain(dash, data: Path, key: str) -> dict | None:
         at = pd.Timestamp(live["as_of_et"]).tz_localize("America/New_York").tz_convert("UTC")
         return dash.chain_provenance({"inputs": {"source": "yfinance",
                                                  "fetched_at": at.strftime("%Y-%m-%dT%H:%M:%SZ")}})
+    if kind == "book":                    # a stored Cboe book's record, or its private-store manifest
+        rec = next(json.loads(p.read_text()) for sub in ("cboe", "cboe_manifest")
+                   for p in [data / "options" / sub / f"{arg}.json"] if p.exists())
+        return dash.chain_provenance({"inputs": {"source": "cboe", "quote_time": rec["quote_time"],
+                                                 "book_rows": rec.get("rows"),
+                                                 "book_two_sided_rows": rec.get("two_sided_rows")}})
     if kind == "ledger":
         inp = json.loads((data / "forward" / f"ledger_{arg}.json").read_text())["inputs"]
         return dash.chain_provenance({"inputs": {
@@ -9072,16 +9116,20 @@ def _key_chain(dash, data: Path, key: str) -> dict | None:
 # Every panel, page head, Model Risk check, Overview finding and result card declares in
 # data-chain what its numbers are read off: chain keys, 'parts' (its own elements carry
 # keys) or 'none'. A 'none' is listed here with why; any other unit is checked. In a
-# 'parts' unit every table with an id declares its rows (a key each, or data-chain-over:
-# the sessions a row aggregating over them is taken over, each named in its own row of
-# the panel), or itself 'none', listed here as 'table:<id>'.
+# 'parts' unit every table with an id declares each row (keys; data-chain-over: the
+# sessions a row aggregating over them is taken over, each named in its own row of the
+# panel; 'parts'; or 'none', its table listed here as 'rows:<id>'), or itself 'none',
+# listed here as 'table:<id>'.
 _BACKTEST = "the backtest, marked at β·VIX with no option prices"
 _NO_CHAIN_UNITS: dict[str, dict[str, str]] = {
     "/": {
         "state-regime": "the rule label and its inputs: VIX, VVIX and SPX closes",
         "state-ts": "VIX index closes", "state-pdv": "VIX against the PDV forecast of SPX closes",
         "vx-curve": "VX futures settlements, not an option chain", "vix-ratio": "VIX and VIX3M closes",
-        "state-pipeline": "counts of stored records; its Cboe book row names each book and quote time",
+        "state-pipeline": "no Cboe book stored yet: counts of stored records (with a book stored it is "
+                          "'parts', each book naming its chain)",
+        "rows:pipeline": "counts of stored records: fits, surface reports, diagnostics, ledger sessions, "
+                         "deploys and the backtest's window (the Cboe books row names each book's chain)",
         "finding:calibration.html#history": "counts of stored fits",
         "finding:research.html#inference": _BACKTEST, "result:research.html#inference": _BACKTEST,
         "finding:research.html#research-classifier": "the classifier's accuracy on rule labels",
@@ -9182,9 +9230,16 @@ def _chain_audit(dash, data: Path, route: str, html: str) -> tuple[list, dict]:
                 if t.get("data-chain") == "none":
                     if f"table:{t['id']}" not in exempt:
                         bad.append((route, uid, f"table #{t['id']} says it reads no chain but is not listed"))
-                elif any(not tr.get("data-chain") and not tr.get("data-chain-over")
-                         for tr in t.select("tbody tr")):
-                    bad.append((route, uid, f"table #{t['id']} has a row that declares no chain"))
+                    continue
+                for tr in t.select("tbody tr"):
+                    rc = tr.get("data-chain")
+                    if not rc and not tr.get("data-chain-over"):
+                        bad.append((route, uid, f"table #{t['id']} has a row that declares no chain"))
+                    elif rc == "none" and f"rows:{t['id']}" not in exempt and tr.get("id") not in exempt:
+                        bad.append((route, uid, f"table #{t['id']} has a 'none' row, its rows not listed"))
+                    elif rc == "parts" and not [x for x in tr.select("[data-chain]")
+                                                if x.get("data-chain") not in ("none", "parts")]:
+                        bad.append((route, uid, f"table #{t['id']} has a 'parts' row naming no chain"))
         elif missing := names(" ".join(_own_text(s) for s in scope), dc):
             bad.append((route, uid, "does not name", missing))
     # every other element with keys, inside a unit or not (a row, caption, line or history
@@ -9256,6 +9311,14 @@ def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
     joint = next(k for k in ov if k.startswith("result:calibration.html#"))
     assert ov[joint] == f"fit:{card_fit}", (ov[joint], card_fit)
     assert ov["state-fit"] == f"fit:{fit}"
+    # the pipeline panel's Cboe books each name their book (tier 0.8: a weekday session's
+    # closing and overnight books, in the cboe view), once any is stored
+    books = [p for sub in ("cboe", "cboe_manifest") for p in (data / "options" / sub).glob("*.json")]
+    assert ov["state-pipeline"] == ("parts" if books else "none")
+    newest_books = re.findall(r'data-chain="book:(spx_[^"]+)"', pages["/"])
+    assert newest_books
+    if chain_view["vendor"] == "cboe":
+        assert len(newest_books) == 2, newest_books
     shown = dash.artifacts.load_surface(data)["session"]
     surface_panels = [k for k in sf if k not in ("page-head", "surface-history")]
     assert len(surface_panels) >= 15
@@ -12360,11 +12423,12 @@ def test_the_recompute_audit_fails_on_one_wrong_digit(recompute_audit, frozen_si
 def test_the_recompute_audit_fails_on_a_wrong_chain(recompute_audit, frozen_site, tmp_path):
     """Tier 0.2: the chain each Surface panel, the Surface history's rows, the
     comparison's captions and the Overview's surface line name is recomputed from the
-    session's surface.json by the audit's own code. In a copy of the frozen site, the
-    delta grid's source line, the history's first Chain cell, the first compared
-    session's chain and the surface line's chain each name another chain, and the
-    smile panel's source line another two-sided share; each is reported as a
-    mismatch."""
+    session's surface.json by the audit's own code, and each Cboe book the Overview's
+    pipeline panel names from its record and stored quotes. In a copy of the frozen
+    site, the delta grid's source line, the history's first Chain cell, the first
+    compared session's chain and the surface line's chain each name another chain,
+    and the smile panel's source line and the pipeline's first book another two-sided
+    share; each is reported as a mismatch."""
     site = tmp_path / "site"
     shutil.copytree(frozen_site, site)
 
@@ -12400,10 +12464,18 @@ def test_the_recompute_audit_fails_on_a_wrong_chain(recompute_audit, frozen_site
     wrong = ("12.3% two-sided near the money" if not share.group(1).startswith("12.3")
              else "45.6% two-sided near the money")
     sf.write_text(html[:share.start(1)] + wrong + html[share.end(1):], encoding="utf-8")
+    # the Overview pipeline's first book with another two-sided share of its lines (tier 0.8's books)
+    html = ov.read_text(encoding="utf-8")
+    bs = re.search(r'data-chain="book:[^"]+">[^<]*?(\d+\.\d)% of its lines two-sided', html)
+    assert bs
+    ov.write_text(html[:bs.start(1)] + ("12.3" if bs.group(1) != "12.3" else "45.6") + html[bs.end(1):],
+                  encoding="utf-8")
     res = recompute_audit.run(site, SHIPPED)
     failed = {(c.page, c.panel, c.label) for c in res["checks"] if not c.ok}
     assert ("Surface", "panel source lines", "#delta-grid source line") in failed
     assert ("Surface", "panel source lines", "#slices source line") in failed
+    assert any(pg == "Overview" and p == "pipeline" and lab.endswith("book 1: its chain (tier 0.2)")
+               for pg, p, lab in failed), sorted(x for x in failed if x[0] == "Overview")
     assert any(p == "#surface-history" and lab.endswith("chain (its surface.json inputs)")
                for _, p, lab in failed)
     assert any(p == "#surface-change" and lab.endswith("its chain (surface.json inputs)")

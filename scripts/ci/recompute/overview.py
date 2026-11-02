@@ -30,7 +30,7 @@ from bs4 import Tag
 
 from . import overview_math as om
 from .core import DATE, Audit, norm, numbers_in, rounds_to, text_of
-from .data import Store, chain_stamp, chain_words, fit_chain_inputs, sessions_between
+from .data import Store, book_short, chain_stamp, chain_words, fit_chain_inputs, sessions_between
 
 P_BADGE, P_FIND, P_KEY = "page badge", "findings", "key results"
 P_REG, P_TS, P_PDV = "regime", "term structure", "implied vs forecast"
@@ -1450,7 +1450,9 @@ def check_pipeline_books(a: Audit, store: Store, books: Tag | None) -> None:
     underlying's newest session (a weekday session can hold its closing and its
     overnight book, FUND_GRADE_PLAN 0.8), oldest quote first, its counts
     recomputed from its stored quotes (a manifest's book is held privately: its
-    record's counts), each named by its recorded state."""
+    record's counts), each named by its recorded state and by its chain (tier 0.2:
+    Cboe, its quote time, the share of its lines that are two-sided, from those
+    counts)."""
     # every book record: beside a raw book committed here, or the manifest of one
     # held in the private data repository
     by_und: dict[str, list[dict[str, Any]]] = {}
@@ -1464,31 +1466,39 @@ def check_pipeline_books(a: Audit, store: Store, books: Tag | None) -> None:
         recs.sort(key=lambda r: (str(r.get("session")), str(r.get("quote_time"))))
         newest[und] = [r for r in recs if str(r.get("session")) == str(recs[-1].get("session"))]
     parts: Parts = []
+    named_as: dict[tuple[str, int], str] = {}
     for und in sorted(newest):
         parts.append(newest[und][0]["session"])
-        for rec in newest[und]:
+        for i, rec in enumerate(newest[und]):
             book = rec["path"].with_suffix(".parquet")
+            n: Any
+            two: Any
+            exp: Any
             if rec["path"].parent.name == "cboe" and book.exists():
                 q = pd.read_parquet(book, columns=["expiry", "bid", "ask"])
                 two_sided = (q["bid"] > 0) & (q["ask"] >= q["bid"])
                 n, two, exp = len(q), int(two_sided.sum()), int(q["expiry"].nunique())
             else:
-                n, two, exp = rec["rows"], rec["two_sided_rows"], rec["expiries"]
-            parts += [float(n), float(two), float(exp),
-                      str(rec.get("quote_time") or "").replace("T", " ").replace("Z", " UTC")]
-    said(a, P_PIPE, "Cboe option books (counts from the stored quotes)", books, parts,
-         "rows; two-sided = bid > 0 and ask ≥ bid; expiries")
+                n, two, exp = rec.get("rows"), rec.get("two_sided_rows"), rec.get("expiries")
+            named_as[(und, i)] = book_short(rec.get("quote_time"), n, two)
+            parts += [float(n) if n is not None else None, float(two) if two is not None else None,
+                      float(exp) if exp is not None else None, named_as[(und, i)]]
+    said(a, P_PIPE, "Cboe option books (counts from the stored quotes; each book's chain)", books, parts,
+         "rows; two-sided = bid > 0 and ask ≥ bid; expiries; Cboe, quote time, two-sided share of the lines")
     flag = {"gth": "(overnight book)", "closing": "(closing book)"}
-    segs = text_of(books).split("; ") if books is not None else []
+    # (each book is an element of its own: the text read has a space where one ends)
+    segs = [x.strip() for x in text_of(books).split(";")] if books is not None else []
     a.equal(P_PIPE, "Cboe option books: one entry per underlying", len(segs), len(newest))
     for und, seg in zip(sorted(newest), segs):
-        named = seg.split(" and ")
+        named = [x.strip() for x in seg.split(" and ")]
         a.equal(P_PIPE, f"{und} {newest[und][0]['session']}: every book of the session named",
                 len(named), len(newest[und]))
         for i, (rec, part) in enumerate(zip(newest[und], named)):
             got = next((f for f in flag.values() if part.endswith(f)), None)
             a.equal(P_PIPE, f"{und} book {i + 1}: named by its recorded state ({rec.get('book_state')})",
                     got, flag.get(str(rec.get("book_state"))))
+            a.text(P_PIPE, f"{und} book {i + 1}: its chain (tier 0.2)", part, named_as[(und, i)],
+                   contains=True)
 
 
 def check_pipeline(a: Audit, store: Store, f: Facts) -> None:
