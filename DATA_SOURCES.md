@@ -69,7 +69,8 @@ The daily workflow implements it as soon as two repository secrets exist, and ke
 - The public captures artifact, the capture check (`--no-raw-cboe`) and the data commit all leave
   `data_store/options/cboe` out while the store is configured, so a book the private repository did not take never
   reaches a public commit or artifact. It gets no manifest either, so a later slot inside the live book captures the
-  session again; the run fails and says so.
+  session again; the run fails and says so. That run commits no derived artifacts (surface reports, diagnostics,
+  Greeks) and so does not deploy: a surface it built from such a book would name a book held in neither store.
 - The token reaches git only as a per-command HTTP header; it is never written to a `.git/config` that later steps,
   which run third-party Python code, could read.
 

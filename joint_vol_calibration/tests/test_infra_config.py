@@ -271,6 +271,31 @@ def test_a_presentation_test_cannot_lose_the_captures():
     assert "steps.commitartifacts.outcome == 'success'" in cond
 
 
+def test_a_failed_private_push_holds_back_the_artifact_commit():
+    """Minor 3 of the 0.8 check: with the private book store set up, a failed push of
+    this run's raw books leaves them on the runner with no manifest. The artifact gate
+    still passed (it found the runner's copy), so a surface built from such a book was
+    committed, and every later run, on a runner without the book, failed the gate on
+    that surface ("no sidecar ... and no manifest of it"); the surface is not stale, so
+    no backfill rebuilt it. The derived-artifacts commit now waits for the move: it is
+    skipped when that step failed, and runs when it succeeded or did not run (no
+    private store), so the deploy, which needs that commit, waits too."""
+    import yaml
+
+    steps = yaml.safe_load(DAILY)["jobs"]["refresh"]["steps"]
+    by = {s.get("name"): s for s in steps}
+    move = by["Move this run's raw Cboe books to the private store"]
+    assert move["id"] == "privatebooks"
+    cond = by["Commit derived artifacts"]["if"]
+    assert "steps.privatebooks.outcome != 'failure'" in cond
+    assert "steps.privatebooks.outcome == 'success'" not in cond        # skipped: no private store
+    names = list(by)
+    assert names.index("Move this run's raw Cboe books to the private store") < names.index(
+        "Commit derived artifacts")
+    deploy = by["Deploy to GitHub Pages"]["if"]
+    assert "steps.commitartifacts.outcome == 'success'" in deploy
+
+
 def test_each_commit_adds_its_own_paths():
     """The capture commit holds the record (incl. the Cboe books under
     data_store/options/cboe and the forward ledger), the artifact commit the

@@ -194,6 +194,9 @@ jobs:
       # removed from the public tree. If the push fails there is no manifest (a later
       # slot captures the session again), the books stay on the runner, and every
       # public commit and artifact below still leaves data_store/options/cboe out.
+      # The derived artifacts are then not committed either: a surface built from a
+      # book held in neither store would pass this run's artifact gate (the book is on
+      # the runner) and fail every later run's.
       - name: Move this run's raw Cboe books to the private store
         id: privatebooks
         if: always() && steps.refresh.outcome != 'skipped' && steps.cboestore.outputs.configured == 'true'
@@ -386,12 +389,14 @@ jobs:
       # What derives from a new fit (cloud_refresh.refresh_session_artifacts): the
       # session's surface report and diagnostics, the headline fit's Greeks surface and
       # scenario grid. A separate commit behind its own gate, after the captures, so an
-      # artifact that fails its checks is reported and left out, never the data.
+      # artifact that fails its checks is reported and left out, never the data. Not
+      # after a failed move of the raw books to the private store (privatebooks): a
+      # surface may be built from a book that is then only on this runner.
       - name: Commit derived artifacts
         id: commitartifacts
         if: >
           always() && steps.refresh.outcome != 'skipped' && steps.commit.outcome == 'success' &&
-          steps.artifacttests.outcome == 'success'
+          steps.artifacttests.outcome == 'success' && steps.privatebooks.outcome != 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
