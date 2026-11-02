@@ -5807,14 +5807,19 @@ def test_browser_panels_beside_taller_ones_carry_no_large_blank(site_browser):
 
 
 _OPEN_ALL_JS = """() => { document.querySelectorAll('.g details').forEach(d => { d.open = true; }); }"""
+# the blank below a panel's body, measured to its first foot where it has one (its chain's
+# source line, tier 0.2, or "Cited on"): the feet are content, as in _LAYOUT_JS
 _PANEL_FIT_JS = """id => { const p = document.getElementById(id);
   let last = -Infinity;
   p.querySelectorAll('.panel-body *').forEach(el => { const b = el.getBoundingClientRect();
     if (b.width > 0 && b.height > 0 && !el.closest('details:not([open]) > :not(summary)'))
       last = Math.max(last, b.bottom); });
+  const foot = [...p.children].find(c => c.classList.contains('panel-foot')
+    && c.getBoundingClientRect().height > 0);
+  const end = foot ? foot.getBoundingClientRect().top : p.getBoundingClientRect().bottom;
   const charts = [...p.querySelectorAll('.chart.grow')]
     .map(c => Math.round(c.getBoundingClientRect().height));
-  return {blank: Math.round(p.getBoundingClientRect().bottom - last), charts: charts}; }"""
+  return {blank: Math.round(end - last), charts: charts}; }"""
 
 
 def test_browser_an_open_disclosure_stretches_no_chart_and_leaves_no_blank_beside_it(site_browser):
@@ -5823,7 +5828,9 @@ def test_browser_an_open_disclosure_stretches_no_chart_and_leaves_no_blank_besid
     1,250 px below its text beside the open change log, and the implied-β chart
     grew to 1,359 px for a 0.55–0.95 range beside the open inference notes,
     exaggerating its year-to-year swings. A row with an open disclosure now lets
-    each panel end with its own content, and no grow chart exceeds 420 px."""
+    each panel end with its own content, and no grow chart exceeds 420 px. A
+    panel's feet (its chains' source lines, tier 0.2, and "Cited on") are content:
+    the blank is measured to the first, as the grid test and interact.mjs do."""
     ctx, page = _page(site_browser, 1440, 900)
     try:
         page.goto(site_browser["base"] + "research.html", wait_until="load")
