@@ -8781,12 +8781,15 @@ def _as_vendor(sj: dict, vendor: str, session: str) -> dict:
             "universe": {**(sj.get("universe") or {}), **rec}}
 
 
-def _vendor_store(dash, tmp_path: Path, vendor: str) -> tuple[Path, list[str]]:
+def _vendor_store(dash, tmp_path: Path, vendor: str, no_diag: bool = False) -> tuple[Path, list[str]]:
     """The committed record with every surface session the pages cite as one session's
     (the headline fit's and every later one, the newest among them) built from
     ``vendor``'s chain: as committed where it already is, else relabelled (_as_vendor),
     the Heston scorecard row saying whether that is the chain the fit was made on.
-    Returns (the data dir, the relabelled sessions)."""
+    ``no_diag``: the headline (newest) fit's diagnostics are missing, as the bot
+    publishes a fit whose diagnostics step timed out (its row of diagnostics/
+    summary.json and its own file are not there). Returns (the data dir, the
+    relabelled sessions)."""
     path, cal = dash.load_headline_calibration()
     fit = dash._calibration_session(cal, path)
     fit_chain = dash.fit_chain_record(cal, fit)
@@ -8797,8 +8800,23 @@ def _vendor_store(dash, tmp_path: Path, vendor: str) -> tuple[Path, list[str]]:
     data = tmp_path / "data_store"
     data.mkdir()
     for child in SHIPPED.iterdir():
-        if child.name != "surface":
+        if child.name not in ("surface", "calibrations"):
             (data / child.name).symlink_to(child)
+    (data / "calibrations").mkdir()
+    for child in (SHIPPED / "calibrations").iterdir():
+        if child.name != "diagnostics":
+            (data / "calibrations" / child.name).symlink_to(child)
+    diag = data / "calibrations" / "diagnostics"
+    diag.mkdir()
+    for child in (SHIPPED / "calibrations" / "diagnostics").iterdir():
+        if child.name != "summary.json" and not (no_diag and child.name == f"{fit}.json"):
+            (diag / child.name).symlink_to(child)
+    summ = json.loads((SHIPPED / "calibrations" / "diagnostics" / "summary.json").read_text())
+    if no_diag:
+        assert any(r["session"] == fit for r in summ["rows"]), "the headline fit has no diagnostics to drop"
+        summ["rows"] = [r for r in summ["rows"] if r["session"] != fit]
+        summ["n_sessions"] = len(summ["rows"])
+    (diag / "summary.json").write_text(json.dumps(summ))
     (data / "surface").mkdir()
     for child in (SHIPPED / "surface").iterdir():
         if child.name not in moved:
@@ -8818,18 +8836,25 @@ def _vendor_store(dash, tmp_path: Path, vendor: str) -> tuple[Path, list[str]]:
     return data, moved
 
 
-@pytest.fixture(scope="module", params=["yahoo", "cboe"])
+# the states the bot publishes that change which chain a number is read off: the newest
+# sessions Yahoo downloads or Cboe books, and a newest fit whose diagnostics timed out
+# (the joint-fit card then reads the newest diagnosed session's fit)
+_CHAIN_VIEWS = {"yahoo": ("yahoo", False), "cboe": ("cboe", False), "yahoo-no-diagnostics": ("yahoo", True)}
+
+
+@pytest.fixture(scope="module", params=list(_CHAIN_VIEWS))
 def chain_view(request, dash, tmp_path_factory):
-    """Every page rendered from _vendor_store for one vendor, with what the checks
+    """Every page rendered from _vendor_store for one view, with what the checks
     read: the data dir, the headline fit's session and record, and the vendor."""
-    vendor = request.param
-    data, moved = _vendor_store(dash, tmp_path_factory.mktemp(f"chain_{vendor}"), vendor)
-    out = {"vendor": vendor, "data": data, "moved": moved, "pages": {}}
-    with pytest.MonkeyPatch.context() as mp:
+    vendor, no_diag = _CHAIN_VIEWS[request.param]
+    data, moved = _vendor_store(dash, tmp_path_factory.mktemp(f"chain_{request.param}"), vendor, no_diag)
+    out = {"vendor": vendor, "view": request.param, "data": data, "moved": moved, "pages": {}}
+    # the database scratch copy is removed however the block ends, so a failed render
+    # cannot leave it in place for the module's later tests
+    with pytest.MonkeyPatch.context() as mp, contextlib.ExitStack() as stack:
         mp.setattr(dash, "DATA", data)
         # the copy's own committed-record database, as freeze_site builds the site
-        stack = contextlib.ExitStack()
-        stack.enter_context(dash.record_db(scratch_dir=tmp_path_factory.mktemp(f"db_{vendor}")))
+        stack.enter_context(dash.record_db(scratch_dir=tmp_path_factory.mktemp(f"db_{request.param}")))
         mp.setattr(dash, "_CHROME_CACHE", {})
         path, cal = dash.load_headline_calibration()
         out.update(cal=cal, fit=dash._calibration_session(cal, path))
@@ -8840,12 +8865,32 @@ def chain_view(request, dash, tmp_path_factory):
             assert r.status_code == 200, route
             assert r.headers.get("X-Dashboard-Loader-Errors") == "0", (route, r.headers)
             out["pages"][route] = r.get_data(as_text=True)
-        stack.close()
     return out
 
 
 def _chain_of(data: Path, session: str) -> dict:
     return json.loads((data / "surface" / session / "surface.json").read_text())
+
+
+def _fit_pv(dash, data: Path, cal_file: str) -> dict:
+    """chain_provenance of the chain the stored fit ``cal_file`` was made on (its
+    chain_diagnostics and stored chain, fit_chain_record), read from ``data``."""
+    path = data / "calibrations" / cal_file
+    with open(path, "rb") as fh:
+        cal = pickle.load(fh)
+    pv = dash.chain_provenance(dash.fit_chain_record(cal, dash._calibration_session(cal, path), data))
+    assert pv, cal_file
+    return pv
+
+
+def _greeks_source_calibration(data: Path) -> str:
+    """The calibration file the stored Greeks surface records as its source (its
+    parquet metadata), read without the dashboard's loader."""
+    import pyarrow.parquet as pq
+    meta = pq.read_schema(data / "greeks" / "greeks_surface.parquet").metadata or {}
+    prov = json.loads((meta.get(b"greeks_provenance") or meta.get(b"provenance")).decode())
+    src = prov.get("source") if isinstance(prov.get("source"), dict) else {}
+    return Path(str(prov.get("source_calibration") or src.get("calibration_file"))).name
 
 
 def _names_chain(text: str, pv: dict) -> bool:
@@ -8909,8 +8954,14 @@ def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
     need("/", "surface result card", card, dash.chain_provenance(_chain_of(data, s_card)))
     joint = re.search(r'<a class="result" href="calibration.html#(?:rough-vs-heston|oos)"(.*?)</a>', ov,
                       re.DOTALL).group(1)
-    assert fit in joint
-    need("/", "joint fit card", joint, fit_pv)
+    # the card's session as the card takes it (and test_overview_key_results_are_read_from_
+    # the_shipped_artifacts): the headline fit's diagnostics row, else, when the bot's
+    # fail-soft diagnostics of a new fit are missing, the newest diagnosed session
+    summ = json.loads((data / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
+    own = [r for r in summ if r["session"] == fit]
+    card_fit = (own or [max(summ, key=lambda r: r["session"])])[0]["session"] if summ else fit
+    assert card_fit in joint
+    need("/", "joint fit card", joint, _fit_pv(dash, data, f"joint_cal_{card_fit}.pkl"))
 
     # Surface: the tiles under the page badge, every panel of the session it shows, the
     # comparison's sessions and the history's rows
@@ -8968,10 +9019,13 @@ def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
         own = re.search(r"data_store/surface/(\d{4}-\d{2}-\d{2})/", re.sub(r"<[^>]+>", "", row)).group(1)
         need("/model-risk", key, row, dash.chain_provenance(_chain_of(data, own)))
 
-    # Risk: the Greeks are the source fit's; its banner names that fit's chain
+    # Risk: the Greeks are their source fit's (the calibration file their surface records,
+    # not always the headline fit); its banner names that fit's chain
     rk = pages["/risk"]
     banner = re.search(r'<div id="greeks-provenance"(.*?)</div>\s*</div>\s*</div>', rk, re.DOTALL).group(1)
-    need("/risk", "Greeks provenance", banner, fit_pv)
+    src_cal = _greeks_source_calibration(data)
+    assert src_cal in banner
+    need("/risk", "Greeks provenance", banner, _fit_pv(dash, data, src_cal))
     assert missing == [], (chain_view["vendor"], missing)
     assert all(checked[r] for r in enumerated), checked
 
