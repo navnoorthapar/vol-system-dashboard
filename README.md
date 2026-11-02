@@ -13,7 +13,7 @@ reports a mark-to-model straddle backtest with its statistical inference.
 **What it is, and is not.** A model-validation record: each published number is computed from a committed artifact
 and each correction is logged. It is not an alpha claim: the backtest result is negative and no signal is deployable.
 
-**Three results** ([as of 2026-10-31](docs/results/readme_results.json): ranges over the six sessions with a stored
+**Three results** ([as of 2026-11-01](docs/results/readme_results.json): ranges over the six sessions with a stored
 chain and an accepted fit, 2026-03-24 → 2026-10-26, not confidence intervals; the [live site](https://navnoorbawa.me)
 shows the newest session):
 

@@ -906,6 +906,32 @@ def _run_record_cause(session: str, records: list[dict]) -> str | None:
     return f"{head}{more}; the {session} fit is shown."
 
 
+def unfitted_causes(sessions: Iterable[str], records: list[dict]) -> str:
+    """Why sessions have no Heston fit, from the job's run records as the stale
+    banner reads them (_run_record_cause): for each session, the newest run that
+    tried to fit it and stored nothing (a run whose own session it is first: a later
+    run that found a stale database also names the older session), a rejection first,
+    grouped by what
+    happened and the reason recorded: 'the gate rejected the fit of 2026-11-02 —
+    kappa pinned at bound (kappa=0.10); the job did not fit 2026-10-30 — no SPX
+    option chain returned'. A session no run record names is left out; '' when none is
+    named. The Surface history's note said each dash's scorecard 'says why',
+    and the scorecard says only that no fit is stored."""
+    groups: dict[tuple[str, str], list[str]] = {}
+    for s in sorted(set(sessions)):
+        tried = [r for r in records if str((r.get("calibration") or {}).get("session")) == s
+                 and r["calibration"].get("status") in ("rejected", "skipped", "failed")]
+        if not tried:
+            continue
+        tried = [r for r in tried if str(r.get("expected_session") or s) == s] or tried
+        c = ([r for r in tried if r["calibration"]["status"] == "rejected"] or tried)[-1]["calibration"]
+        why = str(c.get("reason") or "no reason recorded").rstrip(".")
+        groups.setdefault((str(c["status"]), why), []).append(s)
+    said = {"rejected": "the gate rejected the fit of {}", "skipped": "the job did not fit {}",
+            "failed": "the fit of {} failed"}
+    return "; ".join(f"{said[k].format(', '.join(ss))} — {why}" for (k, why), ss in groups.items())
+
+
 def calibration_stale_cause(session: str | None, data_dir: Path | None = None,
                             rows: list[dict] | None = None) -> str | None:
     """Why the headline fit is older than the newest session, from what the store holds.
@@ -3507,13 +3533,24 @@ def calibration_extras(d: dict, cal: dict) -> None:
     except artifacts.ArtifactError as e:
         _record_error(d, "ATM-skew term structure (surface/<session>/surface.json, diagnostics)", e)
         desk_inputs, sk = [], None
-    # the chain this fit's session was fitted on, as the surface report records it
+    # the chain this fit was made on, from the fit (its chain_diagnostics and the
+    # stored chain), and the book its session's surface, so the smiles, was built from
+    try:
+        fit_chain = fit_chain_record(cal, session)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "the fit's stored chain (data_store/options/spx_<session>.parquet)", e)
+        fit_chain = None
+    d["chain_badge"] = chain_badge(fit_chain) if fit_chain else None
+    d["chain_sentence"] = chain_sentence(fit_chain) if fit_chain else None
     own_chain = next((s for s in desk_inputs if s["session"] == session), None)
-    d["chain_sentence"] = chain_sentence(own_chain["surface"]) if own_chain else None
-    if own_chain:
-        d["chain_badge"] = chain_badge(own_chain["surface"], [
-            n for s in desk_inputs if s["session"] != session for n in [session_expiries(s["surface"])]
-            if n is not None])
+    d["smile_book"] = None
+    if own_chain and not same_chain(fit_chain, own_chain["surface"]):
+        d["smile_book"] = {"book": chain_sentence(own_chain["surface"]),
+                           "fit": (chain_provenance(fit_chain) or {}).get("name") if fit_chain else None}
+    newest_surface = max((s["session"] for s in desk_inputs), default=None)
+    d["oos_hs"] = (None if own_chain is None else
+                   {"same": not d["smile_book"], "shown": newest_surface == session,
+                    "book": (chain_provenance(own_chain["surface"]) or {}).get("short")})
     if sk:
         rv = d.get("rough_vs_heston")
         jr = rv.get("result") if isinstance(rv, dict) else None
@@ -4831,9 +4868,24 @@ def surface_result(surf_oos: list[dict], session: str | None) -> dict | None:
         "range": _range_txt((r["median_abs_hs"] for r in rows), ".2f"),
         "inside_range": _range_txt((r["inside_spread_pct"] for r in rows), ".0f"),
         "heston": ({"median_abs_hs": hes["median_abs_hs"], "inside_spread_pct": hes["inside_spread_pct"],
-                    "n": hes["n"]} if hes else None),
+                    "n": hes["n"], "fit_chain": hes.get("fit_chain")} if hes else None),
         "heston_range": _range_txt((r["median_abs_hs"] for r in surf_oos if r["model"] == hkey), ".1f"),
     }
+
+
+def newer_surface_clause(sr: dict, surf_oos: list[dict]) -> str:
+    """', the headline fit's session (Surface shows the newer 2026-10-30)' after the
+    session surface_result cites, when a newer session has a surface.
+
+    The Overview cites the headline fit's session, so the surface and Heston are
+    scored on the same session's quotes. A newer surface session is one without
+    an accepted Heston fit (its calibration was skipped or rejected; its surface
+    is built from its book all the same), and the Surface page shows it: the
+    Overview names both, so its figure does not pass for the newer session's."""
+    newest = max(r["session"] for r in surf_oos)
+    if newest == sr["session"]:
+        return ""
+    return f", the headline fit’s session (Surface shows the newer {newest})"
 
 
 def joint_fit_result(diag: dict, session: str | None) -> dict | None:
@@ -4892,11 +4944,14 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
             "key": f"Arbitrage-free SVI surface · {held}",
             "value": _fmt(sr["median_abs_hs"], ".2f"), "unit": "half-spreads",
             "detail": (f"Median |model − mid| of the arbitrage-free, calendar-ordered SVI surface on "
-                       f"{_fmt(sr['n'], ',')} held-out quotes of {sr['session']}; "
+                       f"{_fmt(sr['n'], ',')} held-out quotes of {sr['session']}"
+                       f"{newer_surface_clause(sr, surf_oos)}; "
                        f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask{cert}."
                        + (f" Heston on its own held-out quotes of that session: "
                           f"{_fmt(h['median_abs_hs'], '.1f')} half-spreads, "
-                          f"{_fmt(h['inside_spread_pct'], '.1f')}% inside." if h else "") + snap),
+                          f"{_fmt(h['inside_spread_pct'], '.1f')}% inside"
+                          + (f" ({fit_book_clause(h['fit_chain'])})" if h.get("fit_chain") else "")
+                          + "." if h else "") + snap),
             "ci": (f"Range over {sr['n_sessions']} stored sessions: {sr['range']} half-spreads "
                    f"({sr['inside_range']}% inside)" if sr["n_sessions"] > 1 else None),
             # shown beside the range (it was rendered only when there was no range)
@@ -5041,13 +5096,16 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
     # works: the arbitrage-free surface on held-out strikes, the VIX replication, the gate
     sr = surface_result(surf_oos, p2.get("session"))
     if sr and _num(sr["median_abs_hs"]) is not None:
+        newer = newer_surface_clause(sr, surf_oos)
         works.append(item(
             "Arbitrage-free SVI surface", "surface.html#scorecard",
             f"median {_fmt(sr['median_abs_hs'], '.2f')} half-spreads from the mid, "
             f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask, on the held-out strikes of "
-            f"{sr['session']}."))
+            f"{sr['session']}{newer}."))
+        # the replication of the session Surface shows (the newest surface session): no
+        # Heston figure sits beside it, and the item links to that page's replication
         try:
-            rep = artifacts.load_surface(DATA, sr["session"])
+            rep = artifacts.load_surface(DATA)
         except artifacts.ArtifactError:
             rep = {}
         indices = ((rep.get("vix") or {}).get("indices") or {}) if rep.get("state") == "ok" else {}
@@ -5057,7 +5115,7 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
             works.append(item(
                 "VIX replicated from the stored chain", "surface.html#vix-replication",
                 f"{signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
-                f"{sr['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."))
+                f"{rep['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."))
     arc = p2.get("archive") or {}
     if arc.get("n_legacy") is not None:
         # The job stores a fit only when it passes the gate, so 'k of k current fits
@@ -5486,6 +5544,23 @@ def model_short(m: str) -> str:
 def heston_model_key(models: Iterable[str]) -> str | None:
     """The production Heston fit among a surface artifact's models ('heston_v2', 'heston')."""
     return next((m for m in models if str(m).lower().startswith("heston")), None)
+
+
+def history_model_keys(session_models: Iterable[str], stored_models: Iterable[str]) -> list[str]:
+    """The Surface history table's model columns: the page session's models in
+    their order, then every other model a stored session scores, by name."""
+    own = list(dict.fromkeys(session_models))
+    return own + sorted(set(stored_models) - set(own))
+
+
+def unscored_models(scorecard: dict | None) -> list[dict]:
+    """The models a session's scorecard.json lists but could not score (its
+    ``available: false`` rows: Heston on a session with no stored fit, whose
+    surface is still built from the session's book), with the scorecard's reason."""
+    return [{"key": str(m["model"]), "short": model_short(str(m["model"])),
+             "reason": str(m.get("reason") or "")}
+            for m in ((scorecard or {}).get("models") or [])
+            if isinstance(m, dict) and m.get("model") and m.get("available") is False]
 
 
 # ── the smile's expiry strip and the selected expiry's status line ─────────────
@@ -6106,6 +6181,17 @@ def chain_source(surface_json: dict) -> list[str] | None:
     return [pv["name"], *pv["badge"]] if pv else None
 
 
+# the chain a fit was made on, as the scorecard records its vendor (fit_chain_source)
+FIT_CHAINS = {"yahoo": "Yahoo download", "cboe": "Cboe book"}
+
+
+def fit_book_clause(vendor: str) -> str:
+    """'the fit was made on the session’s Yahoo download, not on this book': said
+    beside a Heston figure scored on a book other than the chain it was fitted on
+    (the scorecard's fit.scored_on_fit_chain is false)."""
+    return f"the fit was made on the session’s {FIT_CHAINS.get(vendor, vendor + ' chain')}, not on this book"
+
+
 def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str | None:
     """'Chain: Yahoo Finance close snapshot · no quote time · 6,191 rows → 2,913
     scored · 17 expiries (other stored sessions 40–43)', from surface.json inputs
@@ -6126,6 +6212,58 @@ def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str |
         parts.append(f"{int(n)} expiries" + (f" (other stored session{'s' if len(oth) > 1 else ''} {rng})"
                                               if oth else ""))
     return " · ".join(parts)
+
+
+def fit_chain_record(cal: dict, session: str | None, data_dir: Path | None = None) -> dict | None:
+    """The chain a joint fit was made on, in surface.json's shape (inputs and
+    universe) so chain_badge and chain_sentence can name it, read from the fit
+    itself: its chain_diagnostics (vendor, quote or fetch time, where T runs
+    from) and the stored chain it was fitted on, data_store/options/
+    spx_<session>.parquet (its rows and listed expiries); 'scored' is the fit's
+    anchors plus its out-of-sample quotes.
+
+    Since tier 0.7 a session's surface is built from its Cboe book when that
+    passes the quote-state gates, while the bot fits the session's Yahoo
+    download, so the surface's surface.json names another chain. Calibration
+    took the fit's chain from there and named the Cboe book as the fit's."""
+    diag = cal.get("chain_diagnostics") or {}
+    snap = _date_str(cal.get("spx_snapshot_session")) or session
+    if not snap:
+        return None
+    path = Path(data_dir if data_dir is not None else DATA) / "options" / f"spx_{snap}.parquet"
+    rows = n_exp = None
+    stored_src = None
+    if path.exists():
+        try:
+            ch = pd.read_parquet(path)
+        except (OSError, ValueError) as e:
+            raise artifacts.ArtifactError(f"{path}: unreadable stored chain ({e})") from e
+        rows = len(ch)
+        n_exp = int(ch["expiry"].nunique()) if "expiry" in ch.columns else None
+        srcs: list[str] = (sorted(set(ch["source"].dropna().astype(str))) if "source" in ch.columns
+                           else [])
+        stored_src = srcs[0] if len(srcs) == 1 else None
+    oos = _num((cal.get("oos") or {}).get("n_spx_oos"))
+    anchors = _num(cal.get("n_spx_options"))
+    inputs = {"source": diag.get("source") or stored_src, "quote_time": diag.get("quote_time"),
+              "fetched_at": diag.get("fetched_at"), "t_origin_basis": diag.get("t_origin_basis"),
+              "chain": f"data_store/options/{path.name}", "chain_rows": rows}
+    universe = {"n_universe": int(anchors) + int(oos) if anchors is not None and oos is not None else None,
+                "n_expiries": n_exp}
+    return {"inputs": inputs, "universe": universe, "session": snap}
+
+
+def same_chain(fit_chain: dict | None, surface_json: dict) -> bool:
+    """Whether a surface was built from the chain the fit was made on: the
+    stored file surface.json names, else (a record without it) the vendor."""
+    if not fit_chain:
+        return False
+    want = (fit_chain.get("inputs") or {}).get("chain")
+    got = (surface_json.get("inputs") or {}).get("chain")
+    if want and got:
+        return Path(str(got)).as_posix() == want
+    a, b = chain_provenance(fit_chain), chain_provenance(surface_json)
+    return bool(a and b and a["vendor"] == b["vendor"])
 
 
 def session_expiries(sj: dict) -> int | None:
@@ -6369,6 +6507,9 @@ def surface_extras(d: dict, surf: dict) -> None:
     models = surf["models"]
     # the page badge listed none
     d["models"] = [{"key": m, "label": model_label(m), "short": model_short(m)} for m in models]
+    # a model the scorecard lists but could not score on this session (Heston
+    # without a stored fit): the badge says so instead of leaving it out silently
+    d["unscored"] = [u for u in unscored_models(surf.get("scorecard")) if u["key"] not in models]
     # scores: the producer's scorecard when present, else computed on the residual table
     if surf.get("scorecard_rows"):
         d["score_rows"] = [{"key": r["model"], "label": model_label(r["model"]),
@@ -6796,7 +6937,12 @@ def surface_extras(d: dict, surf: dict) -> None:
     # every session the surface report has covered (index.json)
     idx = surf.get("index") or []
     if idx:
-        mk = list(models)
+        # a column for every model scored on any stored session: this session's
+        # models, then the others by name. A session without a Heston fit still
+        # has a surface; taking only its models dropped Heston's column from
+        # every earlier session as well (the cell of a session where a model is
+        # not scored is a dash, and the note says why)
+        mk = history_model_keys(models, (r["model"] for r in oos_all))
         # the book each session was built from (its surface.json record): only a
         # closing book's gap sets the replication against the Cboe close at one instant
         if desk_inputs is None:
@@ -6804,6 +6950,11 @@ def surface_extras(d: dict, surf: dict) -> None:
         books = {s["session"]: desk_surface.replication_book((s["surface"] or {}).get("inputs"))
                  for s in desk_inputs}
         d["history_models"] = [{"key": m, "label": model_short(m)} for m in mk]
+        d["history_gaps"] = any(oos_by.get((r["session"], m)) is None for r in idx for m in mk)
+        # why Heston has no figure on a session, where the job's run records say
+        hk = heston_model_key(mk)
+        unfit = [r["session"] for r in idx if hk and oos_by.get((r["session"], hk)) is None]
+        d["history_unfitted"] = unfitted_causes(unfit, load_run_records(DATA)) if unfit else ""
         d["surface_history"] = [{"session": r["session"], "n": r.get("n_quotes"),
                                  "arb_out": r.get("arbitrage_quotes_outside_spread"),
                                  "vix_rep": _num(r.get("vix_replicated")),
@@ -7547,8 +7698,15 @@ def load_model_risk() -> dict[str, Any]:
 
         def surf_hist(k):
             return [(s_, v[k]) for s_, v in shist] if shist and shist[-1][0] == surf["session"] else None
-        # a session's surface is built whatever its Heston fit did: its scorecard
-        # then has no Heston row and says why (surface.scorecard.UNAVAILABLE_REASONS)
+        # a session's surface is built whatever its Heston fit did: its scorecard.json
+        # then marks Heston not available, with the producer's reason (as
+        # surface.scorecard.UNAVAILABLE_REASONS gives it)
+        # the chain Heston was fitted on, when the scorecard says it is not the book scored
+        fit_chain = next((str((m.get("fit") or {}).get("fit_chain_source") or "")
+                          for m in ((surf.get("scorecard") or {}).get("models") or [])
+                          if isinstance(m, dict) and str(m.get("model", "")).startswith("heston")
+                          and m.get("available") is not False
+                          and (m.get("fit") or {}).get("scored_on_fit_chain") is False), None) or None
         unscored = next((str(m.get("reason") or "no stored fit")
                          for m in ((surf.get("scorecard") or {}).get("models") or [])
                          if isinstance(m, dict) and str(m.get("model", "")).startswith("heston")
@@ -7560,7 +7718,8 @@ def load_model_risk() -> dict[str, Any]:
             sart + ("scorecard.json" if today["scorecard"] or unscored else "residuals.parquet"),
             (f"Heston is not scored on {surf['session']}: {unscored}" if unscored else
              f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; "
-             + _chain_clause(surf.get("surface") or {}) + "."),
+             + _chain_clause(surf.get("surface") or {})
+             + (f"; {fit_book_clause(fit_chain)}" if fit_chain else "") + "."),
             history=surf_hist("median_abs_hs"), digits=".1f")
         vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",

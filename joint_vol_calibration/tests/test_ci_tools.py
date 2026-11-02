@@ -241,6 +241,61 @@ class TestSimulatedSession:
                                          .splitlines(), 1) if dated.search(line)]
         assert hits == []
 
+    def test_a_no_fit_run_must_skip_the_fit_and_still_build_the_surface(self, sim, tmp_path):
+        """The simulation always produced an accepted fit, so CI never saw a newest
+        surface session without one, although every Friday is one (the Saturday slot
+        finds Yahoo's book empty and skips the fit; tier 0.7 item 4 builds the surface
+        from the Cboe book anyway). Such a session failed ten presentation tests. With
+        --no-fit the book slot sees an empty Yahoo book, and the run must skip the fit,
+        keep the headline, build the session's surface with Heston marked not scored,
+        record the ledger from the Cboe book and stay publishable."""
+        s = "2026-11-02"
+        (tmp_path / "data_store" / "market" / "vix_futures_daily").mkdir(parents=True)
+        (tmp_path / "data_store" / "market" / "vix_futures_daily" / "vix_futures_daily_2026.parquet").touch()
+        surf = tmp_path / "data_store" / "surface" / s
+        surf.mkdir(parents=True)
+        why = "no joint SPX/VIX Heston fit is stored for 2026-11-02"
+        (surf / "scorecard.json").write_text(json.dumps({"models": [
+            {"model": "svi_cal", "available": True},
+            {"model": "heston_v2", "available": False, "reason": why}]}))
+        st = {"simulated": {"session": s, "headline_before": "2026-10-30", "headline_params": {}},
+              "calibration": {"status": "skipped", "reason": "no SPX option chain returned"},
+              "headline_calibration": {"date": "2026-10-30"},
+              "artifact_backfill": {"rebuilt": {s: {"surface": {"ok": True}}}},
+              "forward_ledger": {"status": "recorded"}, "capture": {"status": "captured"},
+              "market": {"vx_futures": {"last": s}}, "publishable": True}
+        assert sim.outcome_problems(st, tmp_path, no_fit=True) == []
+        # the same run is a failure of the mode that expects a new fit
+        assert sim.outcome_problems(st, tmp_path) == [
+            "the simulated fit was not accepted: skipped no SPX option chain returned"]
+        accepted = {**st, "calibration": {"status": "accepted"}}
+        assert sim.outcome_problems(accepted, tmp_path, no_fit=True)[0].startswith(
+            "the empty Yahoo book was not skipped")
+        moved = {**st, "headline_calibration": {"date": s}}
+        assert sim.outcome_problems(moved, tmp_path, no_fit=True)[0].startswith("the headline fit moved")
+        unbuilt = {**st, "artifact_backfill": {"rebuilt": {}}}
+        assert sim.outcome_problems(unbuilt, tmp_path, no_fit=True)[0].startswith(
+            f"the backfill did not build {s}'s surface")
+        (surf / "scorecard.json").write_text(json.dumps({"models": [{"model": "heston_v2",
+                                                                     "available": True}]}))
+        assert sim.outcome_problems(st, tmp_path, no_fit=True)[0].startswith(
+            f"{s}'s scorecard does not list Heston as not scored")
+        (surf / "scorecard.json").write_text(json.dumps({"models": [
+            {"model": "heston_v2", "available": False, "reason": why}]}))
+        rebuilt = {s: {"surface": {"ok": True}}, "2026-10-28": {"surface": {"ok": False, "error": "x"}}}
+        failed = {**st, "artifact_backfill": {"rebuilt": rebuilt}}
+        assert sim.outcome_problems(failed, tmp_path, no_fit=True) == ["artifact 2026-10-28 surface: x"]
+        # the Ticker the driver hands the bot lists no expiry in this mode
+        src = (ROOT / "scripts" / "ci" / "simulate_next_session.py").read_text()
+        assert "self.options = () if no_fit else" in src
+        assert '"--drive", str(status_file), *(["--no-fit"] if args.no_fit else [])' in src
+        # and CI runs it beside the run with a fit
+        import yaml
+        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text())["jobs"]
+        runs = [st.get("run", "") for j in jobs.values() for st in j.get("steps", [])]
+        assert any("simulate_next_session.py --full" in r for r in runs)
+        assert any("simulate_next_session.py --no-fit" in r for r in runs)
+
     def test_each_simulated_slot_must_leave_its_run_record(self, sim, tmp_path):
         """FUND_GRADE_PLAN 0.9: the simulation runs the close and book slots with
         REFRESH_SLOT set, so each must leave one complete record that agrees with
@@ -372,8 +427,10 @@ class TestSimulatedSession:
         assert "noisy_mid(" in src
         assert 'heston_vix_term_index(p["kappa"]' in src                # the VIX leg of the same p
         main = inspect.getsource(sim.main)
-        assert "MIN_PARAM_MOVE" in main
-        assert "param_moves(" in main
+        assert "outcome_problems(" in main                              # whose checks follow
+        checks = inspect.getsource(sim.outcome_problems)
+        assert "MIN_PARAM_MOVE" in checks
+        assert "param_moves(" in checks
 
 
 # ── merge_main_data.py ────────────────────────────────────────────────────────
@@ -1024,6 +1081,194 @@ class TestRecomputeAudit:
         assert failed("SVI-cal · median |z|") == []
         assert failed("Heston · median |z|") == ["Heston · median |z|: no tile (not scored on this session)"]
 
+    def test_it_checks_the_badge_names_a_model_the_scorecard_did_not_score(self, monkeypatch):
+        """The Surface badge listed the scored models and said nothing of Heston on a
+        session without a fit; it now adds 'Heston not scored on this session', linked
+        to the scorecard. The audit expected exactly four badge items; it now expects
+        one more per model the scorecard marks not available, with that text and link."""
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        monkeypatch.setattr(S, "chain_badge", lambda a, c: None)
+        sc = {"models": [{"model": "svi"}, {"model": "heston_v2", "available": False, "reason": "no fit"}]}
+        ctx = types.SimpleNamespace(sc=sc, s=types.SimpleNamespace(models=["svi"]), session="2026-10-30",
+                                    exps=["2026-11-20"], mkt=[0, 1, 2])
+
+        def failed(extra):
+            html = ('<div class="page-head"><div class="page-badge">'
+                    '<span class="nowrap">Session 2026-10-30</span><span class="nowrap">1 expiries</span>'
+                    '<span class="nowrap">3 quotes</span>'
+                    f'<span class="nowrap">models: SVI</span>{extra}</div></div>')
+            a = rc.core.Audit("t", BeautifulSoup(html, "lxml"))
+            S.page_head(a, ctx)
+            return [c.label for c in a.checks if not c.ok]
+
+        good = '<span class="nowrap"><a href="#scorecard">Heston not scored on this session</a></span>'
+        assert failed(good) == []
+        assert failed("") == ["badge items: count"]
+        assert failed(good.replace("#scorecard", "#scores")) == [
+            "Heston not scored: links to the scorecard and its note"]
+        assert failed(good.replace("not scored", "unscored")) == [
+            "Heston: not scored (scorecard.json available: false)"]
+
+    def test_its_history_keeps_a_column_for_every_model_a_session_scores(self, monkeypatch):
+        """A newest session without a Heston fit dropped Heston's column from the whole
+        Surface history table, and the audit, taking its columns from the same session,
+        agreed. Its columns are now the page session's models, then every other model a
+        stored session's residual table holds, by name."""
+        import importlib
+        import types
+
+        _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        ns = types.SimpleNamespace
+        own = ns(models=["essvi", "svi", "svi_cal"])
+        older = [ns(models=["essvi", "svi", "svi_cal", "heston_v2"]), ns(models=["svi", "zeta"])]
+        ctx = ns(s=own, all=[*older, own])
+        assert S.history_models(ctx) == ["essvi", "svi", "svi_cal", "heston_v2", "zeta"]
+        assert S.history_models(ns(s=own, all=[own])) == ["essvi", "svi", "svi_cal"]
+        assert "the model is not scored on that session" in S.HIST_DASH
+
+    def test_its_history_note_gives_the_run_records_reason_for_a_session_without_a_fit(self, monkeypatch,
+                                                                                       tmp_path):
+        """The Surface history's note now says why a session has no Heston figure where the
+        job's run records say (a rejection first, else the newest run that stored no fit),
+        grouped by what happened and the recorded reason. The audit rebuilds that text from
+        data_store/runs itself, so its sessions and numbers are checked, not only counted."""
+        import importlib
+
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        for i, (s, status, why) in enumerate((
+                ("2026-10-30", "skipped", "no SPX option chain returned"),
+                ("2026-11-02", "rejected", "kappa pinned at bound (kappa=0.10)."),
+                ("2026-11-02", "skipped", "a later slot found no book"),
+                ("2026-11-06", "skipped", "no SPX option chain returned"),
+                ("2026-11-09", "ok", None))):
+            (runs / f"run_{i}.json").write_text(json.dumps({
+                "schema": "run_ledger/1", "run_utc": f"2026-11-1{i}T00:00:00+00:00",
+                "calibration": {"session": s, "status": status, "reason": why}}))
+        (runs / "run_9.json").write_text("not json")
+        store = rc.data.Store(tmp_path)
+        assert S.unfitted_causes(store, ["2026-11-06", "2026-10-30", "2026-11-02", "2026-11-09"]) == (
+            "the job did not fit 2026-10-30, 2026-11-06 — no SPX option chain returned; "
+            "the gate rejected the fit of 2026-11-02 — kappa pinned at bound (kappa=0.10)")
+        assert S.unfitted_causes(store, ["2026-11-09"]) == ""
+        # a later run that found the database stale names the older session too: the
+        # session's own run gives the reason
+        for i, (exp, why) in enumerate((("2026-11-13", "no SPX option chain returned"),
+                                        ("2026-11-16", "DB's latest session is stale"))):
+            (runs / f"run_s{i}.json").write_text(json.dumps({
+                "schema": "run_ledger/1", "run_utc": f"2026-11-2{i}T00:00:00+00:00", "expected_session": exp,
+                "calibration": {"session": "2026-11-13", "status": "skipped", "reason": why}}))
+        assert S.unfitted_causes(rc.data.Store(tmp_path), ["2026-11-13"]) == (
+            "the job did not fit 2026-11-13 — no SPX option chain returned")
+        assert S.HIST_UNFIT == "Where the job’s run records say why Heston has none: "
+
+    def test_its_overview_cites_the_fit_and_names_a_newer_surface_session(self, monkeypatch):
+        """The Overview's surface item and key result cite the headline fit's session (the
+        surface and Heston on one session's quotes). When a newer surface session has no
+        fit, the page names it ('the headline fit's session (Surface shows the newer …)'),
+        so the audit expects that date after the cited one, and the clause only then."""
+        import importlib
+
+        _recompute(monkeypatch)
+        ov = importlib.import_module("recompute.overview")
+
+        def row(s, m, mhs):
+            return {"session": s, "model": m, "n": 10, "mhs": mhs, "inside": 30.0, "butterfly": 0,
+                    "calendar": 0}
+        scores = [row("2026-10-29", "svi_cal", 1.74), row("2026-10-29", "heston_v2", 10.1),
+                  row("2026-10-30", "svi_cal", 1.56)]
+        sh = ov.surface_headline({"scores": scores, "head": {"session": "2026-10-29"}})
+        assert (sh["sess"], sh["cur"]["mhs"], sh["heston"]["mhs"], sh["newer"]) == (
+            "2026-10-29", 1.74, 10.1, "2026-10-30")
+        sh = ov.surface_headline({"scores": scores[:2], "head": {"session": "2026-10-29"}})
+        assert sh["newer"] is None
+        assert ov.NEWER.startswith("the headline fit’s session (Surface shows the newer")
+
+    def test_its_replication_item_is_the_session_surface_shows(self, monkeypatch, tmp_path):
+        """The Overview's VIX-replication item links to Surface, which shows the newest
+        surface session, and no Heston figure is paired with it, so the page cites that
+        session's replication even when the headline fit's session is older. The audit
+        expected the headline fit's session's gap, date and departures; it now expects the
+        session Surface shows (the newest stored surface session)."""
+        import importlib
+
+        from bs4 import BeautifulSoup
+
+        rc = _recompute(monkeypatch)
+        ov = importlib.import_module("recompute.overview")
+        for s, gap, devs in (("2026-10-29", 1.32, 6), ("2026-11-02", 1.92, 3)):
+            d = tmp_path / "surface" / s
+            d.mkdir(parents=True)
+            for name in ("residuals.parquet", "surface.json"):
+                (d / name).write_text("")
+            (d / "vix_replication.json").write_text(json.dumps({
+                "indices": {"VIX": {"gap_vs_official": gap, "replicated": 20.0 + gap, "official": 20.0}},
+                "deviations": [f"departure {i}" for i in range(devs)]}))
+
+        def row(s, m, mhs):
+            return {"session": s, "model": m, "n": 10, "mhs": mhs, "inside": 30.0, "butterfly": 0,
+                    "calendar": 0}
+        f = {"scores": [row("2026-10-29", "svi_cal", 1.74), row("2026-10-29", "heston_v2", 10.1),
+                        row("2026-11-02", "svi_cal", 1.56)],
+             "head": {"session": "2026-10-29"}, "arc": [], "skew": None}
+        a = rc.core.Audit("t", BeautifulSoup("", "lxml"))
+        items = {link: parts for link, _, parts, _ in ov.works_items(a, rc.data.Store(tmp_path), f)}
+        assert items["surface.html#vix-replication"] == [1.92, "2026-11-02", 3.0]
+        assert items["surface.html#scorecard"][2:] == ["2026-10-29", "2026-11-02"]
+
+    def test_it_checks_the_overviews_stale_fit_banner_and_its_cause(self, monkeypatch, tmp_path):
+        """A Friday without a fit followed by a skipped one left the headline fit 2 NYSE
+        sessions old; the Overview then shows a stale banner the audit never checked, its
+        5 numbers fell outside every verified element and the coverage bar failed the
+        presentation gate (the no-fit simulation on 2026-11-02). The audit now checks
+        each banner: shown exactly from 2 sessions, its age, level and dates, and for the
+        fit the cause the page reads from the run records."""
+        import importlib
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        ov = importlib.import_module("recompute.overview")
+        (tmp_path / "runs").mkdir()
+        for utc, sess in (("20261031T023000Z", "2026-10-30"), ("20261103T023000Z", "2026-11-02")):
+            (tmp_path / "runs" / f"run_{utc}_book.json").write_text(json.dumps(
+                {"schema": "run_ledger/1", "run_utc": utc, "slot": "book",
+                 "calibration": {"session": sess, "status": "skipped",
+                                 "reason": "no SPX option chain returned"}}))
+        store = rc.data.Store(tmp_path)
+        f = {"ref_page": "2026-11-02", "spx_date": "2026-11-02", "label_date": "2026-11-02",
+             "head": {"session": "2026-10-29"}, "arc": []}
+        cause = ("The book run did not fit 2026-11-02: no SPX option chain returned (2 runs after 2026-10-29 "
+                 "tried a fit: 2 skipped); the 2026-10-29 fit is shown.")
+        assert ov.stale_cause(store, f, "2026-10-29") == cause
+
+        def failed(body, age="2", title="Heston calibration: 2 NYSE sessions old"):
+            html = (f'<main><div class="banner banner-stale-warn" data-stale="calibration" data-age="{age}">'
+                    f'<div class="banner-title">{title}</div>'
+                    f'<div class="banner-body">{body}</div></div></main>')
+            a = rc.core.Audit("t", BeautifulSoup(html, "lxml"))
+            ov.check_stale_banners(a, store, f, {"date": "2026-11-02"})
+            return [c.label for c in a.checks if not c.ok]
+
+        lead = "Heston calibration as of 2026-10-29; the newest session the site has data for is 2026-11-02."
+        assert failed(f"{lead} {cause}") == []
+        assert failed(lead) == ["Heston calibration: body, with why the fit is older"]
+        assert failed(f"{lead} {cause}", age="1") == ["Heston calibration: data-age"]
+        assert failed(f"{lead} {cause}", title="Heston calibration: 3 NYSE sessions old") == [
+            "Heston calibration: title"]
+        fresh = {**f, "head": {"session": "2026-10-30"}}
+        a = rc.core.Audit("t", BeautifulSoup('<div data-stale="calibration"></div>', "lxml"))
+        ov.check_stale_banners(a, store, fresh, {"date": "2026-11-02"})
+        assert [c.label for c in a.checks if not c.ok] == [
+            "Heston calibration: banner (1 NYSE sessions old): shown"]
+
     def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
         """Tier 0.5: the audit rebuilds the replication's calculation time from
         surface.json's record of the chain by its own calendar: a Cboe book at its
@@ -1640,6 +1885,36 @@ class TestPageBudget:
             gz = len(gzip.compress(raw, compresslevel=pb.GZIP_LEVEL, mtime=0))
             assert f"{gz:,} bytes gzipped at level {pb.GZIP_LEVEL}" in msg, msg
             assert pb.main([str(site)]) == (0 if ok else 1)
+
+    def test_the_budget_grows_with_the_default_expirys_quotes_and_the_stored_sessions(self, monkeypatch,
+                                                                                    tmp_path):
+        """D2 check: four compared sessions and a 30-day default expiry of 582 quotes
+        (2026-12-31 on the 2026-10-28 book) put the 45-expiry page at 454,224 bytes, over
+        a budget that counted only expiries, and the a11y job would have gone red about
+        2026-12-01 with no markup change. The default expiry's quotes (drawn from the
+        page) and the "Every session" rows grow with the data, so the budget grows
+        with them; the markup's own weight is still held to the expiry formula."""
+        pb = _load("scripts/ci/page_budget.py", "page_budget_under_test", monkeypatch)
+        assert pb.budget(45) == pb.budget(45, pb.DEFAULT_QUOTES, pb.HISTORY_ROWS) == 450_000
+        assert pb.budget(45, 582, 14) == (450_000 + pb.PER_DEFAULT_QUOTE * (582 - pb.DEFAULT_QUOTES)
+                                          + pb.PER_HISTORY_ROW * (14 - pb.HISTORY_ROWS))
+        status = ('<p class="exp-status js-only" id="slices-status" role="status" data-from="x">Expiry 16 of '
+                  '45 · 2026-12-31 · Thu · 30 days · F 7,745.53 · 582 quotes · median half-spread 0.05 '
+                  'vol pts</p>')
+        rows = "".join(f"<tr><td>2026-10-{i + 1:02d}</td></tr>" for i in range(14))
+        table = ('<table class="tbl" id="surface-history-table"><caption>c</caption><thead><tr><th>S</th>'
+                 f'</tr></thead><tbody>{rows}</tbody></table>')
+        for size, ok in ((454_224, True), (pb.budget(45, 582, 14) + 1, False)):
+            page = _surface_page(45, size - len(status.encode()) - len(table))
+            page = page.replace("</html>", status + table + "</html>")
+            site = tmp_path / f"s{size}"
+            site.mkdir()
+            (site / "surface.html").write_text(page, encoding="utf-8")
+            assert len((site / "surface.html").read_bytes()) == size
+            assert pb.counts(page) == (45, 582, 14)
+            got, msg = pb.check(site)
+            assert got is ok, msg
+            assert "a 582-quote default expiry and 14 stored sessions" in msg
 
     def test_its_tab_pattern_is_the_surface_templates(self, monkeypatch):
         pb = _load("scripts/ci/page_budget.py", "page_budget_under_test", monkeypatch)

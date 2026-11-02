@@ -263,8 +263,11 @@ def collect_data(mod: Any, pages: dict) -> tuple[dict[str, bytes], list[str]]:
             m = _DATA_NAME.fullmatch(src)
             if not m or hashlib.sha256(body).hexdigest()[:16] != m.group(1):
                 problems.append(f"{route}: data file {src} is not named by its sha256")
+            heat = _heat_of(body)
             problems += [f"{route}: data file {src} has no cell details for #{t}"
-                         for t in _heat_ids(page["html"], src) if t not in _heat_of(body)]
+                         for t in _heat_ids(page["html"], src)
+                         if not isinstance(heat.get(t), dict) or not isinstance(heat[t].get("detail"), str)
+                         or not isinstance(heat[t].get("cells"), list)]
             files[src] = body
     return files, problems
 

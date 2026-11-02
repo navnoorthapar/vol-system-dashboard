@@ -9,7 +9,7 @@
   <h1 class="page-title">SPX implied-volatility surface</h1>
   <p class="page-sub">Market quotes against the models, measured in the unit a market maker uses: half the bid–ask spread. A model inside the spread is as good as the quote.</p>
   <div class="page-badge">
-    {% if s.state == 'ok' %}<span class="nowrap">Session {{ d.session }}</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|length }} expiries</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|sum(attribute='n')|fmt(',') }} quotes</span><span class="sep">·</span><span class="nowrap">models: {{ d.models|map(attribute='short')|join(', ') }}</span>
+    {% if s.state == 'ok' %}<span class="nowrap">Session {{ d.session }}</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|length }} expiries</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|sum(attribute='n')|fmt(',') }} quotes</span><span class="sep">·</span><span class="nowrap">models: {{ d.models|map(attribute='short')|join(', ') }}</span>{% for u in d.unscored %}<span class="sep">·</span><span class="nowrap"><a href="#scorecard">{{ u.short }} not scored on this session</a></span>{% endfor %}
     {% else %}<span class="nowrap">Quote-grade surface not yet generated</span><span class="sep">·</span><span class="nowrap">headline fit {{ d.calib_session|fmt }}</span>{% endif %}
   </div>
   {{ m.chain_badge(d.chain_badge) }}
@@ -70,7 +70,7 @@
       {{ m.vs_table(cp.head, v) }}
     </div>
     {% endfor %}
-    <p class="note" id="surface-change-picks">Compared: the newest earlier session and the newest stored at least {% for g in cp.lags %}{{ g }}{{ ', ' if loop.revindex > 2 else (' and ' if not loop.last else '') }}{% endfor %} NYSE sessions back (about a week, a month and a quarter), {{ cp.views|length }} of the {{ cp.n_earlier }} earlier sessions stored. At most {{ cp.lags|length + 1 }} are compared, so the page keeps one size as sessions accrue; the ranges under the tiles at the top use every stored session.</p>
+    <p class="note" id="surface-change-picks">Compared: the newest earlier session and the newest stored at least {% for g in cp.lags %}{{ g }}{{ ', ' if loop.revindex > 2 else (' and ' if not loop.last else '') }}{% endfor %} NYSE sessions back (about a week, a month and a quarter), {{ cp.views|length }} of the {{ cp.n_earlier }} earlier sessions stored. At most {{ cp.lags|length + 1 }} are compared; the ranges under the tiles at the top use every stored session.</p>
     {% if d.charts.rr_term %}<h3 class="sub-head" id="rr-term">25Δ risk reversal by expiry, this session and those compared</h3>
     {{ m.chart(d.charts.rr_term, 'h260 grow') }}
     <p class="note" id="rr-term-note">SVI-cal surface, listed expiries; {{ d.session }} solid, the sessions compared grey, the one chosen under “Against an earlier session” dashed. A gap is a wing extrapolated beyond the quoted strikes.</p>{% endif %}
@@ -256,7 +256,7 @@
       <tbody>{% for r in d.surface_history|reverse %}<tr{% if r.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ r.session }}</td><td class="nowrap">{{ r.book_label or '—' }}</td><td class="num">{{ r.n|fmt(',') }}</td><td class="num">{{ (d.expiries_by_session or {}).get(r.session)|fmt }}</td>{% for hm in d.history_models %}<td class="num">{{ r.oos[hm.key]|fmt('.2f') }}</td>{% endfor %}<td class="num">{{ r.arb_out|fmt(',') }}</td><td class="num">{{ r.gap|signed('.2f') }}</td><td class="num">{{ r.beta|fmt('.3f') }}</td>{% if d.beta_estimator %}<td class="num">{{ d.beta_estimator.get(r.session)|fmt('.3f') }}</td>{% endif %}</tr>{% endfor %}</tbody>
     </table>
     </div>
-    <p class="note">{{ d.surface_history|length }} session{{ '' if d.surface_history|length == 1 else 's' }} with a stored chain: a range across sessions, not a sampling interval. The tiles at the top give each model’s range over these sessions (dashed rule).</p>
+    <p class="note">{{ d.surface_history|length }} session{{ '' if d.surface_history|length == 1 else 's' }} with a stored chain: a range across sessions, not a sampling interval. The tiles at the top give each model’s range over these sessions (dashed rule).{% if d.history_gaps %} A dash in a model’s column: the model is not scored on that session.{% if d.history_unfitted %} Where the job’s run records say why Heston has none: {{ d.history_unfitted }}.{% endif %}{% endif %}</p>
     {% if d.vix_gap_by_book %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="VIX replication gap by book (scrollable)">
     <table class="tbl dense" id="vix-gap-by-book"><caption>VIX replicated − Cboe close over the sessions above, by the book each was built from (index points)</caption>

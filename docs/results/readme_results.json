@@ -2,8 +2,8 @@
  "schema_version": 1,
  "about": "Every figure README.md quotes, and the validation pack's and DATA_SOURCES.md's figures that range over the sessions, as printed, with the artifacts each was computed from. Written by scripts/readme_results.py; joint_vol_calibration/tests/test_readme.py checks the documents against it and it against data_store.",
  "generated": {
-  "date": "2026-10-31",
-  "commit": "11f121dd99f66b4ee6a2dbdb4c9a5011581845e4",
+  "date": "2026-11-01",
+  "commit": "c0e938f0a03cc4dfb44d4fb61a0d989141417dd2",
   "command": "make readme-results"
  },
  "params": {
@@ -108,7 +108,7 @@
    "report_version": null
   },
   "data_store/market/tbill_rates#date<=2026-10-19": {
-   "sha256": "1fda78df4fcd20feeac841ceaa5b18382f75c17bfe34ecd07e56ee9eee8720fe",
+   "sha256": "01ebeb75b8133e03f0c997a57830e9327de761943eaf0691cb8781fe153a5d84",
    "report_version": null
   },
   "data_store/market/vix_daily#date<=2026-10-19": {

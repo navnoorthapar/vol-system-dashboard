@@ -6,7 +6,7 @@ extended to the six sessions with a stored chain and an accepted fit, 2026-03-24
 daily job's first multi-start trust-region fit). Every number here is quoted from a committed artifact (named beside
 it), a test that pins it, or a run recorded in `docs/`. A number over sessions names its sessions; the
 [Model Risk page](https://navnoorbawa.me/model-risk.html) computes the current values at every build, while this
-document quotes them as of a committed snapshot ([as of 2026-10-31](../results/readme_results.json)) that names the
+document quotes them as of a committed snapshot ([as of 2026-11-01](../results/readme_results.json)) that names the
 artifacts each was computed from. `tests/test_readme.py` checks against that snapshot the §1 limitations of M4, M5,
 M7, M15 and M18; in §2, M4's identifiability over the sessions, σ box and known weaknesses, all of M7, and M14's
 figures over the sessions; and the §3 rows of M4, M5, M7, M14, M15 and M18. It checks the snapshot against its

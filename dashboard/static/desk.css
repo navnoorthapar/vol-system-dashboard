@@ -310,7 +310,7 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
     linear-gradient(to top, rgba(138, 187, 255, 0.28), rgba(138, 187, 255, 0)) center bottom / 100% 6px no-repeat scroll; }
 .exp-strip .btn { flex: none; line-height: 17px; scroll-snap-align: start; }
 .exp-strip i { font-style: normal; }
-.exp-strip i::after { content: "d" / " days"; }
+.exp-strip i::after { content: "d"; content: "d" / " days"; }
 .exp-strip .btn.mo { margin-left: 8px; }
 .exp-strip .btn:focus-visible { outline-offset: -2px; }
 .exp-strip .settle { color: var(--text3); }

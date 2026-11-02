@@ -211,6 +211,26 @@ pieces; the work is to pose it exactly and report it honestly.
 
 ## 6. Decisions and progress (append; newest first)
 
+- **2026-11-01.** Wave 1 goes to main in one PR. It carries:
+  - 0.3, 0.4 (run records, streak and alert issue), 0.5, 0.6, 0.7, 0.9, 0.10 and 0.11;
+  - the producer half of 0.2;
+  - 1.12 (the bot stores VX settlements);
+  - the Surface page at a full Cboe book's 45 expiries (HANDOFF D2, D3, A2, A3);
+  - the README's dated results snapshot.
+
+  Verification on the 17- and 45-expiry builds:
+  - recompute audit 0 mismatches;
+  - axe 0 violations and interact 0 failures;
+  - page budget ok;
+  - the deploy gate and the full suite green;
+  - the next-session simulation (a Monday book) through the bot's three gates.
+
+  Still building:
+  - 0.8 (a same-instant VIX reference from the close slot's closing book), in its review-fix round;
+  - 0.2's enumerating badge test;
+  - 0.4's forced-failure check.
+
+  Critic medians: re-run once tier 0 is complete.
 - **2026-10-29.** Tier 0.1 shipped (PR #15): `scripts/ci/recompute_audit.py` recomputes every
   number on Overview and Surface from data_store by independent code and gates CI and the bot's
   deploy; the live site passes it (11,933 of 11,933 checks, 100% coverage). The site renders from

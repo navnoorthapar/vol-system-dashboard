@@ -1324,7 +1324,7 @@
         }
         v = heat && ((heat.cells || [])[c.parentNode.sectionRowIndex] || [])[c.cellIndex - 1];
         if (out) out.textContent = (withHeads ? heads(c) : '') + (!src ? alt || c.getAttribute('data-detail') : c.className === 'empty' ? tbl.getAttribute('data-empty')
-          : v ? heat.detail.replace(/\{(\d)(:(\+?)(\d))?\}/g, function (m, i, x, sg, dg) { return x ? num(v[i], { digits: +dg, signed: !!sg }) : v[i]; }) : c.textContent);
+          : v && typeof heat.detail === 'string' ? heat.detail.replace(/\{(\d)(:(\+?)(\d))?\}/g, function (m, i, x, sg, dg) { return x ? num(v[i], { digits: +dg, signed: !!sg }) : v[i]; }) : c.textContent);
       }
       tbl.addEventListener('mouseover', function (e) { var c = e.target.closest(sel); if (c) show(c); });
       tbl.addEventListener('focusin', function (e) { var c = e.target.closest(sel); if (c) show(c); });

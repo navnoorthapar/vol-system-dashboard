@@ -222,6 +222,39 @@ python scripts/ci/simulate_next_session.py --full                               
 
 ## Status log (newest first; every session appends one entry)
 
+- **2026-11-01, fund-grade session 1, continued: wave 1 shipping; 0.8 and the tier-0 checks building.**
+  - **Shipped to main since the last entry:** PR #18. It unblocked the 2026-10-29 deploy:
+    - no Surface β from a chain the backtest excludes;
+    - a true minus on Research;
+    - the simulator's Friday book state.
+
+    Run 145 deployed 2026-10-29. The live pages pass the recompute audit, 12,145 of 12,145.
+  - **Wave 1, in one PR from `w1/integrate`:**
+    - w1/ops, w1/surface-source, w1/truth-in-text and w1/vx-complex;
+    - w2/vixrates (0.5) and w2/readme (the results snapshot);
+    - w3/surface with its review fixes;
+    - integration fixes, each with a test that fails on the old code:
+      - Calibration smiles without quotes say so and keep their height;
+      - the T-origin test rebuilds fits on the committed record, not the stale cache;
+      - a fit with no recorded VX score may have a leg once its session's settlements are stored;
+      - the Surface page budget grows with the default expiry's quotes and the stored sessions;
+      - the Surface note's false "keeps one size" is dropped;
+      - freeze refuses a heatmap entry without its detail.
+  - **Verified on the integration branch:**
+    - 17-expiry build: audit 7,689 of 7,689; 45-expiry build: audit 16,004 of 16,004;
+    - a11y 0 and interact 0 on both builds;
+    - page budget ok;
+    - `test_dashboard.py` 353 passed, everything else 2,494 passed;
+    - the next-session simulation (a Monday book).
+  - **In progress:**
+    - w2/closebook (0.8): its review found that the deploy gate fails when a session has both a closing and an overnight book, plus two majors; a fix round is running.
+    - w2/gates (0.2's enumerating badge test, 0.4's forced-failure check): not started.
+  - **After that:** the four-critic review, with its medians in FUND_GRADE_PLAN §6; extend the recompute audit to Calibration, Research, Risk and Model Risk; then tier 1.
+  - **Learned:**
+    - Test against the committed record, never the tracked SQLite cache. The bot never commits the cache, so a test on it silently tests an older store.
+    - A page budget must allow for what grows with the data (here the default expiry's quotes and the stored sessions), or it fails with no markup change.
+    - The next-session simulation runs whichever weekday follows the newest session; a Friday and a Monday exercise different book states.
+
 - **2026-10-31, w3/surface review fixes (on w1/integrate, not pushed).**
   - Commits 4a8d085 (at most four compared sessions), fd250ee (ruff gate), a0366c5 (budget sloped below 45; gzip printed at level 6), f779b51 (heatmap readout hang; freeze checks heat entries), da37873 (audit: schema and session per reader, typed readout numbers), e3b72ec (two-line expiry strip, "Expiry k of N", year marks, "days"), 6fe8e3e (heat grids: hidden tab, focus, scroll padding).
   - Acceptance on the 17- and 45-expiry builds: axe 0, interact 0 failures, audit 7,685 / 15,997 checks with 0 mismatches, page budget ok (267,068 / 421,799 B).

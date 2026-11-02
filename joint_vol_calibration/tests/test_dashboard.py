@@ -58,6 +58,34 @@ def _surface_file(name: str) -> Path:
     return root / sessions[-1] / name
 
 
+def _scored(sc: dict) -> list[str]:
+    """The models a scorecard.json scored, in its order. A row it marks ``available:
+    false`` has no metrics: Heston on a session with no stored fit (a skipped or
+    rejected calibration, every Friday so far), whose surface is built from its book
+    all the same; the page leaves that model out and says why."""
+    return [m["model"] for m in sc["models"] if m.get("available") is not False]
+
+
+def _fit_session(dash) -> str:
+    """The headline fit's session: what the Overview's surface figures and the
+    Calibration page's chain and smiles cite (the newest surface session may be a
+    newer one without a fit)."""
+    path, cal = dash.load_headline_calibration()
+    return dash._calibration_session(cal, path)
+
+
+def _overview_surface_file(dash, name: str) -> Path:
+    """``name`` of the session the Overview's surface figures cite (app.surface_result):
+    the headline fit's session when it has a scorecard, else the newest surface session."""
+    d = SHIPPED / "surface" / _fit_session(dash)
+    return d / name if (d / "scorecard.json").exists() else _surface_file(name)
+
+
+def _tight(text: str) -> str:
+    """Visible text without the space a no-wrap span (a date) leaves before ',', '.', ';', ')'."""
+    return re.sub(r"\s+([,.;)])", r"\1", text)
+
+
 def _load(name: str, rel: str):
     spec = importlib.util.spec_from_file_location(name, ROOT / rel)
     assert spec is not None
@@ -2816,7 +2844,10 @@ def test_the_smile_tabs_name_each_expiry_and_a_settlement_only_from_its_occ_root
     N', and the days sit in an <i> whose 'd' desk.css writes and names ' days' (a
     screen reader read '30d')."""
     css = (ROOT / "dashboard" / "static" / "desk.css").read_text()
-    assert re.search(r'\.exp-strip i::after\s*\{\s*content:\s*"d"\s*/\s*" days";\s*\}', css)
+    # a plain "d" first: an engine without content's alternative text drops that
+    # declaration and keeps the plain one, rather than printing the bare number
+    assert re.search(r'\.exp-strip i::after\s*\{\s*content:\s*"d";'
+                     r'\s*content:\s*"d"\s*/\s*" days";\s*\}', css)
     for n, roots in ((17, False), (45, True)):
         (tmp_path / f"n{n}").mkdir()
         monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path / f"n{n}", n, roots))
@@ -3884,20 +3915,22 @@ def test_one_colour_per_model_on_every_surface_chart(dash, pages):
     html = pages["/surface"]
     sl, be = _spec(html, "chart-slices"), _spec(html, "chart-by-expiry")
     by_name = {s["name"]: s["color"] for s in be["series"]}
-    models = json.loads(_surface_file("scorecard.json").read_text())["models"]
-    keys = [m["model"] for m in models]
-    assert len({dash.model_colour(k) for k in keys}) == len(keys)            # distinct
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    assert len({dash.model_colour(m["model"]) for m in sc["models"]}) == len(sc["models"])   # distinct
+    keys = _scored(sc)            # a model the session's scorecard did not score has no series
     for k in keys:
         label = dash.model_label(k)
         assert by_name[label] == dash.model_colour(k), k
         slice_cols = {s["color"] for s in sl["series"] if s.get("legendKey") == label}
         assert slice_cols == {dash.model_colour(k)}, (k, slice_cols)
     legend = [it["name"] for it in sl["legend_items"]]
-    assert {dash.model_label(k) for k in keys} <= set(legend)
-    assert {"Bid–ask", "Mid", "Heston fit anchors"} <= set(legend)
+    assert {dash.model_label(m["model"]) for m in sc["models"]} & set(legend) == {
+        dash.model_label(k) for k in keys}
+    assert {"Bid–ask", "Mid"} <= set(legend)
+    assert ("Heston fit anchors" in legend) == ("heston_v2" in keys)         # anchors of a scored fit
     assert len(legend) == len(set(legend))                                   # one button per key
     shown = {it["name"] for it in sl["legend_items"] if not it["hidden"]}
-    assert {dash.model_label("heston_v2"), dash.model_label("svi_cal")} <= shown
+    assert {dash.model_label(k) for k in ("heston_v2", "svi_cal") if k in keys} <= shown
     assert sl["marks"]["x"][0]["value"] == 0                                  # the forward
     # the same model keeps its colour on the calibration page
     cal = pages["/calibration"]
@@ -3930,13 +3963,14 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
         # once the Cboe book (8,819 quotes) was scored
         # (the bot's 2026-10-28 session: −0.180998 against −0.180999)
         assert [m[0] for m in mids] == pytest.approx([float(k) for k in q["k"]], abs=1e-6), s["name"]
-        # a model price whose IV cannot be inverted (NaN in the residual table: the simulated
-        # 2026-11-02 Heston fit on four deep out-of-the-money puts of one-week expiries) is a
-        # gap in the series, not a point
-        got, want = [p[1] for p in s["data"]], [float(v) * 100 for v in q["model_iv"]]
-        assert [g is None for g in got] == [not np.isfinite(w) for w in want], s["name"]
-        finite = [w for w in want if np.isfinite(w)]
-        assert [g for g in got if g is not None] == pytest.approx(finite, abs=1e-4), s["name"]
+        # a quote where the model has no IV (NaN in the residual table: a deep wing the
+        # model cannot price, as the simulated 2026-11-02 Heston fit on four deep
+        # out-of-the-money puts of one-week expiries) is a gap in the series, not a point
+        want = [float(v) * 100 if np.isfinite(v) else None for v in q["model_iv"]]
+        got = [p[1] for p in s["data"]]
+        assert [g is None for g in got] == [w is None for w in want], s["name"]
+        priced = [w for w in want if w is not None]
+        assert [g for g in got if g is not None] == pytest.approx(priced, abs=1e-4), s["name"]
         assert [v for p in by[(e, "ba")]["data"] for v in p[1:]] == pytest.approx(
             [v for b, a in zip(q["bid_iv"], q["ask_iv"]) for v in (b * 100, a * 100)], abs=1e-5)
 
@@ -3968,8 +4002,11 @@ def test_smile_slice_has_a_per_expiry_table_of_its_data(dash, pages):
     for e, _h, span, head in groups:
         assert head == f"{e} ({days[e]} days)", head
         assert int(span) == region.group(1).count("<th ")
-    for col in ("Bid", "Mid", "Ask", "Heston", "SVI-cal", "SVI", "eSSVI"):
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    for col in ("Bid", "Mid", "Ask", *(dash.model_short(k) for k in _scored(sc))):
         assert f">{col}</th>" in region.group(1), col
+    for k in {m["model"] for m in sc["models"]} - set(_scored(sc)):
+        assert f">{dash.model_short(k)}</th>" not in region.group(1), k
     assert ('[role="tabpanel"][hidden], .chart-data div[data-group][hidden] { display: block !important; }'
             in html)
     assert ".chart-data tbody[data-group][hidden] { display: table-row-group !important; }" in html
@@ -4005,10 +4042,11 @@ def test_scorecard_and_by_expiry_chart_say_which_quotes_they_score(dash, pages):
     and the history column names the repair's moves."""
     html = pages["/surface"]
     sc = json.loads(_surface_file("scorecard.json").read_text())
-    ns = {m["metrics"]["out_of_sample"]["n"] for m in sc["models"]}
+    ns = {m["metrics"]["out_of_sample"]["n"] for m in sc["models"] if m["model"] in _scored(sc)}
     title = re.search(r'<h2 class="panel-title" id="scorecard-t">(.*?)</h2>', html).group(1)
     assert ("same quotes" in title) is (len(ns) == 1)
     be = _spec(html, "chart-by-expiry")
+    assert sorted(s["name"] for s in be["series"]) == sorted(dash.model_label(k) for k in _scored(sc))
     res = pd.read_parquet(_surface_file("residuals.parquet"))
     for s in be["series"]:
         key = next(k for k in res["model"].unique() if dash.model_label(k) == s["name"])
@@ -4156,12 +4194,22 @@ def test_waterfall_end_bar_is_named_for_the_record_it_holds(dash, pages):
     assert f"the published C22 run ended at {dash._usd(float(c23[0]['pnl']), signed=True)}" in note
 
 
-def test_surface_badge_lists_the_models(pages):
-    """UI-10: the badge read 'models:' and nothing else."""
-    badge = _visible_text("<body>" + re.search(r'<div class="page-badge">(.*?)</div>', pages["/surface"],
-                                                re.DOTALL).group(1))
-    for m in ("eSSVI", "SVI", "SVI-cal", "Heston"):
-        assert re.search(rf"models:.*\b{re.escape(m)}\b", badge), (m, badge)
+def test_surface_badge_lists_the_models(dash, pages):
+    """UI-10: the badge read 'models:' and nothing else. It lists the models the
+    session's scorecard scored, and names one it did not score (Heston on a session
+    with no stored fit) with a link to the scorecard, whose note says why."""
+    block = re.search(r'<div class="page-badge">(.*?)</div>', pages["/surface"], re.DOTALL).group(1)
+    badge = _visible_text("<body>" + block)
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    listed = re.search(r"models: ([^·]*)", badge).group(1).strip()
+    assert listed.split(", ") == [dash.model_short(k) for k in pd.read_parquet(
+        _surface_file("residuals.parquet"), columns=["model"])["model"].unique()]
+    assert sorted(listed.split(", ")) == sorted(dash.model_short(k) for k in _scored(sc))
+    gone = [m for m in sc["models"] if m.get("available") is False]
+    for m in gone:
+        assert f'<a href="#scorecard">{dash.model_short(m["model"])} not scored on this session</a>' in block
+        assert dash.prose(m["reason"]) in _visible_text(pages["/surface"]), m["model"]
+    assert ("not scored on this session" in badge) == bool(gone)
 
 
 def test_surface_key_result_shows_its_range_caveat(dash, pages):
@@ -5052,6 +5100,17 @@ def test_freeze_refuses_a_data_file_without_a_heatmaps_details(dash, freezer, tm
     out = tmp_path / "site"
     assert freezer.freeze(str(out), dash) == 1
     assert not out.exists() or not any(out.iterdir())
+    # an entry without its detail template or its cells (the readout then threw on
+    # every hover and described the previous cell) is refused the same way
+    for broken in ({"cells": []}, {"detail": "{0}"}, {"detail": 1, "cells": []}):
+        def bad(kind, session, obj, broken=broken):
+            heat = dict(obj.get("heat") or {})
+            if "iv-heatmap" in heat:
+                heat["iv-heatmap"] = broken
+            return orig(kind, session, {**obj, "heat": heat} if "heat" in obj else obj)
+        monkeypatch.setattr(dash, "publish_json", bad)
+        out = tmp_path / f"site-{len(broken)}-{min(broken)}"
+        assert freezer.freeze(str(out), dash) == 1, broken
     page = '<table class="heat" id="iv-heatmap" data-src="data/x-0123456789abcdef.json" data-integrity="a">'
     assert freezer._heat_ids(page + '<p data-id="no">', "data/x-0123456789abcdef.json") == ["iv-heatmap"]
 
@@ -7035,16 +7094,24 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     # works: the arbitrage-free surface on held-out strikes, the VIX replication, the gate
     path, cal = dash.load_headline_calibration()
     session = dash._calibration_session(cal, path)
-    sc = json.loads(_surface_file("scorecard.json").read_text())
+    # the surface item cites the headline fit's session (the surface and Heston on the
+    # same session's quotes) and names the newer session Surface shows, if there is one
+    sc = json.loads(_overview_surface_file(dash, "scorecard.json").read_text())
     svi = next(m for m in sc["models"] if m["model"] == "svi_cal")["metrics"]["out_of_sample"]
+    cited, newest = sc["session"], _surface_file("scorecard.json").parent.name
     assert (f"median {svi['median_abs_hs']:.2f} half-spreads from the mid, "
-            f"{svi['inside_spread_pct']:.1f}% inside") in works
+            f"{svi['inside_spread_pct']:.1f}% inside the bid–ask, on the held-out strikes of {cited}"
+            + (f", the headline fit’s session (Surface shows the newer {newest})." if cited != newest
+               else ".")) in _tight(works)
+    # the replication item cites the session Surface shows (it links to that page's
+    # #vix-replication; no Heston figure is paired with it)
     rep = json.loads(_surface_file("vix_replication.json").read_text())
     gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
     if gap is None:     # a session whose chain does not replicate the VIX: no replication line
         assert "index pts from the Cboe close" not in works
     else:
-        assert f"{dash.signed(gap, '.2f')} index pts from the Cboe close" in works
+        assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
+                f"{newest}") in _tight(works)
     rows = dash.scan_calibrations()
     n_legacy = sum(1 for r in rows if r["legacy"])
     assert f"{n_legacy:,} pre-C22 fit" in works
@@ -7084,15 +7151,25 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     assert all(t.split(": ", 1)[1].startswith(("not ", "not yet")) for t in text["→ Next · not done yet"])
 
 
-def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(pages):
+def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(dash, pages):
     """R3-T3: the Overview and Model Risk said the VIX was replicated 'by the
     Cboe rules' while Surface's 'Where the replication departs from Cboe' lists
     the departures (the rate, the quote time, the forward, PM lines for AM
     monthlies, ...). Both now say 'the Cboe formula, with N listed departures
-    (Surface)', N counted from that list on the rendered Surface page."""
+    (Surface)', N counted from that list on the rendered Surface page. The
+    Overview's item links to that page, so it cites the session Surface shows (the
+    newest surface session, with or without a fit; no Heston figure sits beside the
+    replication): with 2026-10-30 built without a fit it cited 2026-10-29's +0.28 and
+    6 departures beside a Surface page showing 2026-10-30's +1.32 and 3."""
     m = re.search(r"<summary>Where the replication departs from Cboe</summary>(.*?)</details>",
                   pages["/surface"], re.DOTALL)
     rep = json.loads(_surface_file("vix_replication.json").read_text())
+    shown = _surface_file("vix_replication.json").parent.name
+    works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
+    gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
+    if gap is not None:
+        assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
+                f"{shown}, by the Cboe formula") in _tight(works)
     if m is None:       # no replication on this session: no claim either way
         assert "listed departure" not in pages["/"] + pages["/model-risk"]
         return
@@ -7106,8 +7183,7 @@ def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(p
                       pages["/surface"], re.DOTALL)
     assert (notes is not None) == bool(rep.get("gap_notes"))
     tail = f"with {n} listed departure{'' if n == 1 else 's'} (Surface)"
-    works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
-    if (rep["indices"].get("VIX") or {}).get("gap_vs_official") is not None:
+    if gap is not None:
         assert f"by the Cboe formula, {tail}." in works
     mr = _visible_text(pages["/model-risk"])
     assert f"Cboe VIX formula on the stored two-sided chain, {tail}; a gap points" in mr
@@ -8044,12 +8120,19 @@ def test_surface_and_calibration_badges_and_the_expiries_column_read_the_artifac
     sj = next(s["surface"] for s in inputs if s["session"] == head)
     others = [dash.session_expiries(s["surface"]) for s in inputs if s["session"] != head]
     want = dash.chain_badge(sj, others)
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
     for route in ("/surface", "/calibration"):
         badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', pages[route], re.DOTALL)
-        if route == "/calibration" and dash.load_page2().get("session") != head:
-            continue                       # the fit's own session's chain, when it has a surface report
         assert badge, route
         text = re.sub(r"\s+", " ", _visible_text("<body>" + badge.group(1))).strip()
+        if route == "/calibration":
+            # the chain the fit was made on, from the fit and its stored chain (its
+            # session's surface may be built from another book, a Cboe capture)
+            assert text.startswith("Chain: "), text
+            for part in _fit_chain_parts(SHIPPED, cal, fit):
+                assert part in text, (part, text)
+            continue
         assert text == want, route
         if sj["inputs"]["source"] == "yfinance" and not sj["inputs"].get("quote_time"):
             assert "Yahoo" in text
@@ -8238,7 +8321,8 @@ def test_surface_model_tiles_carry_their_range_over_every_stored_session(dash, p
     oos = dash.artifacts.surface_oos_by_session(SHIPPED)
     tiles = _kpi_blocks(html, "surface-scores")
     model_tiles = {k: v for k, v in tiles.items() if k.endswith("· median |z|")}
-    assert len(model_tiles) >= 4
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    assert sorted(model_tiles) == sorted(f"{dash.model_short(k)} · median |z|" for k in _scored(sc))
     score_rows = dash.load_surface()["score_rows"]
     for label, tile in model_tiles.items():
         key = next(r["key"] for r in score_rows if r["short"] + " · median |z|" == label)
@@ -8312,13 +8396,19 @@ def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_
     at one precision, wherever it is named."""
     _, cal = dash.load_headline_calibration()
     heston = dash._cal_losses(cal)["spx_oos_iv_rmse"]
-    sc = json.loads(_surface_file("scorecard.json").read_text())
-    svi_m = next(m for m in sc["models"] if m["model"] == "svi_cal")
-    svi = svi_m["metrics"]["out_of_sample"]["median_abs_hs"]
+
+    def svi_cal(path):
+        row = next(m for m in json.loads(path.read_text())["models"] if m["model"] == "svi_cal")
+        return row["metrics"]["out_of_sample"]["median_abs_hs"]
+    # the Overview cites the headline fit's session, Surface the newest (the same
+    # session unless the newest has no fit)
+    svi_ov = svi_cal(_overview_surface_file(dash, "scorecard.json"))
+    svi = svi_cal(_surface_file("scorecard.json"))
     for name, v, must, words in (
             ("Heston OOS RMSE", heston, ("/", "/calibration", "/model-risk"),
              ("RMSE", "out of sample", "Out of sample", "OOS")),
-            ("SVI-cal median |z|", svi, ("/", "/surface"), ("|z|", "half-spread"))):
+            ("SVI-cal median |z| (the Overview's session)", svi_ov, ("/",), ("|z|", "half-spread")),
+            ("SVI-cal median |z|", svi, ("/surface",), ("|z|", "half-spread"))):
         seen = {route: f for route, html in pages.items() if (f := _renderings_in_blocks(html, v, words))}
         assert set(must) <= set(seen), (name, seen)
         assert set().union(*seen.values()) == {f"{v:.2f}"}, (name, seen)
@@ -8327,14 +8417,17 @@ def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_
 def test_surface_history_heads_name_their_population(dash, pages):
     heads = _table_heads(pages["/surface"], "surface-history-table")
     models = [h for h in heads if "|z|" in h]
-    assert len(models) >= 4
+    oos = dash.artifacts.surface_oos_by_session(SHIPPED)
+    # every model a stored session scores keeps its column (a newest session without a
+    # Heston fit dropped Heston's column from every earlier session)
+    want = {x["model"] for x in oos}
+    assert sorted(models) == sorted(f"{dash.model_short(m)} |z|, out of sample" for m in want)
     assert all(h.endswith("|z|, out of sample") for h in models)
     assert "Scored quotes" in heads
     assert "Quotes" not in heads
     cap = re.search(r'id="surface-history-table"><caption>(.*?)</caption>', pages["/surface"], re.DOTALL)
     assert "out-of-sample quotes" in _html_unescape(cap.group(1))
     assert "all scored quotes" not in _html_unescape(cap.group(1))
-    oos = dash.artifacts.surface_oos_by_session(SHIPPED)
     rows = _table_rows(pages["/surface"], "surface-history-table")
     history_models = dash.load_surface()["history_models"]
     for r in rows:
@@ -8344,6 +8437,443 @@ def test_surface_history_heads_name_their_population(dash, pages):
                 v = next((x["median_abs_hs"] for x in oos
                           if x["session"] == r[0] and x["model"] == key), None)
                 assert cell == dash._fmt(v, ".2f"), (r[0], h)
+
+
+# ── a newest surface session without a Heston fit ─────────────────────────────
+
+def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
+    """The committed record as the bot leaves it after a session whose Heston fit was
+    skipped or rejected: every Friday so far (the Saturday book slot finds Yahoo's book
+    empty), and any session the gate rejects. Its surface is built from its book all
+    the same (tier 0.7 item 4), so the newest surface session has no stored fit: its
+    scorecard lists Heston as not scored, with the producer's reason and note, and its
+    residual table and index row hold no Heston rows; the headline fit is an earlier
+    session's. Made from the newest committed surface session by leaving out its Heston
+    rows and every fit on or after it (a newer fit whose surface build failed, which the
+    bot's fail-soft step allows, would otherwise be the headline), with the run record
+    the bot writes for a fit its gate rejected. Returns (data dir, that session)."""
+    from types import SimpleNamespace
+    from typing import Any
+
+    from joint_vol_calibration.surface import report, scorecard
+
+    data = tmp_path / "data_store"
+    data.mkdir()
+    newest = _surface_file("scorecard.json").parent.name
+    for child in SHIPPED.iterdir():
+        if child.name not in ("calibrations", "surface", "runs"):
+            (data / child.name).symlink_to(child)
+
+    def no_later_fit(c: Path) -> bool:
+        return not (c.name.startswith("joint_cal_") and c.stem[len("joint_cal_"):] >= newest)
+
+    def no_later_run(c: Path) -> bool:
+        # a real run record of the newest session (or later) would say something else
+        # happened to it than the rejection this view stands for
+        try:
+            rec = json.loads(c.read_text())
+        except (OSError, ValueError):
+            return True
+        s = str((rec.get("calibration") or {}).get("session") or "") if isinstance(rec, dict) else ""
+        return not s or s < newest
+    for sub, keep in (("calibrations", no_later_fit),
+                      ("surface", lambda c: c.name not in (newest, "index.json")),
+                      ("runs", no_later_run)):
+        (data / sub).mkdir()
+        for child in (SHIPPED / sub).iterdir() if (SHIPPED / sub).is_dir() else []:
+            if keep(child):
+                (data / sub / child.name).symlink_to(child)
+    # the run record of the fit the gate rejected (scripts/cloud_refresh.py run_record)
+    (data / "runs" / f"run_{newest.replace('-', '')}T235959Z_book.json").write_text(json.dumps({
+        "schema": "run_ledger/1", "run_utc": f"{newest}T23:59:59+00:00", "slot": "book",
+        "session": newest, "calibration": {"session": newest, "status": "rejected",
+                                           "reason": "kappa pinned at bound (kappa=0.10)"}}))
+    d = data / "surface" / newest
+    shutil.copytree(SHIPPED / "surface" / newest, d)
+    sc = json.loads((d / "scorecard.json").read_text())
+    gone = {m["model"] for m in sc["models"] if str(m["model"]).startswith("heston")}
+    ctx: Any = SimpleNamespace(sq=SimpleNamespace(session=newest), calibrations_dir=data / "calibrations")
+    why = scorecard.heston_v2_unavailable_reason(ctx)
+    note = report._heston_note(sc["models"])
+    sc["models"] = [{"model": m["model"], "available": False, "reason": why} if m["model"] in gone else m
+                    for m in sc["models"]]
+    sc["notes"] = [n.replace(note, report._heston_note(sc["models"])) for n in sc["notes"]]
+    for key in ("ranking_by_oos_median_abs_hs", "ranking_by_common_oos_median_abs_hs"):
+        sc[key] = [r for r in sc.get(key) or [] if r.get("model") not in gone]
+    sc["common_out_of_sample"]["models"] = [m for m in sc["common_out_of_sample"]["models"] if m not in gone]
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    res = pd.read_parquet(d / "residuals.parquet")
+    res[~res["model"].isin(gone)].reset_index(drop=True).to_parquet(d / "residuals.parquet", index=False)
+    idx = json.loads((SHIPPED / "surface" / "index.json").read_text())
+    for r in idx["sessions"]:
+        if r["session"] == newest:
+            r["models"] = {k: v for k, v in (r.get("models") or {}).items() if k not in gone}
+    (data / "surface" / "index.json").write_text(json.dumps(idx))
+    return data, newest
+
+
+@pytest.fixture(scope="module")
+def no_fit(dash, tmp_path_factory):
+    """The Overview, Surface and Calibration pages rendered from _no_fit_store, with
+    what they cite: the no-fit session, the headline fit's session and its data dir."""
+    data, newest = _no_fit_store(tmp_path_factory.mktemp("no_fit"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        path, cal = dash.load_headline_calibration()
+        out = {"data": data, "session": newest, "fit": dash._calibration_session(cal, path)}
+        client = dash.app.test_client()
+        for route in ("/", "/surface", "/calibration"):
+            r = client.get(route)
+            assert r.status_code == 200, route
+            out[route] = r.get_data(as_text=True)
+    return out
+
+
+def test_a_surface_session_without_a_fit_names_the_model_it_did_not_score(dash, no_fit):
+    """Tier 0.7 item 4 builds a session's surface whatever its Heston fit did, so after
+    a Friday (the Saturday slot finds Yahoo's book empty and skips the fit) or a
+    rejected fit the newest surface session has no Heston row. On a copy of the record
+    with 2026-10-30 built that way, the Surface badge listed three models and said
+    nothing of Heston. It now lists the scored models and names Heston as not scored,
+    linked to the scorecard, whose note gives the producer's reason; Heston has no tile."""
+    data, newest = no_fit["data"], no_fit["session"]
+    sc = json.loads((data / "surface" / newest / "scorecard.json").read_text())
+    scored, gone = _scored(sc), [m for m in sc["models"] if m.get("available") is False]
+    assert [m["model"] for m in gone] == ["heston_v2"]
+    html = no_fit["/surface"]
+    block = re.search(r'<div class="page-badge">(.*?)</div>', html, re.DOTALL).group(1)
+    badge = _visible_text("<body>" + block)
+    assert f"Session {newest}" in badge
+    assert re.search(r"models: ([^·]*)", badge).group(1).strip() == ", ".join(
+        dash.model_short(k) for k in pd.read_parquet(data / "surface" / newest / "residuals.parquet",
+                                                     columns=["model"])["model"].unique())
+    assert '<a href="#scorecard">Heston not scored on this session</a>' in block
+    assert dash.prose(gone[0]["reason"]) in _visible_text(html)
+    tiles = _kpi_blocks(html, "surface-scores")
+    assert sorted(k for k in tiles if k.endswith("· median |z|")) == sorted(
+        f"{dash.model_short(k)} · median |z|" for k in scored)
+
+
+def test_a_surface_session_without_a_fit_keeps_heston_in_the_history(dash, no_fit):
+    """The Surface history table took its model columns from the page session's
+    models, so a newest session without a Heston fit dropped Heston's column from
+    every earlier session as well. It keeps a column for every model a stored session
+    scores: a dash on the session without the fit, each earlier session's own figure,
+    and a note saying what the dash means."""
+    data, newest = no_fit["data"], no_fit["session"]
+    html = no_fit["/surface"]
+    heads = _table_heads(html, "surface-history-table")
+    assert "Heston |z|, out of sample" in heads
+    col = heads.index("Heston |z|, out of sample")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        oos = {(r["session"], r["model"]): r["median_abs_hs"]
+               for r in dash.artifacts.surface_oos_by_session(data)}
+    rows = {r[0]: r for r in _table_rows(html, "surface-history-table")}
+    assert rows[newest][col] == "—"
+    earlier = [s_ for s_ in rows if s_ != newest]
+    assert earlier
+    for s_ in earlier:
+        assert rows[s_][col] == dash._fmt(oos.get((s_, "heston_v2")), ".2f"), s_
+    note = re.search(r'id="surface-history".*?<p class="note">(.*?)</p>', html, re.DOTALL).group(1)
+    assert "A dash in a model’s column: the model is not scored on that session" in _html_unescape(note)
+
+
+def test_the_surface_history_gives_the_run_records_reason_for_a_session_without_a_fit(dash, no_fit):
+    """The history note said a dash's session's scorecard 'says why', but the scorecard
+    says only that no fit is stored ('rejected by its gate or not run'), and on a Friday
+    the fit is one session old, so no stale banner gives the reason either. The note now
+    reads the job's run records as the banner does: on the no-fit view, whose run record
+    says the gate rejected the newest session's fit, it names that session and the
+    recorded reason."""
+    data, newest = no_fit["data"], no_fit["session"]
+    rec = json.loads(next((data / "runs").glob(f"run_{newest.replace('-', '')}T*_book.json")).read_text())
+    why = rec["calibration"]["reason"].rstrip(".")
+    note = re.search(r'id="surface-history".*?<p class="note">(.*?)</p>', no_fit["/surface"], re.DOTALL)
+    text = _visible_text("<body>" + note.group(1))
+    assert "scorecard says why" not in text
+    lead = ("A dash in a model’s column: the model is not scored on that session. Where the job’s run "
+            "records say why Heston has none: ")
+    assert lead in text, text
+    # older sessions without a fit (every Friday's, from its Saturday record) may be
+    # named before it; the newest session's group is the rejection its record holds
+    said = text[text.index(lead) + len(lead):]
+    assert re.search(rf"(?:^|; )the gate rejected the fit of (?:\d{{4}}-\d\d-\d\d, )*{newest} — "
+                     rf"{re.escape(why)}(?:;|\.)", said), said
+    def run(s, status, why):
+        return {"calibration": {"session": s, "status": status, "reason": why}}
+    assert dash.unfitted_causes(["2026-10-30", "2026-11-02", "2026-11-06"], [
+        run("2026-10-30", "skipped", "no SPX option chain returned"),
+        run("2026-11-02", "rejected", "kappa pinned at bound."),
+        run("2026-11-02", "skipped", "a later slot"),
+        run("2026-11-06", "skipped", "no SPX option chain returned"),
+    ]) == ("the job did not fit 2026-10-30, 2026-11-06 — no SPX option chain returned; "
+           "the gate rejected the fit of 2026-11-02 — kappa pinned at bound")
+    assert dash.unfitted_causes(["2026-10-30"], []) == ""
+    # a later run that found the database a session behind names the older session too;
+    # the session's own run says why it has no fit
+    assert dash.unfitted_causes(["2026-10-30"], [
+        {"expected_session": "2026-10-30", **run("2026-10-30", "skipped", "no SPX option chain returned")},
+        {"expected_session": "2026-11-02", **run("2026-10-30", "skipped", "DB's latest session is stale")},
+    ]) == "the job did not fit 2026-10-30 — no SPX option chain returned"
+
+
+def test_the_inventory_says_what_a_scorecard_without_a_fit_holds(dash, no_fit):
+    """M14 said a session without a fit gets a scorecard that 'has no Heston row and
+    says why'. scorecard.json has the row, marked not available with the producer's
+    reason; it is the page's scorecard table that has none. The inventory now says so,
+    and both halves are checked on the no-fit view."""
+    data, newest = no_fit["data"], no_fit["session"]
+    sc = json.loads((data / "surface" / newest / "scorecard.json").read_text())
+    rows = [m for m in sc["models"] if str(m["model"]).startswith("heston")]
+    assert rows
+    assert all(m.get("available") is False and m.get("reason") for m in rows)
+    heads = [_visible_text("<body>" + r[0]) for r in re.findall(
+        r"<tr[^>]*>\s*<t[hd][^>]*>(.*?)</t[hd]>", re.search(
+            r'id="scorecard-table">(.*?)</table>', no_fit["/surface"], re.DOTALL).group(1), re.DOTALL)]
+    assert heads
+    assert not any("Heston" in h for h in heads), heads
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())["models"]
+    use = next(m["use"] for m in inv if m["id"] == "M14")
+    assert "has no Heston row and says why" not in use
+    assert ("its scorecard.json then marks Heston not available, with the producer's reason, and the "
+            "page's scorecard table has no Heston row") in use
+
+
+def test_the_overview_and_calibration_cite_the_fit_when_the_newest_surface_has_none(dash, no_fit):
+    """The rule for a newest surface session without a fit: the Overview's surface
+    item and key result cite the headline fit's session (so the surface and Heston are
+    scored on one session's quotes) and name the newer session Surface shows;
+    Calibration is about the headline fit: its smiles are its session's surface quotes
+    and its chain badge is the chain the fit was made on, read from the fit. On the copy
+    of the record with 2026-10-30 built without a fit, the Overview
+    printed 2026-10-29's SVI-cal median (1.74) with nothing to say it was not the
+    session Surface shows (1.56)."""
+    data, newest, fit = no_fit["data"], no_fit["session"], no_fit["fit"]
+    assert fit < newest
+    ov = no_fit["/"]
+    works = _tight(" ".join(_visible_text("<body>" + it) for it in _findings(ov)[0][2]))
+    cited = fit if (data / "surface" / fit / "scorecard.json").exists() else newest
+    svi = next(m for m in json.loads((data / "surface" / cited / "scorecard.json").read_text())["models"]
+               if m["model"] == "svi_cal")["metrics"]["out_of_sample"]
+    newer = f", the headline fit’s session (Surface shows the newer {newest})" if cited != newest else ""
+    assert (f"median {svi['median_abs_hs']:.2f} half-spreads from the mid, {svi['inside_spread_pct']:.1f}% "
+            f"inside the bid–ask, on the held-out strikes of {cited}{newer}.") in works
+    assert f"held-out quotes of {cited}{newer};" in _tight(_card(ov, "surface.html#scorecard"))
+    cal = no_fit["/calibration"]
+    smiles = [s_ for cid, s_ in _raw_specs(cal).items()
+              if cid.startswith("chart-smile-") and s_.get("quotes")]
+    fit_sj = data / "surface" / fit / "surface.json"
+    if fit_sj.exists():
+        sj = json.loads(fit_sj.read_text())
+        assert smiles
+        assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
+    else:
+        assert not smiles
+    # the badge names the chain the fit was made on, read from the fit, not its surface's book
+    badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', cal, re.DOTALL)
+    assert badge
+    text = _visible_text("<body>" + badge.group(1))
+    fit_cal = dash._load_pickle(data / "calibrations" / f"joint_cal_{fit}.pkl")
+    for part in _fit_chain_parts(data, fit_cal, fit):
+        assert part in text, (part, text)
+
+
+def test_the_overview_replication_item_cites_the_session_surface_shows(dash, no_fit):
+    """The Overview's 'VIX replicated from the stored chain' item links to Surface's
+    #vix-replication, which shows the newest surface session. It cited the headline
+    fit's session instead, so with the newest session built without a fit it read
+    '+1.32 index pts … on 2026-10-29, … with 6 listed departures (Surface)' beside a
+    Surface page showing 2026-11-02's +1.92 and 3 departures. No Heston figure is
+    paired with the replication, so the item now cites the session Surface shows:
+    its gap, its date, and N counted from the departures that page lists."""
+    data, newest = no_fit["data"], no_fit["session"]
+    rep = json.loads((data / "surface" / newest / "vix_replication.json").read_text())
+    gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
+    works = _tight(" ".join(_visible_text("<body>" + it) for it in _findings(no_fit["/"])[0][2]))
+    if gap is None:
+        assert "VIX replicated from the stored chain" not in works
+        return
+    m = re.search(r"<summary>Where the replication departs from Cboe</summary>(.*?)</details>",
+                  no_fit["/surface"], re.DOTALL)
+    n = len(re.findall(r"<li>", m.group(1))) if m else 0
+    tail = f", with {dash.plural(n, 'listed departure')} (Surface)" if n else ""
+    assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
+            f"{newest}, by the Cboe formula{tail}.") in works, works
+
+
+def _fit_chain_parts(data: Path, cal: dict, session: str) -> list[str]:
+    """What a page must say of the chain a joint fit was made on, read from the fit's
+    chain_diagnostics (vendor, quote or fetch time, where T runs from) and the stored
+    chain it was fitted on (options/spx_<session>.parquet): its rows, the quotes the
+    fit scored (its anchors and its out-of-sample quotes) and its listed expiries."""
+    diag = cal.get("chain_diagnostics") or {}
+    chain = pd.read_parquet(data / "options" / f"spx_{session}.parquet")
+    src = str(diag.get("source") or chain["source"].dropna().iloc[0]).lower()
+    when = str(diag.get("quote_time") or diag.get("fetched_at") or "")
+    stamp = f"{when[:10]} {when[11:16]} UTC"
+    scored = int(cal["n_spx_options"]) + int(cal["oos"]["n_spx_oos"])
+    parts = [f"{len(chain):,} rows → {scored:,} scored", f"{chain['expiry'].nunique()} expiries"]
+    if src not in ("yfinance", "yahoo"):
+        return [*parts, f"quotes at {stamp}"]
+    if not when:
+        return [*parts, "Yahoo Finance close snapshot", "no quote time"]
+    basis = str(diag.get("t_origin_basis") or "")
+    return [*parts, "Yahoo Finance download", f"fetched {stamp}", "Yahoo reports no quote times",
+            *(["T measured from the fetch"] if basis.startswith("quote_time") else
+              ["T from the 16:00 ET close"] if basis.startswith("session close") else [])]
+
+
+def _cboe_surface_store(tmp_path: Path, fit: str) -> Path:
+    """The committed record with the headline fit's session's surface built from a Cboe
+    book, as tier 0.7 builds it whenever that book passes the quote-state gates, while
+    the fit stays on the session's Yahoo download: surface.json names the book (vendor,
+    file, quote time, rows, scored quotes, expiries) and the scorecard's Heston row says
+    it was not scored on its fit's chain, as the producer writes them. The book's
+    record is made up for the view, different from the fit's chain in every figure."""
+    data = tmp_path / "data_store"
+    data.mkdir()
+    for child in SHIPPED.iterdir():
+        if child.name != "surface":
+            (data / child.name).symlink_to(child)
+    (data / "surface").mkdir()
+    for child in (SHIPPED / "surface").iterdir():
+        if child.name != fit:
+            (data / "surface" / child.name).symlink_to(child)
+    d = data / "surface" / fit
+    shutil.copytree(SHIPPED / "surface" / fit, d)
+    sj = json.loads((d / "surface.json").read_text())
+    stamp = f"{fit}T23:49:50Z"
+    book = {"source": "cboe", "quote_time": stamp, "fetched_at": stamp, "book_state": "closing",
+            "t_origin_basis": "session close 16:00 ET"}
+    sj["inputs"] = {**sj["inputs"], **book, "chain": f"data_store/options/cboe/spx_{fit}_234950Z.parquet",
+                    "chain_rows": 4 * int(sj["inputs"].get("chain_rows") or 1) + 7}
+    uni = sj["universe"]
+    sj["universe"] = {**uni, **book, "n_universe": 2 * int(uni.get("n_universe") or 1) + 3,
+                      "n_expiries": int(uni.get("n_expiries") or 1) + 28}
+    (d / "surface.json").write_text(json.dumps(sj))
+    sc = json.loads((d / "scorecard.json").read_text())
+    for m in sc["models"]:
+        if str(m["model"]).startswith("heston") and m.get("available") is not False:
+            m["fit"] = {**(m.get("fit") or {}), "fit_chain_source": "yahoo", "scored_on_fit_chain": False}
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    return data
+
+
+@pytest.fixture(scope="module")
+def cboe_surface(dash, tmp_path_factory):
+    """The Overview, Calibration and Model Risk pages rendered from _cboe_surface_store,
+    with the fit, its session and the data dir."""
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
+    if not (SHIPPED / "surface" / fit / "surface.json").exists():
+        pytest.skip(f"no surface is stored for the headline fit's session {fit}")
+    data = _cboe_surface_store(tmp_path_factory.mktemp("cboe_surface"), fit)
+    out = {"data": data, "fit": fit, "cal": cal}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        out["newest"] = dash.artifacts.surface_sessions(data)[-1]
+        client = dash.app.test_client()
+        for route in ("/", "/calibration", "/model-risk"):
+            r = client.get(route)
+            assert r.status_code == 200, route
+            out[route] = r.get_data(as_text=True)
+    return out
+
+
+def test_calibration_says_same_chain_when_the_surface_is_built_on_the_fits_chain(dash, tmp_path):
+    """The other side of naming the fit's chain: when the fit's session's surface was
+    built on the chain the fit was made on (every committed session before tier 0.7's
+    rebuilds, and any session whose Cboe book fails the quote-state gates), there is no
+    note naming another book beside the smiles, and the out-of-sample note says the
+    half-spreads are 'on the same chain', linking the Surface scorecard when that
+    session is the one Surface shows, else its row of the Surface history. A check of
+    the fix made same_chain always false and the page then said the 2026-10-29 surface
+    was 'not the Yahoo Finance download the fit was made on' with every test passing."""
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
+    if not (SHIPPED / "surface" / fit / "surface.json").exists():
+        pytest.skip(f"no surface is stored for the headline fit's session {fit}")
+    own = dash.fit_chain_record(cal, fit)
+    assert own
+    assert (own.get("inputs") or {}).get("chain"), own
+    data = tmp_path / "data_store"
+    data.mkdir()
+    for child in SHIPPED.iterdir():
+        if child.name != "surface":
+            (data / child.name).symlink_to(child)
+    (data / "surface").mkdir()
+    for child in (SHIPPED / "surface").iterdir():
+        if child.name != fit:
+            (data / "surface" / child.name).symlink_to(child)
+    d = data / "surface" / fit
+    shutil.copytree(SHIPPED / "surface" / fit, d)
+    sj = json.loads((d / "surface.json").read_text())
+    sj["inputs"] = {**(sj.get("inputs") or {}), "chain": own["inputs"]["chain"]}      # the fit's own file
+    (d / "surface.json").write_text(json.dumps(sj))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        assert dash.same_chain(own, sj)
+        newest = dash.artifacts.surface_sessions(data)[-1]
+        html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    assert 'id="smile-book"' not in html
+    oos = _visible_text("<body>" + re.search(r'id="oos".*?<p class="note">(.*?)</p>', html,
+                                             re.DOTALL).group(1))
+    assert "In half-spreads on the same chain, see" in oos, oos
+    assert "not the chain fitted here" not in oos
+    where = "the Surface scorecard" if newest == fit else f"the {fit} row of the Surface history"
+    assert where in oos, oos
+
+
+def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(dash, cboe_surface):
+    """Since tier 0.7 a session's surface is built from its Cboe book while the bot
+    fits the session's Yahoo download. Calibration took the fit's chain from the
+    surface's surface.json, so on the 2026-10-29 fit with its surface rebuilt from the
+    Cboe book it said 'Chain: Cboe · quotes at 2026-10-30 08:36 UTC · 28,734 rows' and
+    'the fit's SPX chain is a Cboe book', of a fit made on a 6,422-row Yahoo download
+    fetched at 08:51. The badge and the VX caption now name the fit's own chain (its
+    chain_diagnostics and stored chain); the smiles, drawn from the surface's quotes,
+    name that book and say the fit was not made on it, and so do the half-spread
+    figures of Heston on the Overview and Model Risk."""
+    data, fit, cal = cboe_surface["data"], cboe_surface["fit"], cboe_surface["cal"]
+    sj = json.loads((data / "surface" / fit / "surface.json").read_text())
+    book = dash.chain_provenance(sj)
+    assert book["vendor"] == "cboe"
+    html = cboe_surface["/calibration"]
+    badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', html, re.DOTALL)
+    assert badge
+    text = _visible_text("<body>" + badge.group(1))
+    parts = _fit_chain_parts(data, cal, fit)
+    for part in parts:
+        assert part in text, (part, text)
+    assert "Cboe" not in text
+    assert book["time"] not in text
+    cap = _visible_text("<body>" + re.search(r'<p class="note" id="vx-caption">(.*?)</p>', html,
+                                             re.DOTALL).group(1))
+    fit_name = next(p for p in parts if p.startswith(("Yahoo", "quotes at")))
+    when = next(p for p in parts if p.startswith(("fetched", "quotes at")))
+    lead = fit_name if fit_name.startswith("Yahoo") else "Cboe book with"
+    assert f"the fit’s SPX chain is a {lead}" in cap, cap
+    assert when in cap
+    assert book["time"] not in cap
+    # the smiles are the surface's quotes: their footnote and a note name that book
+    smiles = [s_ for cid, s_ in _raw_specs(html).items()
+              if cid.startswith("chart-smile-") and s_.get("quotes")]
+    assert smiles
+    assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
+    note = _visible_text("<body>" + re.search(r'<p class="note" id="smile-book">(.*?)</p>', html,
+                                              re.DOTALL).group(1))
+    assert (f"These panels draw the {fit} surface’s quotes, a Cboe book with {book['time']}, not the "
+            f"{fit_name} the fit was made on.") in note
+    oos = _visible_text("<body>" + re.search(r'id="oos".*?<p class="note">(.*?)</p>', html,
+                                             re.DOTALL).group(1))
+    assert "In half-spreads on the session’s Cboe quotes, not the chain fitted here, see" in oos
+    assert "on the same chain" not in oos
+    # Heston's half-spreads on that book, on the Overview (the fit's session) and Model Risk
+    clause = "the fit was made on the session’s Yahoo download, not on this book"
+    assert f"inside ({clause})." in _tight(_card(cboe_surface["/"], "surface.html#scorecard"))
+    mr = _visible_text(cboe_surface["/model-risk"])
+    assert (clause in mr) == (cboe_surface["newest"] == fit)
 
 
 # ── P2.7: no half-empty grid rows, no blank panel bottoms ────────────────────
@@ -8997,8 +9527,11 @@ def test_model_risk_lists_breaches_first_and_counts_them_in_its_filters(dash, pa
     assert statuses == sorted(statuses, key=_SEVERITY.index)
     d = dash.load_model_risk()
     n_breach = d["rag_counts"]["breach"]
-    assert n_breach >= 1
+    # how many checks breach is the data's to say (the VX lag breached every session
+    # until the daily job stored settlements; 2026-10-30 has none): the order holds
+    # whatever the tally, and a breach is never below another status
     assert statuses[:n_breach] == ["breach"] * n_breach
+    assert "breach" not in statuses[n_breach:]
     inv = [m["id"] for m in d["inventory"]] + [v["id"] for v in d["vendor_inputs"]] + ["Data"]
     for st in _SEVERITY:
         models = [m["model"] for m in d["monitors"] if m["status"] == st]
@@ -9489,6 +10022,14 @@ def _producer_delta(p) -> float:
     return float(norm.cdf(-p.k / np.sqrt(w) + np.sqrt(w) / 2)) - (1.0 if p.right == "P" else 0.0)
 
 
+def _smile_chain(dash, route: str) -> Path:
+    """The surface session directory a page's smiles are drawn from: Surface's the
+    newest surface session, Calibration's the headline fit's own session."""
+    if route == "/surface":
+        return _surface_file("surface.json").parent
+    return SHIPPED / "surface" / _fit_session(dash)
+
+
 def _smile_specs(pages) -> list[tuple[str, dict]]:
     out = [("/surface", _with_book(_raw_specs(pages["/surface"])["chart-slices"]))]
     cal = _raw_specs(pages["/calibration"])
@@ -9504,11 +10045,11 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
     own spec, give residuals.parquet's strike (exactly), right, the producer's
     forward delta (1e-6) and each model's error_hs (±0.01), in_sample and
     inside_spread."""
-    res = pd.read_parquet(_surface_file("residuals.parquet"))
     specs = _smile_specs(pages)
     assert len(specs) >= 2, [r for r, _ in specs]
     n = 0
     for route, spec in specs:
+        res = pd.read_parquet(_smile_chain(dash, route) / "residuals.parquet")
         groups = spec["quotes"]["groups"]
         assert groups, route
         for e, g in groups.items():
@@ -9533,13 +10074,15 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
 
 def test_quote_inspector_footnote_names_the_chain_and_its_quote_time(dash, pages):
     """The tooltip's footnote is the chain's own source and quote time (surface.json),
-    'Yahoo close, no quote time' for a Yahoo snapshot without one."""
-    sj = json.loads(_surface_file("surface.json").read_text())
-    want = dash.quote_source_note(sj)
-    inp = sj.get("inputs") or {}
-    if str(inp.get("source")).lower() in ("yfinance", "yahoo") and not inp.get("quote_time"):
-        assert want == "Yahoo close, no quote time"
+    'Yahoo close, no quote time' for a Yahoo snapshot without one. Each smile's chain
+    is its page's: the newest surface session's on Surface, the headline fit's on
+    Calibration (a newer session without a fit has another book and quote time)."""
     for route, spec in _smile_specs(pages):
+        sj = json.loads((_smile_chain(dash, route) / "surface.json").read_text())
+        want = dash.quote_source_note(sj)
+        inp = sj.get("inputs") or {}
+        if str(inp.get("source")).lower() in ("yfinance", "yahoo") and not inp.get("quote_time"):
+            assert want == "Yahoo close, no quote time"
         assert spec["quotes"]["source"] == want, route
     assert dash.quote_source_note({"inputs": {"source": "cboe", "quote_time": "2026-10-16T15:45:00"}}) \
         == "Cboe, quotes at 2026-10-16 15:45:00"
@@ -11710,10 +12253,12 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
         == ["Yahoo Finance close snapshot", "no quote time"]
     cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z"}}
     assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC"]
-    # every page that names the newest surface session's chain says what it is
-    sj = json.loads(_surface_file("surface.json").read_text())
-    want = dash.chain_provenance(sj)
+    # every page that names a surface session's chain says what it is (the Overview's
+    # surface result is the headline fit's session's, the others the newest session's)
     for route in ("/", "/surface", "/model-risk"):
+        sj = json.loads((_overview_surface_file(dash, "surface.json") if route == "/"
+                         else _surface_file("surface.json")).read_text())
+        want = dash.chain_provenance(sj)
         text = _visible_text(pages[route])
         assert "Quotes as of" not in text, route
         if want and want["download"]:
