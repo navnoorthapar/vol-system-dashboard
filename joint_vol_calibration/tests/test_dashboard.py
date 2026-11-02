@@ -9322,7 +9322,14 @@ def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
     shown = dash.artifacts.load_surface(data)["session"]
     surface_panels = [k for k in sf if k not in ("page-head", "surface-history")]
     assert len(surface_panels) >= 15
-    assert all(sf[k] == f"surface:{shown}" for k in surface_panels), sf
+    # the scorecard also declares the chain its Heston row was fitted on when it says it is
+    # scored on another (tier 0.8: its fit-time clause reads that chain's download time)
+    sc = json.loads((data / "surface" / shown / "scorecard.json").read_text())
+    hfit = next(((m.get("fit") or {}) for m in sc["models"] if str(m["model"]).startswith("heston")
+                 and m.get("available") is not False
+                 and (m.get("fit") or {}).get("scored_on_fit_chain") is False), {})
+    assert sf["scorecard"] == f"surface:{shown}" + (f" cal:{hfit['source']}" if hfit.get("source") else "")
+    assert all(sf[k] == f"surface:{shown}" for k in surface_panels if k != "scorecard"), sf
     assert sf["page-head"] == f"surface:{shown}"
     assert sf["surface-history"] == "parts"
     assert cb["page-head"] == f"fit:{fit}"
@@ -12464,6 +12471,14 @@ def test_the_recompute_audit_fails_on_a_wrong_chain(recompute_audit, frozen_site
     wrong = ("12.3% two-sided near the money" if not share.group(1).startswith("12.3")
              else "45.6% two-sided near the money")
     sf.write_text(html[:share.start(1)] + wrong + html[share.end(1):], encoding="utf-8")
+    # the scorecard's fit chain line, where the record calls for one, with another share
+    html = sf.read_text(encoding="utf-8")
+    fit_line = re.search(r'id="scorecard-chain-2">.*?(\d+\.\d% two-sided near the money'
+                         r'|two-sided share not recorded)', html, re.DOTALL)
+    if fit_line:
+        sf.write_text(html[:fit_line.start(1)] + ("12.3% two-sided near the money" if not fit_line.group(1)
+                      .startswith("12.3") else "45.6% two-sided near the money") + html[fit_line.end(1):],
+                      encoding="utf-8")
     # the Overview pipeline's first book with another two-sided share of its lines (tier 0.8's books)
     html = ov.read_text(encoding="utf-8")
     bs = re.search(r'data-chain="book:[^"]+">[^<]*?(\d+\.\d)% of its lines two-sided', html)
@@ -12474,6 +12489,8 @@ def test_the_recompute_audit_fails_on_a_wrong_chain(recompute_audit, frozen_site
     failed = {(c.page, c.panel, c.label) for c in res["checks"] if not c.ok}
     assert ("Surface", "panel source lines", "#delta-grid source line") in failed
     assert ("Surface", "panel source lines", "#slices source line") in failed
+    assert (("Surface", "panel source lines", "#scorecard fit chain line (the fit's own record)") in failed) \
+        is bool(fit_line)
     assert any(pg == "Overview" and p == "pipeline" and lab.endswith("book 1: its chain (tier 0.2)")
                for pg, p, lab in failed), sorted(x for x in failed if x[0] == "Overview")
     assert any(p == "#surface-history" and lab.endswith("chain (its surface.json inputs)")

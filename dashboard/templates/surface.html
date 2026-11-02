@@ -154,7 +154,7 @@
 </div>
 
 <div class="g pair">
-  {% call m.panel('scorecard', 'Model scorecard · ' ~ ('same quotes, same metric' if d.same_quotes else 'each model’s out-of-sample quotes, same metric'), 's7', 'source: ' ~ d.score_source, src=d.chain_foot, chain=d.chain_key) %}
+  {% call m.panel('scorecard', 'Model scorecard · ' ~ ('same quotes, same metric' if d.same_quotes else 'each model’s out-of-sample quotes, same metric'), 's7', 'source: ' ~ d.score_source, src=(d.chain_foot if d.scorecard_chain == d.chain_key else none), chain=d.scorecard_chain) %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Model scorecard (scrollable)">
     <table class="tbl dense wrap-head" id="scorecard-table">
       <caption>Out-of-sample quotes of each model (the quotes it was not fitted to); |z| = |model − mid| in half-spreads; RMSE and bias (mean of model − mid) in vol pts</caption>

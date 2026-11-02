@@ -6797,6 +6797,15 @@ def surface_extras(d: dict, surf: dict) -> None:
     d["chain_key"] = f"surface:{session}"
     d["chain_foot"] = chain_foot(sj)
     d["chain_foot_head"] = chain_foot(sj, f"Chain of {session}")
+    # the scorecard also names the chain its Heston row was fitted on when that is not the
+    # book it is scored on: the row says so, and when that chain was downloaded (0.2, 0.8)
+    hfit = next(((m.get("fit") or {}) for m in ((surf.get("scorecard") or {}).get("models") or [])
+                 if isinstance(m, dict) and str(m.get("model", "")).startswith("heston")
+                 and m.get("available") is not False
+                 and (m.get("fit") or {}).get("scored_on_fit_chain") is False), {})
+    fit_file = str(hfit.get("source") or "")
+    d["scorecard_chain"] = (f"{d['chain_key']} cal:{fit_file}"
+                            if fit_file and (DATA / "calibrations" / fit_file).is_file() else d["chain_key"])
     desk_inputs = None
     if (((sj.get("surfaces") or {}).get("svi_cal") or {}).get("params") or {}).get("slices"):
         listed = desk_surface.delta_grid(sj, res, surf.get("vix"))

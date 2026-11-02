@@ -28,7 +28,7 @@ from bs4 import Tag
 from . import surface_math as M
 from .chrome import labels as regime_labels
 from .core import DATE, NUM, Audit, Check, norm, numbers_in, rounds_to, text_of
-from .data import Store, chain_short, chain_stamp, chain_words, sessions_between
+from .data import Store, chain_short, chain_stamp, chain_words, fit_chain_inputs, sessions_between
 
 STALE_WARN = 2                      # the page's amber banner from this age (NYSE sessions) on
 STALE_ERROR = 5                     # ... and the red one
@@ -2346,17 +2346,41 @@ def gap_by_book(a: Audit, c: Ctx, sessions: list[M.Session | None]) -> None:
 P_FOOT = "panel source lines"
 
 
+def scorecard_fit_file(c: Ctx) -> str | None:
+    """The calibration file of the scorecard's Heston row (scorecard.json fit.source) when
+    the row says it is scored on another chain than its fit's (fit.scored_on_fit_chain
+    false) and the file is stored; None otherwise."""
+    for m in (c.sc or {}).get("models") or []:
+        fit = (m.get("fit") or {}) if isinstance(m, dict) else {}
+        if (str(m.get("model", "")).startswith("heston") and m.get("available") is not False
+                and fit.get("scored_on_fit_chain") is False and fit.get("source")
+                and (c.store.root / "calibrations" / str(fit["source"])).is_file()):
+            return str(fit["source"])
+    return None
+
+
 def chain_feet(a: Audit, c: Ctx) -> None:
     """Every panel's source line (tier 0.2): the session's chain, its name and badge
     parts as the chain badge has them ('Chain: Cboe · quotes at …'); the comparison's
     names the session ('Chain of 2026-10-30: …'), whose earlier sessions' captions name
-    theirs."""
+    theirs. The scorecard's second line names the chain its Heston row was fitted on,
+    rebuilt from the fit's own record, exactly when the row is scored on another one."""
     parts = chain_parts(c)
     feet = a.soup.select("section.panel > .panel-foot.src-foot")
     a.equal(P_FOOT, "source lines (a recorded chain source)", bool(feet), bool(parts))
+    fit_file = scorecard_fit_file(c)
+    a.equal(P_FOOT, "#scorecard fit chain line (its Heston row scored on another chain than its fit's)",
+            a.one("#scorecard-chain-2") is not None, fit_file is not None)
     for el in feet:
         sec = el.find_parent("section")
         pid = str(sec.get("id")) if sec is not None else "?"
+        if pid == "scorecard" and el.get("id") == "scorecard-chain-2" and fit_file is not None:
+            cal = c.store.pickle(f"calibrations/{fit_file}")
+            m = re.search(r"\d{4}-\d{2}-\d{2}", fit_file)       # joint_cal_<session>.pkl
+            w = chain_words(fit_chain_inputs(c.store, cal, m.group(0) if m else c.session))
+            a.text(P_FOOT, "#scorecard fit chain line (the fit's own record)", el,
+                   "Fit chain: " + " · ".join([w[0], *w[2]]) if w else "Fit chain: source not recorded")
+            continue
         label = f"Chain of {c.session}" if pid == "surface-change" else "Chain"
         a.text(P_FOOT, f"#{pid} source line", el, f"{label}: " + " · ".join(parts))
 
