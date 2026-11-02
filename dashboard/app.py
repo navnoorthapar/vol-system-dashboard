@@ -6284,7 +6284,8 @@ def fit_chain_of(session: str | None) -> dict | None:
 #   surface:<session>  the chain the session's surface was built from (surface.json)
 #   fit:<session>      the chain the stored fit joint_cal_<session>.pkl was made on
 #   cal:<file>         the same for a calibration file named directly (the Greeks' source)
-#   options:<session>  the stored chain data_store/options/spx_<session>.parquet itself
+#   options:<session>  the stored chain data_store/options/spx_<session>.parquet, named as the
+#                      gate-passing fit made on it names it (options_chain_record)
 #   live               the live Yahoo capture behind β (BETA_LIVE_CAPTURE)
 #   ledger:<session>   the book the forward ledger of that session marks on
 #   book:<name>        a stored Cboe book (options/cboe/<name>.json, or the manifest
@@ -6313,13 +6314,41 @@ def book_chain_record(name: str, data_dir: Path | None = None) -> dict | None:
 
 def options_chain_record(session: str) -> dict | None:
     """The stored chain data_store/options/spx_<session>.parquet in surface.json's
-    shape: its one recorded source and quote (a Yahoo download's fetch) time."""
+    shape, named as the gate-passing fit made on that file names it.
+
+    The file holds its source and, for a chain stored before QUANT-01, the
+    download instant in its quote_time column; it holds neither a later Yahoo
+    download's fetch time nor the share of its near-the-money lines two-sided
+    (it keeps the two-sided lines only). The fit made on it records both in its
+    chain_diagnostics (fit_chain_record; the surface layer reads a Yahoo chain's
+    fetch time there too, quotes.fit_fetched_at), so the file is named from that
+    record: read off the file alone, a download stored since QUANT-01 was called
+    a close snapshot with no quote time, and no stored chain had its share.
+    Without such a fit, the file's own source and quote time."""
     path = DATA / "options" / f"spx_{session}.parquet"
     if not path.exists():
         return None
     st = _chain_file_stats(path)
-    return {"inputs": {"source": st["source"], "quote_time": st["quote_time"],
-                       "chain": f"data_store/options/{path.name}"}, "universe": {}, "session": session}
+    inputs = {"source": st["source"], "quote_time": st["quote_time"],
+              "chain": f"data_store/options/{path.name}"}
+    fit = _stored_chain_fit(session)
+    if fit is not None and fit["inputs"].get("chain") == inputs["chain"]:
+        inputs.update({k: v for k in ("source", "quote_time", "fetched_at", "t_origin_basis",
+                                      "near_atm_two_sided_share")
+                       if (v := fit["inputs"].get(k)) is not None})
+    return {"inputs": inputs, "universe": {}, "session": session}
+
+
+def _stored_chain_fit(session: str) -> dict | None:
+    """fit_chain_record of the stored fit joint_cal_<session>.pkl (the one a fit:<session>
+    key names) when it is a current-schema fit that passes the gate, else None."""
+    path = DATA / "calibrations" / f"joint_cal_{session}.pkl"
+    if not path.is_file():
+        return None
+    cal = _load_pickle(path)
+    if calibration_is_legacy(cal) is not False or not calibration_gate(cal)[0]:
+        return None
+    return fit_chain_record(cal, _calibration_session(cal, path))
 
 
 def live_chain_record() -> dict:

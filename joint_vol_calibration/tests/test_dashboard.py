@@ -9119,6 +9119,35 @@ def _fit_pv(dash, data: Path, cal_file: str) -> dict:
     return pv
 
 
+def _options_pv(dash, data: Path, session: str) -> dict | None:
+    """chain_provenance of the stored chain options/spx_<session>.parquet: as the stored
+    fit of that session names it when that fit passes the gate and was made on this
+    file (its chain_diagnostics hold a Yahoo download's fetch time and the two-sided
+    share, which the file does not), and the file's own source and quote-time columns
+    must not contradict it; else from those columns alone. So an options:<s> key and
+    a fit:<s> key name one file the same way."""
+    ch = pd.read_parquet(data / "options" / f"spx_{session}.parquet", columns=["source", "quote_time"])
+    src, qt = (sorted(set(ch[c].dropna().astype(str))) for c in ("source", "quote_time"))
+    own = dash.chain_provenance({"inputs": {"source": src[0] if len(src) == 1 else None,
+                                            "quote_time": qt[0] if len(qt) == 1 else None}})
+    path = data / "calibrations" / f"joint_cal_{session}.pkl"
+    if not path.is_file():
+        return own
+    with open(path, "rb") as fh:
+        cal = pickle.load(fh)
+    rec = dash.fit_chain_record(cal, dash._calibration_session(cal, path), data)
+    if (dash.calibration_is_legacy(cal) is not False or not dash.calibration_gate(cal)[0]
+            or (rec or {}).get("inputs", {}).get("chain") != f"data_store/options/spx_{session}.parquet"):
+        return own
+    fit = dash.chain_provenance(rec)
+    assert own, session
+    assert fit, session
+    assert own["vendor"] == fit["vendor"], (session, own, fit)
+    diag_qt = (cal.get("chain_diagnostics") or {}).get("quote_time")
+    assert not qt or not diag_qt or qt == [str(diag_qt)], (session, qt, diag_qt)
+    return fit
+
+
 def _greeks_source_calibration(data: Path) -> str:
     """The calibration file the stored Greeks surface records as its source (its
     parquet metadata), read without the dashboard's loader."""
@@ -9160,10 +9189,7 @@ def _key_chain(dash, data: Path, key: str) -> dict | None:
     if kind in ("fit", "cal"):
         return _fit_pv(dash, data, f"joint_cal_{arg}.pkl" if kind == "fit" else arg)
     if kind == "options":
-        ch = pd.read_parquet(data / "options" / f"spx_{arg}.parquet", columns=["source", "quote_time"])
-        src, qt = (sorted(set(ch[c].dropna().astype(str))) for c in ("source", "quote_time"))
-        return dash.chain_provenance({"inputs": {"source": src[0] if len(src) == 1 else None,
-                                                 "quote_time": qt[0] if len(qt) == 1 else None}})
+        return _options_pv(dash, data, arg)
     if kind == "live":
         live = json.loads((ROOT / "joint_vol_calibration" / "tests" / "fixtures"
                            / "spx_chain_live_20261012.json").read_text())
@@ -9432,6 +9458,30 @@ def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
     assert mr["check-beta-drift"] == rows[-1], (mr["check-beta-drift"], rows)
     assert rk["page-head"] == f"cal:{_greeks_source_calibration(data)}"
     assert all(v == rk["page-head"] for k, v in rk.items() if k not in ("page-head", "hedge"))
+
+
+def test_a_stored_chain_is_named_as_the_fit_made_on_it_names_it(dash):
+    """Tier 0.2 (w5 review, major 1): Research's β chains, its VRP β row and Model Risk's
+    β-drift check name each stored chain data_store/options/spx_<session>.parquet by its
+    options:<session> key, which was resolved from the file alone. The file holds no
+    fetch time of a Yahoo download stored since QUANT-01 and no two-sided share, so every
+    such download was called 'Yahoo Finance close snapshot, no quote time, two-sided
+    share not recorded' while Calibration, the Overview and the Surface scorecard named
+    the same file 'Yahoo Finance download, fetched …, 95.2% two-sided near the money'
+    from the fit made on it. Every gate-passing fit whose stored chain is its session's
+    file is checked: the two keys name that file in the same words."""
+    checked = []
+    for r in dash.scan_calibrations():
+        s, path = r["session"], Path(r["path"])
+        if (r["legacy"] is not False or not r["ok"] or path.name != f"joint_cal_{s}.pkl"
+                or not (dash.DATA / "options" / f"spx_{s}.parquet").exists()):
+            continue
+        rec = dash.fit_chain_record(dash._load_pickle(path), s)
+        if rec["inputs"]["chain"] != f"data_store/options/spx_{s}.parquet":
+            continue
+        assert dash.key_stamp(f"options:{s}") == dash.key_stamp(f"fit:{s}"), s
+        checked.append(s)
+    assert checked
 
 
 # ── P2.7: no half-empty grid rows, no blank panel bottoms ────────────────────
