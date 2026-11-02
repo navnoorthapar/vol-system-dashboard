@@ -7882,7 +7882,7 @@ def load_model_risk() -> dict[str, Any]:
                     "limits": limits_text or (f"OK ≤ {lim[0]:g} · watch ≤ {lim[1]:g} · breach above" if lim
                                               else "informational"),
                     "artifact": artifact, "note": note, "key": key or limits_key, "chain": chain,
-                    "limits_key": limits_key or None,
+                    "limits_key": limits_key or None, "limits_apply": bool(applied),
                     "id": "check-" + desk_monitor.slug(key or limits_key or check),
                     "href": f"{page}#{anchor}" if page else None, "page": page, "anchor": anchor,
                     "bullet": desk_monitor.bullet(value, applied, digits) if applied else None,

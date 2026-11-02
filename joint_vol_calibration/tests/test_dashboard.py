@@ -10317,20 +10317,21 @@ def test_model_risk_history_ends_with_todays_value_and_uses_todays_limits(dash, 
             assert "single observation" in body, m["check"]
 
 
-def test_model_risk_bullets_scale_the_value_against_the_limits(dash, pages):
-    """P3.3: each numeric check has a server-rendered bullet (role=img) whose tick x
-    is proportional to the value on [0, max(1.5·a, value)] and whose label names
-    the value and both limits."""
-    html = pages["/model-risk"]
-    d = {m["id"]: m for m in dash.load_model_risk()["monitors"]}
+def _check_bullets(dash, html: str, monitors: list[dict]) -> int:
+    """Each numeric check's bullet on the Model Risk page ``html`` against its row of
+    load_model_risk (``monitors``); returns how many bullets there are. A check whose
+    limits do not apply to today's value (limits_apply false: a VIX gap taken on another
+    book than the closing book) has none."""
+    d = {m["id"]: m for m in monitors}
     n = 0
     for rid, _st, body in _monitor_rows(html):
         svg = re.search(r'<svg class="bullet"[^>]*>', body)
         m = d[rid]
         lim = dash.MONITOR_LIMITS.get(m["limits_key"] or "")
-        if lim is None or m["num"] is None:
+        if lim is None or m["num"] is None or not m["limits_apply"]:
             assert svg is None, rid
             continue
+        assert svg is not None, rid
         a = _attrs(svg.group(0))
         assert a["role"] == "img"
         top = max(1.5 * lim[1], m["num"])
@@ -10340,7 +10341,32 @@ def test_model_risk_bullets_scale_the_value_against_the_limits(dash, pages):
         assert f"watch ≤ {lim[1]:g}" in label, rid
         assert label.startswith("value "), rid
         n += 1
-    assert n >= 10
+    return n
+
+
+def test_model_risk_bullets_scale_the_value_against_the_limits(dash, pages):
+    """P3.3: each numeric check has a server-rendered bullet (role=img) whose tick x
+    is proportional to the value on [0, max(1.5·a, value)] and whose label names
+    the value and both limits."""
+    assert _check_bullets(dash, pages["/model-risk"], dash.load_model_risk()["monitors"]) >= 9
+
+
+def test_model_risk_bullets_hold_in_every_chain_view(dash, chain_view, tmp_path):
+    """The bullet check above on the badge test's views: with the newest surface built
+    from a Yahoo chain, Model Risk's VIX replication check is informational (its limits
+    apply to a closing book's gap only, w5 review major 3) and has no bullet. The check
+    ran on the committed record only, whose newest surface is a closing book, so it
+    expected a bullet there and failed the presentation gate on a Yahoo-built newest
+    session (the w5 reviewer's yfull tree)."""
+    (tmp_path / "db").mkdir()
+    with pytest.MonkeyPatch.context() as mp, contextlib.ExitStack() as stack:
+        mp.setattr(dash, "DATA", chain_view["data"])
+        stack.enter_context(dash.record_db(scratch_dir=tmp_path / "db"))
+        mp.setattr(dash, "_CHROME_CACHE", {})
+        monitors = dash.load_model_risk()["monitors"]
+    assert _check_bullets(dash, chain_view["pages"]["/model-risk"], monitors) >= 9
+    rep = next(m for m in monitors if m["key"] == "vix_rep_gap")
+    assert rep["limits_apply"] is (rep["status"] != "info")
 
 
 def test_model_risk_values_link_to_their_evidence_and_the_evidence_links_back(dash, pages):
