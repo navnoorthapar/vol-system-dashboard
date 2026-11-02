@@ -8,6 +8,27 @@
    line per chain (app.key_feet: 'Chain: Cboe', 'quotes at …'); src overrides that line
    with its own parts, set like the page's chain badge; foot=False leaves it out where
    the panel's text names the chain already. #}
+{# β's chains as the pages state them (tier 0.2): an aggregate over chains declares the
+   chains it is taken over (data-chain-over; each named in a row of Research's
+   #beta-chains, which data-chain-over-at points to), and the first later chain is
+   named by its own key where no row names it (named=true, the Corrections page) #}
+{% macro beta_src(be, beta_txt, at) -%}
+{%- if be -%}<span data-chain-over="{{ be.est_keys }}" data-chain-over-at="{{ at }}">{{ beta_txt }} = mean of {{ be.n_db }} DB chain{{ 's' if be.n_db != 1 else '' }} and {{ be.n_live }} live capture{{ 's' if be.n_live != 1 else '' }} ({{ be.lo|fmt('.2f') }}–{{ be.hi|fmt('.2f') }})</span>
+{%- else -%}{{ beta_txt }}{%- endif -%}
+{%- endmacro %}
+
+{% macro beta_mean_all(be, at) -%}
+<span data-chain-over="{{ be.over_keys }}" data-chain-over-at="{{ at }}">the mean over all {{ be.n_all }} chains, of {{ be.over_first }} to {{ be.over_last }}, {{ be.mean_all|fmt('.2f') }}</span>
+{%- endmacro %}
+
+{% macro beta_check(be, at, named=false) -%}
+{%- set _later = be.later[0] if be and be.later else none -%}
+{%- if not be -%}the estimation chains are not available
+{%- elif not _later -%}no later chain is stored yet
+{%- else -%}the first later chain, {% if named %}<span data-chain="{{ _later.key }}">{{ _later.session }} ({{ key_stamp(_later.key) }}), gives {{ _later.ratio|fmt('.2f') }}</span>{% else %}<span data-chain-over="{{ _later.key }}" data-chain-over-at="{{ at }}">{{ _later.session }}, gives {{ _later.ratio|fmt('.2f') }}</span>{% endif %} — {{ beta_mean_all(be, at) }}{{ ', is a row of the β grid' if be.mean_all_in_grid else ', is not in the β grid' }}
+{%- endif -%}
+{%- endmacro %}
+
 {% macro panel(id, title, span='s6', meta=None, cls='', src=None, chain=None, foot=True) -%}
 {%- set _feet = [src] if src else (key_feet(chain) if foot and chain and chain not in ('parts', 'none') else []) %}
 <section class="panel {{ span }} {{ cls }}" id="{{ id }}" aria-labelledby="{{ id }}-t"{% if chain %} data-chain="{{ chain }}"{% endif %}>

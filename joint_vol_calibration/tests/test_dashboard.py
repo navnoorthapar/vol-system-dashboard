@@ -2126,10 +2126,15 @@ def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
                     "chain, 2026-10-16, gives 0.70")
     grid_betas = pd.read_csv(SHIPPED / "backtest" / "beta_sensitivity.csv")["beta"]
     in_grid = any(abs(g - round(float(np.mean(every)), 2)) < 1e-9 for g in grid_betas)
-    want = (f"{stem} — the mean over all {len(every)} chains, {np.mean(every):.2f}, "
+    days = sorted([*inc["session"], *oos["session"],
+                   str(json.loads(LIVE_BETA_CAPTURE.read_text())["as_of_et"])[:10]])
+    tail = (f" — the mean over all {len(every)} chains, of {days[0]} to {days[-1]}, {np.mean(every):.2f}, "
             + ("is a row of the β grid" if in_grid else "is not in the β grid"))
-    text = _visible_text(pages["/corrections"])
-    assert want in text
+    assert _tight(stem + tail) in _tight(_visible_text(pages["/research"]))
+    # the Corrections page has no row naming the later chain, so it names it in the sentence
+    named = stem.replace(f"{first['session']}, gives",
+                         f"{first['session']} ({dash.key_stamp('options:' + first['session'])}), gives")
+    assert _tight(named + tail) in _tight(_visible_text(pages["/corrections"]))
     for route in ("/research", "/corrections"):
         assert "five real 2026 SPX chains" not in _visible_text(pages[route])
     # every chain is listed with its ratio and use
@@ -9344,8 +9349,10 @@ def _own_text(el) -> str:
     return own.get_text(" ")
 
 
-def _chain_audit(dash, data: Path, route: str, html: str) -> tuple[list, dict]:
-    """Every declaration of one page, checked: (what is wrong, {unit id: its keys})."""
+def _chain_audit(dash, data: Path, route: str, html: str,
+                 pages: dict | None = None) -> tuple[list, dict]:
+    """Every declaration of one page, checked: (what is wrong, {unit id: its keys}).
+    ``pages`` (route: html) resolves an aggregate's data-chain-over-at on another page."""
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "lxml")
     for t in soup(["script", "style", "template", "noscript"]):
@@ -9404,10 +9411,16 @@ def _chain_audit(dash, data: Path, route: str, html: str) -> tuple[list, dict]:
             bad.append((route, el.get("id") or el.name, "does not name", missing,
                         re.sub(r"\s+", " ", el.get_text(" "))[:120]))
     # a row taken over several sessions' chains (data-chain-over: the Surface's gap by book)
-    # names none itself: each must be a key a row of its own panel declares, and names
+    # names none itself: each must be a key a row of its own panel declares, and names, or
+    # of the panel data-chain-over-at names ('#beta-chains', 'research.html#beta-chains')
+    files = {f: r for r, f in dash.ROUTES.items()}
     for el in soup.select("main [data-chain-over]"):
         over = str(el["data-chain-over"]).split()
         panel = el.find_parent("section")
+        if at := el.get("data-chain-over-at"):
+            page, _, pid = str(at).partition("#")
+            other = soup if not page else BeautifulSoup((pages or {}).get(files.get(page, ""), ""), "lxml")
+            panel = other.select_one(f"section#{pid}")
         declared = {k for x in (panel.select("[data-chain]") if panel is not None else [])
                     for k in str(x["data-chain"]).split()}
         if not over or [k for k in over if k not in declared]:
@@ -9415,6 +9428,51 @@ def _chain_audit(dash, data: Path, route: str, html: str) -> tuple[list, dict]:
                         [k for k in over if k not in declared] or "no key",
                         re.sub(r"\s+", " ", el.get_text(" "))[:120]))
     return bad, keys_of
+
+
+def test_the_beta_aggregates_declare_the_chains_they_are_taken_over(dash, pages):
+    """w5 review, minor 4: 'the mean over all 10 chains (0.78)' under Research's β grid
+    (a panel that reads no chain) and the Corrections register's 'the first later chain,
+    2026-10-16, gives 0.70 — the mean over all 10 chains, 0.78' named no chain, outside
+    any unit the badge test checks, and change with every chain the bot stores. Each
+    aggregate now declares the chains it is taken over (data-chain-over: the estimation
+    chains, or those and every later one), each named in a row of Research's
+    #beta-chains (data-chain-over-at), with the span of their sessions; on Corrections
+    the first later chain is named by its own key. The badge test checks every such
+    declaration (test_every_number_from_a_quote_chain_names_its_chain)."""
+    from bs4 import BeautifulSoup
+
+    research = BeautifulSoup(pages["/research"], "lxml")
+    rows = research.select("section#beta-chains table#beta-chains tbody tr")
+    use = {tr["data-chain"]: tr.select("td")[-1].get_text(" ").strip() for tr in rows}
+    est = sorted(k for k, u in use.items() if u == "estimation")
+    every = sorted(k for k, u in use.items() if u in ("estimation", "later, out of sample"))
+    later = sorted(k for k, u in use.items() if u == "later, out of sample")
+    assert est
+    assert every
+    for route, at in (("/research", "#beta-chains"), ("/corrections", "research.html#beta-chains")):
+        soup = research if route == "/research" else BeautifulSoup(pages[route], "lxml")
+        over = [(sorted(str(el["data-chain-over"]).split()), el.get("data-chain-over-at"),
+                 re.sub(r"\s+", " ", el.get_text(" "))) for el in soup.select("main [data-chain-over]")]
+        means = [o for o in over if "the mean over all" in o[2]]
+        assert means, route
+        for keys, where, text in means:
+            assert (keys, where) == (every, at), (route, text)
+            assert f"the mean over all {len(every)} chains" in text
+        assert [(k, w) for k, w, t in over if "= mean of" in t] == [(est, at)], route
+        if later:
+            first = min(later)
+            if route == "/research":
+                assert ([first], at) in [(k, w) for k, w, t in over if "gives" in t]
+            else:
+                span = [el for el in soup.select("main [data-chain]") if el["data-chain"] == first]
+                assert span, route
+                assert dash.key_stamp(first) in re.sub(r"\s+", " ", span[0].get_text(" "))
+    # the grid's ◆, when the all-chain mean is a row of it
+    grid_note = research.select_one("section#beta-grid")
+    if "◆ the mean over all" in grid_note.get_text(" "):
+        el = grid_note.select_one("[data-chain-over]")
+        assert sorted(str(el["data-chain-over"]).split()) == every
 
 
 def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
@@ -9441,7 +9499,7 @@ def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
     bad: list[tuple] = []
     keys: dict[str, dict[str, str]] = {}
     for route in dash.ROUTES:
-        b, keys[route] = _chain_audit(dash, data, route, pages[route])
+        b, keys[route] = _chain_audit(dash, data, route, pages[route], pages)
         bad += b
     assert bad == [], (chain_view["view"], bad)
 

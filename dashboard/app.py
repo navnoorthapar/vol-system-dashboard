@@ -2377,8 +2377,14 @@ def beta_estimation(regimes: pd.Series | None = None) -> dict:
         raise ValueError("β estimation chain(s) missing or excluded: " + ", ".join(missing))
     r_est = [c["ratio"] for c in est]
     r_all = r_est + [c["ratio"] for c in later]
+    # the chains each aggregate is taken over, by key (each named in a row of Research's
+    # #beta-chains: tier 0.2), and the sessions they span
+    days = sorted(str(c["session"])[:10] for c in est + later)
     return {
         "chains": chains, "later": later,
+        "est_keys": " ".join(str(c["key"]) for c in est),
+        "over_keys": " ".join(str(c["key"]) for c in est + later),
+        "over_first": days[0], "over_last": days[-1],
         "n_db": sum(1 for c in est if c["kind"] == "DB chain"),
         "n_live": sum(1 for c in est if c["kind"] == "live capture"),
         "mean": float(np.mean(r_est)), "lo": float(min(r_est)), "hi": float(max(r_est)),

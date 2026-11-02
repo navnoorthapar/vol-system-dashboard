@@ -9,8 +9,8 @@
 {% set beta_txt = ('β = ' ~ (p4.beta|fmt('.2f'))) if p4.beta is not none else 'β (not recorded)' %}
 {% set be = p4.beta_est %}
 {% if be %}{% set _later = be.later[0] if be.later else none %}
-{% set beta_src_txt = beta_txt ~ ' = mean of ' ~ be.n_db ~ ' DB chain' ~ ('s' if be.n_db != 1 else '') ~ ' and ' ~ be.n_live ~ ' live capture' ~ ('s' if be.n_live != 1 else '') ~ ' (' ~ (be.lo|fmt('.2f')) ~ '–' ~ (be.hi|fmt('.2f')) ~ ')' %}
-{% set beta_check_txt = ('the first later chain, ' ~ _later.session ~ ', gives ' ~ (_later.ratio|fmt('.2f')) ~ ' — the mean over all ' ~ be.n_all ~ ' chains, ' ~ (be.mean_all|fmt('.2f')) ~ (', is a row of the β grid' if be.mean_all_in_grid else ', is not in the β grid')) if _later else 'no later chain is stored yet' %}
+{% set beta_src_txt = m.beta_src(be, beta_txt, 'research.html#beta-chains') %}
+{% set beta_check_txt = m.beta_check(be, 'research.html#beta-chains', named=true) %}
 {% else %}{% set beta_src_txt = beta_txt %}{% set beta_check_txt = 'the estimation chains are not available' %}{% endif %}
 {% set _p = k.get('s3_null_p') %}
 {% set s3_base_txt = 'S3 at base (pass-1) size' ~ ((' (' ~ (k.s3_null_real|usd(true)) ~ ')') if k.get('s3_null_real') is not none else '') ~ ', before the sizing overlay' %}
