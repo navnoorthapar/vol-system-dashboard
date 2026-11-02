@@ -142,15 +142,19 @@ since the published site is static files.
 Since FUND_GRADE_PLAN 0.6 the `audit` job is a gate (`scripts/ci/pip_audit_gate.py`). It audits every pin at its public
 version (torch as `2.14.0`, so the CPU build is audited too) and fails on any advisory that
 `scripts/ci/pip_audit_allowlist.json` does not cover with a reason and an expiry. Its first run (2026-10-28) found 44
-advisories (43 distinct) in four packages; each is an allowlist entry with its reason. The pins were left unchanged
-(the change added the hashes only):
+advisories (43 distinct) in four packages, and its first CI run ten more published since (nine in filelock, one in
+Pillow). The pins were left unchanged (the change added the hashes only). The allowlist now holds 52 entries, one per
+advisory, each with its own reason and an expiry, in three packages:
 
-| Package | Locked | Advisories | Fixed in | Why allowed, until |
+| Package | Locked | Advisories allowed | Fixed in | Why allowed, until |
 |---|---|---|---|---|
-| certifi | 2026.2.25 | PYSEC-2026-4320 (a root whose intermediates were compromised) | 2026.10.18 | applies to the bot's downloads; the fix is inside the 14-day cooldown until 2026-11-01; bump it then (entry expires 2026-11-08) |
-| pillow | 12.3.0 | 39 (decoders, TIFF/PDF/EPS writers) | 13.0.0 | nothing here opens or decodes an image; matplotlib only writes the repo's own figures (2026-12-31) |
-| filelock | 3.32.3 | 3 (ReadWriteLock, soft locks; two Windows only) | 4.2.1 | torch dependency; nothing here uses those locks (2026-12-31) |
-| setuptools | 84.0.0 | GHSA-xmj3-9gf7-h52w (Windows legacy egg install) | 84.1.0 | torch dependency; Linux runners, pip installs (2026-12-31) |
+| pillow | 12.3.0 | 39 (decoders, TIFF/PDF/EPS writers, lossless JPEG with draft()) | 13.0.0 | nothing here opens or decodes an image; matplotlib only writes the repo's own figures (2026-12-31) |
+| filelock | 3.32.3 | 12 (ReadWriteLock, soft and Unix lock files; each needs another local user, a second process on the same soft lock, or Windows) | 4.0.9 and 4.2.1 | torch dependency; nothing here imports it or calls the torch paths that lock files, and CI and the bot run on single-user Linux runners (2026-12-31) |
+| setuptools | 84.0.0 | 1 (GHSA-xmj3-9gf7-h52w, Windows legacy egg install) | 84.1.0 | torch dependency; Linux runners, pip installs (2026-12-31) |
+
+certifi is no longer on it. Its one advisory, PYSEC-2026-4320 in 2026.2.25 (a root whose intermediates were
+compromised), applied to the bot's downloads; it was allowed while the fix was inside the 14-day release cooldown, then
+certifi was bumped to 2026.10.18 on 2026-11-01 (requirements.txt floors it) and the entry removed.
 
 ## Licences
 

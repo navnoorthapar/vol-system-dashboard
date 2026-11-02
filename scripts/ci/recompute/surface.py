@@ -28,7 +28,7 @@ from bs4 import Tag
 from . import surface_math as M
 from .chrome import labels as regime_labels
 from .core import DATE, NUM, Audit, Check, norm, numbers_in, rounds_to, text_of
-from .data import Store, chain_words, sessions_between
+from .data import Store, chain_short, chain_stamp, chain_words, sessions_between
 
 STALE_WARN = 2                      # the page's amber banner from this age (NYSE sessions) on
 STALE_ERROR = 5                     # ... and the red one
@@ -749,8 +749,14 @@ def surface_change(a: Audit, c: Ctx) -> None:
         old = M.cm_grid(x)
         tbl = a.one(f"#vs-table-{x.name}")
         gap = sessions_between(x.name, c.session)
-        nums(a, P_CHG, f"vs {x.name}: NYSE sessions earlier", a.one(f"#vs-table-{x.name} > caption"), [gap],
-             [x.name, x.name, c.session, c.session, x.name])
+        cap = a.one(f"#vs-table-{x.name} > caption")
+        stamp = chain_stamp((x.sj or {}).get("inputs") or {}, (x.sj or {}).get("universe") or {})
+        sn = [v for v, _, _ in numbers_in(stamp)] if stamp else []
+        sd = ["-".join(m) for m in DATE.findall(stamp)] if stamp else []
+        nums(a, P_CHG, f"vs {x.name}: NYSE sessions earlier, and its chain", cap, [gap, *sn],
+             [x.name, *sd, x.name, c.session, c.session, x.name])
+        a.equal(P_CHG, f"vs {x.name}: its chain (surface.json inputs)",
+                f"({norm(stamp)})" in text_of(cap) if stamp else "(" not in text_of(cap).split(":")[0], True)
         trs = rows(tbl)
         if not same_len(a, P_CHG, f"vs {x.name} rows", trs, c.cm):
             continue
@@ -2074,7 +2080,7 @@ def history(a: Audit, c: Ctx) -> None:
     # a column for every model a stored session scores: this session's, then the rest
     # by name (a session without a Heston fit keeps the earlier sessions' Heston column)
     hist = history_models(c)
-    want_hd = (["Session", "Scored quotes", "Expiries"]
+    want_hd = (["Session", "Chain", "Scored quotes", "Expiries"]
                + [f"{M.label(m)} |z|, out of sample" for m in hist]
                + ["Repair moves outside spread", "VIX rep. − close", "VIX-term ATM / VIX"]
                + (["β estimator ATM 30d / VIX"] if beta else []))
@@ -2091,6 +2097,10 @@ def history(a: Audit, c: Ctx) -> None:
         a.date(P_HIST, f"{name} session", td[0], name)
         a.equal(P_HIST, f"{name} highlighted (the page's session)", "em" in (tr.get("class") or []),
                 name == c.session)
+        sj = (x.sj if x is not None else None) or {}
+        a.text(P_HIST, f"{name} chain (its surface.json inputs)", td[1],
+               chain_short(sj.get("inputs") or {}, sj.get("universe") or {}) or "source not recorded")
+        td = td[1:]                     # the columns after the chain, as before it was added
         cell(a, P_HIST, f"{name} scored quotes (its residual table)", td[1],
              float(len(x.mkt)) if x is not None else M.num(r.get("n_quotes")))
         cell(a, P_HIST, f"{name} expiries (its residual table)", td[2],
@@ -2180,10 +2190,28 @@ def history_models(c: Ctx) -> list[str]:
 
 
 # ── the page ──────────────────────────────────────────────────────────────────
+P_FOOT = "panel source lines"
+
+
+def chain_feet(a: Audit, c: Ctx) -> None:
+    """Every panel's source line (tier 0.2): the session's chain, its name and badge
+    parts as the chain badge has them ('Chain: Cboe · quotes at …'); the comparison's
+    names the session ('Chain of 2026-10-30: …'), whose earlier sessions' captions name
+    theirs."""
+    parts = chain_parts(c)
+    feet = a.soup.select("section.panel > .panel-foot.src-foot")
+    a.equal(P_FOOT, "source lines (a recorded chain source)", bool(feet), bool(parts))
+    for el in feet:
+        sec = el.find_parent("section")
+        pid = str(sec.get("id")) if sec is not None else "?"
+        label = f"Chain of {c.session}" if pid == "surface-change" else "Chain"
+        a.text(P_FOOT, f"#{pid} source line", el, f"{label}: " + " · ".join(parts))
+
+
 PANELS: tuple[Callable[[Audit, Ctx], None], ...] = (
     page_head, staleness, state_tiles, score_tiles, arb_tile, delta_grid, surface_change, atm_term,
     vol_cone, rnd, iv_heat, residual_heat, residual_table, slices_panel, scorecard, by_expiry, arbitrage,
-    vix_replication, varswap, history)
+    vix_replication, varswap, history, chain_feet)
 
 
 def run(a: Audit, store: Store) -> None:

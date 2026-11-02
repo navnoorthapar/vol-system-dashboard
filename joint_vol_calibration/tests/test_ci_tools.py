@@ -11,6 +11,8 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
   * simulate_next_session.py (CI's simulate job): the simulated session's
     book is priced by parameters moved off the headline fit, with noise, so
     a test pinning a headline-derived value fails there, not in the bot.
+    Its --force-fail mode, run here in full, fails the run and checks that
+    bot_alert.py would open the bot-failure issue after two failures.
   * merge_main_data.py (merging live main's bot data into a branch that
     restated the record): only the re-derivable data files may conflict,
     they resolve to the branch's version, and main's rows are re-derived
@@ -178,6 +180,27 @@ def sim(monkeypatch):
     return _load("scripts/ci/simulate_next_session.py", "simulate_under_test", monkeypatch)
 
 
+# bot_alert.py's mistakes the forced-failure check must catch (each a change of the
+# repository's script): the 0.4 review's, run through the alert's own command line
+_FAILED_SET = 'FAILED = frozenset({"failure", "timed_out", "startup_failure"})'
+ALERT_MUTANTS = {
+    "alerts on a third failure": ("ALERT_AFTER = 2 ", "ALERT_AFTER = 3 "),
+    "alerts on one failure": ("ALERT_AFTER = 2 ", "ALERT_AFTER = 1 "),
+    "a success does not end the streak": ("        if c in SUCCEEDED:\n            break",
+                                          "        if c in SUCCEEDED:\n            continue"),
+    "a cancelled run counts as failed": (_FAILED_SET, _FAILED_SET.replace('"startup_failure"',
+                                                                          '"startup_failure", "cancelled"')),
+    "a second open issue": ("    if open_issues:\n", "    if False:\n"),
+    "main() drops the event": ("        res = alert(args.run_id, args.event,",
+                               "        res = alert(args.run_id, 'workflow_dispatch',"),
+    "main() alerts on nothing": ("    try:\n        res = alert(",
+                                 "    return 0\n    try:\n        res = alert("),
+    "the title loses the streak": ('title = title or f"Daily bot: {streak} scheduled runs failed in a row"',
+                                   'title = title or "Daily bot failed"'),
+    "a manual run reads the history": ('    if event != "schedule" and not all_events:', "    if False:"),
+}
+
+
 class TestSimulatedSession:
     def test_the_book_is_priced_off_the_headline_inside_the_box(self, sim):
         """PROD-8: the synthetic book was priced by the committed headline's own
@@ -320,6 +343,99 @@ class TestSimulatedSession:
         main = inspect.getsource(sim.main)
         assert "run_record_problems(" in main
         assert "check_captures.py" in main
+
+    def test_a_forced_failure_fails_the_run_and_the_alert_opens_the_issue(self, tmp_path):
+        """FUND_GRADE_PLAN 0.4: the failure alert was tested only on a fake history
+        (TestBotAlert), never after a run of the bot that failed. --force-fail runs both
+        scheduled slots of the simulated next session in a copy of this checkout with
+        Yahoo's SPX download raising: each must exit 1 on that outage with a complete run
+        record, the book run (the one with the freeze step) must not be publishable, and
+        the copy's bot_alert.py, run through its command line with a fake gh first on
+        PATH answering from the two runs' own records, must open the one bot-failure
+        issue, comment on one already open, leave it alone when a success came between,
+        and not read GitHub on a manual run. About two minutes."""
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "simulate_next_session.py"),
+                            "--force-fail", "--out", str(tmp_path)], capture_output=True, text=True,
+                           timeout=900, check=False)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        report = (tmp_path / "report.md").read_text()
+        assert "| bot runs (forced failure: Yahoo's SPX download raises in both slots) | 1 |" in report
+        assert "close exit 1, book exit 1, publishable False" in report
+        assert "simulated outage (--force-fail)" in report
+        assert ("| failure alert (two failed in a row) | 0 | None | created issue "
+                "https://github.invalid/issues/1 (streak 2; 4 gh calls) |") in report
+        assert "| failure alert (an issue already open) | 0 | None | commented issue 7 (streak 2;" in report
+        assert "| failure alert (a success between) | 0 | None | none (streak 1; 1 gh calls) |" in report
+        assert "| failure alert (a manual run) | 0 | None | none (streak None; 0 gh calls) |" in report
+        assert "PROBLEM" not in report
+        st = json.loads((tmp_path / "status.json").read_text())
+        assert st["exit_code"] == 1
+        assert st["simulated"]["force_fail"] is True
+        assert "freeze" in st["steps"]
+        assert not (tmp_path / "tree").exists()                       # removed when it passes
+
+    @staticmethod
+    def _failed_runs(sim, root: Path) -> tuple[dict, dict]:
+        """Two scheduled runs failed on the forced outage, as the slots record them: the
+        close run, then the book run (with the freeze step, not publishable)."""
+        (root / "data_store" / "runs").mkdir(parents=True)
+        why = f"SPX OHLCV download failed: {sim.OUTAGE}"
+        sts = {}
+        for slot, utc, steps in (("close", "2026-11-02T23:07:00+00:00", ["market", "labels"]),
+                                 ("book", "2026-11-03T03:30:00+00:00",
+                                  ["market", "capture", "calibrate", "freeze"])):
+            sts[slot] = {"run_utc": utc, "exit_code": 1, "publishable": False, "errors": [why],
+                         "publish_blockers": [why], "steps": steps}
+            (root / "data_store" / "runs" / f"run_{utc[:10]}_{slot}.json").write_text(json.dumps(
+                {"slot": slot, "run_utc": utc, "complete": True, "exit_code": 1, "calibration": None}))
+        return sts["close"], sts["book"]
+
+    def test_the_forced_failure_check_fails_when_the_run_or_the_alert_does_not(self, sim, tmp_path):
+        """The checks behind --force-fail, on hand-made failed runs: they pass with the
+        repository's bot_alert.py and fail when the book run did not fail, failed on
+        something else, could be published, or has no run record."""
+        import shutil
+        (tmp_path / "scripts" / "ci").mkdir(parents=True)
+        shutil.copy(ROOT / "scripts" / "ci" / "bot_alert.py", tmp_path / "scripts" / "ci" / "bot_alert.py")
+        close, book = self._failed_runs(sim, tmp_path)
+        work = tmp_path / "alert"
+        problems, rows = sim.force_fail_problems(1, book, tmp_path, close, work)
+        assert problems == []
+        assert [r[3] for r in rows] == [
+            "created issue https://github.invalid/issues/1 (streak 2; 4 gh calls)",
+            "commented issue 7 (streak 2; 3 gh calls)", "none (streak 1; 1 gh calls)",
+            "none (streak None; 0 gh calls)"]
+        # the issue names both failed runs, and the fake gh, not the real one, was called
+        log = work / "two_failed_in_a_row" / "gh_calls.jsonl"
+        calls = [json.loads(ln) for ln in log.read_text().splitlines() if ln]
+        body = calls[-1][calls[-1].index("--body") + 1]
+        assert "actions/runs/9000000" in body
+        assert "actions/runs/9000001" in body
+        assert sim.force_fail_problems(0, {**book, "exit_code": 0}, tmp_path, close, work)[0][0].startswith(
+            "the forced failure did not fail the book run")
+        assert sim.force_fail_problems(1, {**book, "errors": ["freeze failed"]}, tmp_path, close, work)[0][
+            0].startswith("the book run did not fail on the forced outage")
+        published = sim.force_fail_problems(1, {**book, "publishable": True}, tmp_path, close, work)[0]
+        assert published[0].startswith("the failed book run is publishable")
+        (tmp_path / "data_store" / "runs" / "run_2026-11-03_book.json").unlink()
+        assert sim.force_fail_problems(1, book, tmp_path, close, work)[0][0].startswith(
+            "0 book run record(s)")
+
+    @pytest.mark.parametrize("mutant", list(ALERT_MUTANTS))
+    def test_the_forced_failure_check_catches_a_wrong_alert(self, sim, tmp_path, mutant):
+        """Each mistake of bot_alert.py in ALERT_MUTANTS, in a copy of the script,
+        makes the forced-failure check report a problem. Two of the review's are left
+        out as they change nothing gh can show: counting manual runs (the history is
+        read with --event schedule, so none is listed) and counting the run itself (it
+        is in progress while its last step runs)."""
+        (tmp_path / "scripts" / "ci").mkdir(parents=True)
+        src = (ROOT / "scripts" / "ci" / "bot_alert.py").read_text()
+        old, new = ALERT_MUTANTS[mutant]
+        assert src.count(old) == 1, mutant
+        (tmp_path / "scripts" / "ci" / "bot_alert.py").write_text(src.replace(old, new))
+        close, book = self._failed_runs(sim, tmp_path)
+        problems, _ = sim.force_fail_problems(1, book, tmp_path, close, tmp_path / "alert")
+        assert problems, mutant
 
     def test_a_replayed_book_has_the_state_its_quote_time_gives(self, sim):
         """The simulated 2026-10-30 session (a Friday) failed the data gate: the replay
@@ -992,8 +1108,10 @@ class TestRecomputeAudit:
         for s, gap, devs in (("2026-10-29", 1.32, 6), ("2026-11-02", 1.92, 3)):
             d = tmp_path / "surface" / s
             d.mkdir(parents=True)
-            for name in ("residuals.parquet", "surface.json"):
-                (d / name).write_text("")
+            (d / "residuals.parquet").write_text("")
+            share = {"near_atm_two_sided_share": 1.0} if s == "2026-11-02" else {}
+            (d / "surface.json").write_text(json.dumps({"inputs": {"source": "cboe",
+                                                                   "quote_time": f"{s}T21:14:30Z", **share}}))
             (d / "vix_replication.json").write_text(json.dumps({
                 "indices": {"VIX": {"gap_vs_official": gap, "replicated": 20.0 + gap, "official": 20.0}},
                 "deviations": [f"departure {i}" for i in range(devs)]}))
@@ -1006,8 +1124,13 @@ class TestRecomputeAudit:
              "head": {"session": "2026-10-29"}, "arc": [], "skew": None}
         a = rc.core.Audit("t", BeautifulSoup("", "lxml"))
         items = {link: parts for link, _, parts, _ in ov.works_items(a, rc.data.Store(tmp_path), f)}
-        assert items["surface.html#vix-replication"] == [1.92, "2026-11-02", 3.0]
-        assert items["surface.html#scorecard"][2:] == ["2026-10-29", "2026-11-02"]
+        # each names its own session's chain and its two-sided share, or that none is recorded (0.2)
+        assert items["surface.html#vix-replication"] == [
+            1.92, "2026-11-02", 3.0,
+            " Chain: Cboe, quotes at 2026-11-02 21:14 UTC, 100.0% two-sided near the money."]
+        assert items["surface.html#scorecard"][2:] == [
+            "2026-10-29", "2026-11-02",
+            " Chain: Cboe, quotes at 2026-10-29 21:14 UTC, two-sided share not recorded."]
 
     def test_it_checks_the_overviews_stale_fit_banner_and_its_cause(self, monkeypatch, tmp_path):
         """A Friday without a fit followed by a skipped one left the headline fit 2 NYSE

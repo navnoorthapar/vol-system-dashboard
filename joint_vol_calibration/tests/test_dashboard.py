@@ -28,6 +28,7 @@ data_store/ (tests that need different inputs point the app at a temp copy).
 from __future__ import annotations
 
 import collections
+import contextlib
 import hashlib
 import importlib.util
 import itertools
@@ -38,6 +39,7 @@ import shutil
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -3474,9 +3476,11 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
               "corrections.html": 150_000, "model-risk.html": 100_000}
     # model-risk.html: 80 kB until VALIDATOR-12/13 added M21–M23, three checks and a
     # monitoring line per production model (about 88 kB). Its history strips draw one dot
-    # per stored session, about 150 bytes each, and the daily job adds a session a day:
-    # they are budgeted per dot (200 bytes) and the rest of the page as a whole, so the
-    # budget does not fail the bot's gate a few weeks of sessions from now.
+    # per stored session, and the daily job adds a session a day: they are budgeted per
+    # dot and the rest of the page as a whole, so the budget does not fail the bot's gate a
+    # few weeks of sessions from now. A dot was about 150 bytes (200 budgeted); since tier
+    # 0.2 it names the chain its value is read off (vendor, quote time, two-sided share)
+    # in its tooltip and in the strip's label, about 330 bytes (400 budgeted).
     for name, cap in budget.items():
         html = (out / name).read_text(encoding="utf-8")
         size = len(html.encode("utf-8"))
@@ -3484,7 +3488,7 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
             strips = re.findall(r'<svg class="hist".*?</svg>', html, re.DOTALL)
             hist = sum(len(x.encode("utf-8")) for x in strips)
             dots = html.count('<circle class="h-')
-            assert hist <= 200 * dots, (name, hist, dots)
+            assert hist <= 400 * dots, (name, hist, dots)
             size -= hist
         assert size <= cap, (name, size)
     # shared assets: the chart library is the only large script, fonts are subsets
@@ -6646,7 +6650,7 @@ def test_by_design_breaches_are_apart_from_live_ones(dash, pages, monkeypatch):
     html = pages["/model-risk"]
     designs = [c for c in d["monitors"] if c["status"] == "design"]
     for c in designs:
-        row = re.search(rf'<tr id="{c["id"]}" data-status="design">(.*?)</tr>', html, re.DOTALL)
+        row = re.search(rf'<tr id="{c["id"]}" data-status="design"[^>]*>(.*?)</tr>', html, re.DOTALL)
         assert row, c["id"]
         text = _html_unescape(" ".join(_visible_text("<body>" + row.group(1)).split()))
         assert "BY DESIGN" in text
@@ -6952,7 +6956,7 @@ def _findings(html: str) -> list[tuple[str, str, list[str]]]:
     cols = re.findall(r'<section class="([^"]+)"[^>]*>\s*<h3 class="find-head"[^>]*>(.*?)</h3>\s*'
                       r'<ul class="find-list[^"]*"[^>]*>(.*?)</ul>', strip.group(1), re.DOTALL)
     return [(c, _visible_text("<body>" + h).strip(),
-             re.findall(r'<li class="find-item">(.*?)</li>', ul, re.DOTALL))
+             re.findall(r'<li class="find-item"[^>]*>(.*?)</li>', ul, re.DOTALL))
             for c, h, ul in cols]
 
 
@@ -7453,7 +7457,7 @@ def test_overview_surface_line_is_the_one_month_row_with_its_age(dash, pages):
     ds = _desk_module()
     m1 = ds.constant_maturity(ds.delta_grid(*_desk_inputs()))[0]
     assert m1["label"] == "1M"
-    line = re.search(r'<p class="note" id="surface-line">(.*?)</p>', pages["/"], re.DOTALL)
+    line = re.search(r'<p class="note" id="surface-line"[^>]*>(.*?)</p>', pages["/"], re.DOTALL)
     assert line, "the Overview's headline-fit panel lost its surface line"
     text = re.sub(r"\s+([,.)])", r"\1", _visible_text("<body>" + line.group(1)))
     session = _surface_file("surface.json").parent.name
@@ -7626,7 +7630,8 @@ def test_skew_term_chart_is_log_log_with_units_and_the_slope_table_is_polyfit(da
         ts = sorted(sj["term_structure"], key=lambda t: t["T_days"])
         t1, k1 = np.array([x["T"] for x in sl]), np.array([ds.svi_atm_skew(x) for x in sl])
         t2, k2 = np.array([t["T_days"] / 365 for t in ts]), np.array([t["atm_skew_essvi"] for t in ts])
-        cells = rows[s["session"]]
+        # the cells after the session's Chain column (tier 0.2; the badge test checks it)
+        cells = [c for i, c in enumerate(rows[s["session"]]) if i != 1]
         for col, (t, k, lo) in zip((2, 3, 5, 6), ((t1, k1, 0), (t2, k2, 0), (t1, k1, 30), (t2, k2, 30))):
             keep = t * 365 >= lo
             ref = np.polyfit(np.log(t[keep]), np.log(np.abs(k[keep])), 1)[0]
@@ -7719,7 +7724,7 @@ def test_surface_change_against_the_compared_sessions_states_its_gap(dash, pages
     assert 'data-chart-filter="chart-atm-ts chart-rr-term"' in sec
     new = _cm_of(ds, next(s for s in inputs if s["session"] == head))
     for old in earlier:
-        cap = _html_unescape(re.search(rf'id="vs-table-{old}">\s*<caption>(.*?)</caption>', sec,
+        cap = _html_unescape(re.search(rf'id="vs-table-{old}">\s*<caption[^>]*>(.*?)</caption>', sec,
                                        re.DOTALL).group(1))
         gap = dash.session_age(old, head)
         assert f"vs {old}, {dash.plural(gap, 'NYSE session')} earlier" in re.sub(r"<[^>]+>", "", cap)
@@ -7983,16 +7988,18 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
 
 def test_chain_badge_names_the_source_and_the_quote_time(dash):
     """P2.5: the badge is generic: a Yahoo snapshot says so and that it has no
-    quote time; a Cboe-sourced chain prints 'Cboe' and its quote time."""
+    quote time; a Cboe-sourced chain prints 'Cboe' and its quote time. Tier 0.2: each
+    gives the chain's near-the-money two-sided share, or says it is not recorded."""
     yahoo = {"inputs": {"source": "yfinance", "quote_time": None, "chain_rows": 6191},
              "universe": {"n_universe": 2913, "n_expiries": 17}}
     assert dash.chain_badge(yahoo, [43, 40, 41, 43]) == (
-        "Chain: Yahoo Finance close snapshot · no quote time · 6,191 rows → 2,913 scored · "
-        "17 expiries (other stored sessions 40–43)")
+        "Chain: Yahoo Finance close snapshot · no quote time · two-sided share not recorded · 6,191 rows "
+        "→ 2,913 scored · 17 expiries (other stored sessions 40–43)")
     cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-23T15:59:30-04:00", "chain_rows": 9000},
-            "universe": {"n_universe": 4000, "n_expiries": 30}}
+            "universe": {"n_universe": 4000, "n_expiries": 30, "near_atm_two_sided_share": 0.99775}}
     txt = dash.chain_badge(cboe, [17])
-    assert txt.startswith("Chain: Cboe · quotes at 2026-10-23 15:59:30-04:00 · 9,000 rows → 4,000 scored")
+    assert txt.startswith("Chain: Cboe · quotes at 2026-10-23 15:59:30-04:00 · 99.8% two-sided near the money"
+                          " · 9,000 rows → 4,000 scored")
     assert txt.endswith("30 expiries (other stored session 17)")
     assert "Yahoo" not in txt
     assert "no quote time" not in txt
@@ -8337,7 +8344,6 @@ def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
     bot's fail-soft step allows, would otherwise be the headline), with the run record
     the bot writes for a fit its gate rejected. Returns (data dir, that session)."""
     from types import SimpleNamespace
-    from typing import Any
 
     from joint_vol_calibration.surface import report, scorecard
 
@@ -8745,10 +8751,10 @@ def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(d
               if cid.startswith("chart-smile-") and s_.get("quotes")]
     assert smiles
     assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
-    note = _visible_text("<body>" + re.search(r'<p class="note" id="smile-book">(.*?)</p>', html,
+    note = _visible_text("<body>" + re.search(r'<p class="note" id="smile-book"[^>]*>(.*?)</p>', html,
                                               re.DOTALL).group(1))
-    assert (f"These panels draw the {fit} surface’s quotes, a Cboe book with {book['time']}, not the "
-            f"{fit_name} the fit was made on.") in note
+    assert (f"These panels draw the {fit} surface’s quotes, a Cboe book with {book['time']} "
+            f"({book['share']}), not the {fit_name} the fit was made on.") in note
     oos = _visible_text("<body>" + re.search(r'id="oos".*?<p class="note">(.*?)</p>', html,
                                              re.DOTALL).group(1))
     assert "In half-spreads on the session’s Cboe quotes, not the chain fitted here, see" in oos
@@ -8758,6 +8764,380 @@ def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(d
     assert f"inside ({clause})." in _tight(_card(cboe_surface["/"], "surface.html#scorecard"))
     mr = _visible_text(cboe_surface["/model-risk"])
     assert (clause in mr) == (cboe_surface["newest"] == fit)
+
+
+# ── tier 0.2: every session-level number read off a quote chain names that chain ──
+
+def _as_vendor(sj: dict, vendor: str, session: str) -> dict:
+    """``session``'s surface.json recorded as built from ``vendor``'s chain, as the
+    producer records each: a Yahoo download of the session's stored chain, fetched the
+    next morning with T from the close; or a Cboe book quoted after the close. Only the
+    source fields change, so the view is the committed surface under the other label."""
+    nxt = (pd.Timestamp(session) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    if vendor == "yahoo":
+        rec = {"source": "yfinance", "quote_time": None, "fetched_at": f"{nxt}T08:50:33Z",
+               "t_origin_basis": "session close 16:00 ET", "book_state": None}
+        chain = f"data_store/options/spx_{session}.parquet"
+    else:
+        rec = {"source": "cboe", "quote_time": f"{session}T21:14:30Z", "fetched_at": f"{session}T21:29:30Z",
+               "t_origin_basis": "session close 16:00 ET", "book_state": "closing"}
+        chain = f"data_store/options/cboe/spx_{session}_212930Z.parquet"
+    return {**sj, "inputs": {**(sj.get("inputs") or {}), **rec, "chain": chain},
+            "universe": {**(sj.get("universe") or {}), **rec}}
+
+
+def _vendor_store(dash, tmp_path: Path, vendor: str, no_diag: bool = False) -> tuple[Path, list[str]]:
+    """The committed record with every surface session the pages cite as one session's
+    (the headline fit's and every later one, the newest among them) built from
+    ``vendor``'s chain: as committed where it already is, else relabelled (_as_vendor),
+    the Heston scorecard row saying whether that is the chain the fit was made on.
+    ``no_diag``: the headline (newest) fit's diagnostics are missing, as the bot
+    publishes a fit whose diagnostics step timed out (its row of diagnostics/
+    summary.json and its own file are not there). Returns (the data dir, the
+    relabelled sessions)."""
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
+    fit_chain = dash.fit_chain_record(cal, fit)
+    sessions = dash.artifacts.surface_sessions(SHIPPED)
+    cited = [s_ for s_ in sessions if s_ >= min(fit, sessions[-1])]
+    moved = [s_ for s_ in cited if (dash.chain_provenance(json.loads(
+        (SHIPPED / "surface" / s_ / "surface.json").read_text())) or {}).get("vendor") != vendor]
+    data = tmp_path / "data_store"
+    data.mkdir()
+    for child in SHIPPED.iterdir():
+        if child.name not in ("surface", "calibrations"):
+            (data / child.name).symlink_to(child)
+    (data / "calibrations").mkdir()
+    for child in (SHIPPED / "calibrations").iterdir():
+        if child.name != "diagnostics":
+            (data / "calibrations" / child.name).symlink_to(child)
+    diag = data / "calibrations" / "diagnostics"
+    diag.mkdir()
+    for child in (SHIPPED / "calibrations" / "diagnostics").iterdir():
+        if child.name != "summary.json" and not (no_diag and child.name == f"{fit}.json"):
+            (diag / child.name).symlink_to(child)
+    summ = json.loads((SHIPPED / "calibrations" / "diagnostics" / "summary.json").read_text())
+    if no_diag:              # (a record whose newest fit has none yet is already in this state)
+        summ["rows"] = [r for r in summ["rows"] if r["session"] != fit]
+        summ["n_sessions"] = len(summ["rows"])
+    (diag / "summary.json").write_text(json.dumps(summ))
+    (data / "surface").mkdir()
+    for child in (SHIPPED / "surface").iterdir():
+        if child.name not in moved:
+            (data / "surface" / child.name).symlink_to(child)
+    for s_ in moved:
+        d = data / "surface" / s_
+        shutil.copytree(SHIPPED / "surface" / s_, d)
+        sj = _as_vendor(json.loads((d / "surface.json").read_text()), vendor, s_)
+        (d / "surface.json").write_text(json.dumps(sj))
+        sc = json.loads((d / "scorecard.json").read_text())
+        for m in sc["models"]:
+            if str(m["model"]).startswith("heston") and m.get("available") is not False:
+                m["fit"] = {**(m.get("fit") or {}),
+                            "fit_chain_source": (dash.chain_provenance(fit_chain) or {}).get("vendor"),
+                            "scored_on_fit_chain": dash.same_chain(fit_chain, sj)}
+        (d / "scorecard.json").write_text(json.dumps(sc))
+    return data, moved
+
+
+# the states the bot publishes that change which chain a number is read off: the newest
+# sessions Yahoo downloads or Cboe books, and a newest fit whose diagnostics timed out
+# (the joint-fit card then reads the newest diagnosed session's fit)
+_CHAIN_VIEWS = {"yahoo": ("yahoo", False), "cboe": ("cboe", False), "yahoo-no-diagnostics": ("yahoo", True)}
+
+
+@pytest.fixture(scope="module", params=list(_CHAIN_VIEWS))
+def chain_view(request, dash, tmp_path_factory):
+    """Every page rendered from _vendor_store for one view, with what the checks
+    read: the data dir, the headline fit's session and record, and the vendor."""
+    vendor, no_diag = _CHAIN_VIEWS[request.param]
+    data, moved = _vendor_store(dash, tmp_path_factory.mktemp(f"chain_{request.param}"), vendor, no_diag)
+    out = {"vendor": vendor, "view": request.param, "data": data, "moved": moved, "pages": {}}
+    # the database scratch copy is removed however the block ends, so a failed render
+    # cannot leave it in place for the module's later tests
+    with pytest.MonkeyPatch.context() as mp, contextlib.ExitStack() as stack:
+        mp.setattr(dash, "DATA", data)
+        # the copy's own committed-record database, as freeze_site builds the site
+        stack.enter_context(dash.record_db(scratch_dir=tmp_path_factory.mktemp(f"db_{request.param}")))
+        mp.setattr(dash, "_CHROME_CACHE", {})
+        path, cal = dash.load_headline_calibration()
+        out.update(cal=cal, fit=dash._calibration_session(cal, path))
+        out["newest"] = dash.artifacts.surface_sessions(data)[-1]
+        client = dash.app.test_client()
+        for route in dash.ROUTES:
+            r = client.get(route)
+            assert r.status_code == 200, route
+            assert r.headers.get("X-Dashboard-Loader-Errors") == "0", (route, r.headers)
+            out["pages"][route] = r.get_data(as_text=True)
+    return out
+
+
+def _chain_of(data: Path, session: str) -> dict:
+    return json.loads((data / "surface" / session / "surface.json").read_text())
+
+
+def _fit_pv(dash, data: Path, cal_file: str) -> dict:
+    """chain_provenance of the chain the stored fit ``cal_file`` was made on (its
+    chain_diagnostics and stored chain, fit_chain_record), read from ``data``."""
+    path = data / "calibrations" / cal_file
+    with open(path, "rb") as fh:
+        cal = pickle.load(fh)
+    pv = dash.chain_provenance(dash.fit_chain_record(cal, dash._calibration_session(cal, path), data))
+    assert pv, cal_file
+    return pv
+
+
+def _greeks_source_calibration(data: Path) -> str:
+    """The calibration file the stored Greeks surface records as its source (its
+    parquet metadata), read without the dashboard's loader."""
+    import pyarrow.parquet as pq
+    meta = pq.read_schema(data / "greeks" / "greeks_surface.parquet").metadata or {}
+    raw = meta.get(b"greeks_provenance") or meta.get(b"provenance")
+    assert raw is not None, "the Greeks surface records no provenance"
+    prov = json.loads(raw.decode())
+    src = prov.get("source") if isinstance(prov.get("source"), dict) else {}
+    return Path(str(prov.get("source_calibration") or src.get("calibration_file"))).name
+
+
+def _names_chain(text: str, pv: dict | None) -> bool:
+    """The chain's source badge in ``text``: chain_provenance's name (or its short
+    form, 'Yahoo download'), its quote-time clause ('quotes at …', 'fetched …',
+    'no quote time') and its two-sided share ('99.8% two-sided near the money',
+    'two-sided share not recorded'); a chain whose source is not recorded says so."""
+    t = re.sub(r"\s+", " ", text)
+    if pv is None:
+        return "source not recorded" in t
+    return (pv["name"] in t or pv["short"] in t) and pv["badge"][0] in t and pv["share"] in t
+
+
+def _panel_html(html: str, pid: str) -> str:
+    m = re.search(rf'<section class="panel[^"]*" id="{re.escape(pid)}"[^>]*>(.*?)</section>', html, re.DOTALL)
+    assert m, pid
+    return m.group(1)
+
+
+def _key_chain(dash, data: Path, key: str) -> dict | None:
+    """chain_provenance of the chain a page's data-chain key names, read from ``data``
+    here, not by the page's resolver (dashboard.app.chain_of_key): a surface session's
+    surface.json; a stored fit's own record (its chain_diagnostics and stored chain); a
+    stored chain's parquet (its source and quote-time columns); the live capture behind
+    β (its US/Eastern capture time in UTC); a forward ledger's book."""
+    kind, _, arg = key.partition(":")
+    if kind == "surface":
+        return dash.chain_provenance(_chain_of(data, arg))
+    if kind in ("fit", "cal"):
+        return _fit_pv(dash, data, f"joint_cal_{arg}.pkl" if kind == "fit" else arg)
+    if kind == "options":
+        ch = pd.read_parquet(data / "options" / f"spx_{arg}.parquet", columns=["source", "quote_time"])
+        src, qt = (sorted(set(ch[c].dropna().astype(str))) for c in ("source", "quote_time"))
+        return dash.chain_provenance({"inputs": {"source": src[0] if len(src) == 1 else None,
+                                                 "quote_time": qt[0] if len(qt) == 1 else None}})
+    if kind == "live":
+        live = json.loads((ROOT / "joint_vol_calibration" / "tests" / "fixtures"
+                           / "spx_chain_live_20261012.json").read_text())
+        at = pd.Timestamp(live["as_of_et"]).tz_localize("America/New_York").tz_convert("UTC")
+        return dash.chain_provenance({"inputs": {"source": "yfinance",
+                                                 "fetched_at": at.strftime("%Y-%m-%dT%H:%M:%SZ")}})
+    if kind == "ledger":
+        inp = json.loads((data / "forward" / f"ledger_{arg}.json").read_text())["inputs"]
+        return dash.chain_provenance({"inputs": {
+            "source": inp["book"]["source"], "quote_time": inp["quote_time"],
+            "near_atm_two_sided_share": inp["book"].get("near_atm_two_sided_share")}})
+    raise AssertionError(f"unknown chain key {key!r}")
+
+
+# Every panel, page head, Model Risk check, Overview finding and result card declares in
+# data-chain what its numbers are read off: chain keys, 'parts' (its own elements carry
+# keys) or 'none'. A 'none' is listed here with why; any other unit is checked.
+_BACKTEST = "the backtest, marked at β·VIX with no option prices"
+_NO_CHAIN_UNITS: dict[str, dict[str, str]] = {
+    "/": {
+        "state-regime": "the rule label and its inputs: VIX, VVIX and SPX closes",
+        "state-ts": "VIX index closes", "state-pdv": "VIX against the PDV forecast of SPX closes",
+        "vx-curve": "VX futures settlements, not an option chain", "vix-ratio": "VIX and VIX3M closes",
+        "state-pipeline": "counts of stored records; its Cboe book row names each book and quote time",
+        "finding:calibration.html#history": "counts of stored fits",
+        "finding:research.html#inference": _BACKTEST, "result:research.html#inference": _BACKTEST,
+        "finding:research.html#research-classifier": "the classifier's accuracy on rule labels",
+        "finding:research.html#forward": "a count of registered ledger sessions",
+        "finding:calibration.html#vixleg": "a range over every gated fit, not one session's; each fit's "
+                                           "own score names its chain on Calibration #vixleg",
+        "finding:calibration.html#sigma-tradeoff": "the production σ box, a constant",
+    },
+    "/surface": {"surface-plan": "what the page will show: no number"},
+    "/risk": {"hedge": "a 2020 straddle priced at the VIX term structure, with no option chain"},
+    "/research": dict.fromkeys((
+        "page-head", "sleeve-spec", "equity", "drawdown", "rolling", "sleeves", "sleeve-pnl", "round-trips",
+        "trade-hists", "trade-stats", "drawdowns", "monthly", "annual", "inference", "beta-grid", "why",
+        "limits"), _BACKTEST) | {
+        "benchmarks": "Cboe strategy index levels, not an option chain",
+        "forecast": "vol forecasts of SPX closes", "research-classifier": "a classifier of rule labels",
+        "label-history": "rule labels"},
+    "/model-risk": {
+        "page-head": "counts of checks and models", "inventory": "the model inventory's prose",
+        "definitions": "the glossary", "check-calib-age": "a count of NYSE sessions",
+        "check-rate-reference": "the rate curve", "check-vx-lag": "the VX futures table's age",
+        "check-greeks-source": "whether the Greeks' fit is the headline fit (yes or no)",
+        "check-label-lag": "the market database's age", "check-ledger-chain": "the ledger's hash chain",
+        "check-svi-certificate": "whether the certificates are stored (yes or no)",
+        "check-classifier": "the classifier's accuracy"},
+    "/corrections": dict.fromkeys(("page-head", "waterfall", "headline", "register"),
+                                  "the corrections log: no number read off a chain"),
+}
+
+
+def _chain_units(soup) -> list[tuple[str, Any, list]]:
+    """(id, element, what it covers) of every unit a page must declare: the page head
+    (covering everything above the first panel: the Surface and Calibration tiles under
+    the badge, the Overview findings), each panel, each Model Risk check, each Overview
+    finding and result card."""
+    main = soup.select_one("main")
+    head = main.select_one(".page-head")
+    region, el = [head], head.find_next_sibling()
+    while el is not None and not ((el.name == "section" and "panel" in (el.get("class") or []))
+                                  or el.select_one("section.panel")):
+        region.append(el)
+        el = el.find_next_sibling()
+    units = [("page-head", head, region)]
+    units += [(x["id"], x, [x]) for x in main.select("section.panel")]
+    units += [(x["id"], x, [x]) for x in main.select("tr[id^=check-]")]
+    units += [(f"finding:{x.a['href']}", x, [x]) for x in main.select("li.find-item")]
+    units += [(f"result:{x['href']}", x, [x]) for x in main.select("a.result")]
+    return units
+
+
+def _own_text(el) -> str:
+    """An element's text without the parts that carry a data-chain of their own (rows,
+    captions, history dots): those are checked on their own, so a unit must name its
+    chain in its own text, not only in a nested part's."""
+    import copy
+    own = copy.copy(el)
+    for x in own.select("[data-chain]"):
+        x.decompose()
+    return own.get_text(" ")
+
+
+def _chain_audit(dash, data: Path, route: str, html: str) -> tuple[list, dict]:
+    """Every declaration of one page, checked: (what is wrong, {unit id: its keys})."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    for t in soup(["script", "style", "template", "noscript"]):
+        t.decompose()
+    bad: list[tuple] = []
+    keys_of: dict[str, str] = {}
+    exempt = _NO_CHAIN_UNITS.get(route, {})
+    cache: dict[str, dict | None] = {}
+
+    def names(text: str, keys: str) -> list[str]:
+        missing = []
+        for k in keys.split():
+            if k not in cache:
+                cache[k] = _key_chain(dash, data, k)
+            if not _names_chain(text, cache[k]):
+                missing.append(k)
+        return missing
+    for uid, el, scope in _chain_units(soup):
+        dc = el.get("data-chain")
+        keys_of[uid] = dc
+        if not dc:
+            bad.append((route, uid, "declares no data-chain"))
+        elif dc == "none":
+            if uid not in exempt:
+                bad.append((route, uid, "says it reads no chain but is not listed in _NO_CHAIN_UNITS"))
+        elif dc == "parts":
+            if not [x for s in scope for x in s.select("[data-chain]")
+                    if x.get("data-chain") not in ("none", "parts")]:
+                bad.append((route, uid, "'parts' with no part that names a chain"))
+        elif missing := names(" ".join(_own_text(s) for s in scope), dc):
+            bad.append((route, uid, "does not name", missing))
+    # every other element with keys, inside a unit or not (a row, caption, line or history
+    # dot); the page head names its chains in the region it covers, checked above
+    for el in soup.select("main [data-chain]"):
+        dc = str(el["data-chain"])
+        if dc in ("none", "parts") or "page-head" in (el.get("class") or []):
+            continue
+        if missing := names(_own_text(el), dc):
+            bad.append((route, el.get("id") or el.name, "does not name", missing,
+                        re.sub(r"\s+", " ", el.get_text(" "))[:120]))
+    return bad, keys_of
+
+
+def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
+    """Tier 0.2: a number read off a session's quote chain shows that chain's source
+    badge beside it (its vendor, its quote time: a Cboe book's 'quotes at …', a Yahoo
+    download's 'fetched …', a close snapshot's 'no quote time', and the share of its
+    near-the-money lines that are two-sided, or that it is not recorded) in its own
+    panel, row, line or history dot, on every page, in each state the bot publishes
+    (chain_view: Yahoo or Cboe newest sessions, a newest fit without diagnostics).
+
+    The pages declare it: every panel, page head, Model Risk check, Overview finding
+    and result card carries a data-chain attribute with the chain keys its numbers are
+    read off ('surface:<session>', 'fit:<session>', 'options:<session>', 'live',
+    'ledger:<session>'), 'parts' when its rows or lines carry their own, or 'none'. So a
+    page cannot add a unit without saying what it reads, a 'none' must be listed above
+    with its reason, and each key is resolved here from the record (_key_chain) and
+    looked for in the text beside it. Where the session a unit reads is not in its key
+    alone, it is checked against the page's own rule (the joint-fit card's session, the
+    Greeks' source fit, the Model Risk rows' artifacts, β's newest chain)."""
+    data, pages, fit = chain_view["data"], chain_view["pages"], chain_view["fit"]
+    newest = chain_view["newest"]
+    assert (dash.chain_provenance(_chain_of(data, newest)) or {}).get("vendor") == chain_view["vendor"]
+    assert set(_NO_CHAIN_UNITS) <= set(dash.ROUTES)
+    bad: list[tuple] = []
+    keys: dict[str, dict[str, str]] = {}
+    for route in dash.ROUTES:
+        b, keys[route] = _chain_audit(dash, data, route, pages[route])
+        bad += b
+    assert bad == [], (chain_view["view"], bad)
+
+    # the session each key names is the one the page reads
+    ov, sf, cb, mr, rk = (keys[r] for r in ("/", "/surface", "/calibration", "/model-risk", "/risk"))
+    line = re.search(r'<p class="note" id="surface-line"[^>]*>(.*?)</p>', pages["/"], re.DOTALL).group(0)
+    s_line = re.search(r"surface (?:<[^>]+>)?(\d{4}-\d{2}-\d{2})", line).group(1)
+    assert f'data-chain="surface:{s_line}"' in line
+    card = re.search(r'<a class="result" href="surface.html#scorecard"(.*?)</a>', pages["/"],
+                     re.DOTALL).group(1)
+    s_card = re.search(r"data_store/surface/(\d{4}-\d{2}-\d{2})/scorecard.json", card).group(1)
+    assert ov["result:surface.html#scorecard"] == f"surface:{s_card}"
+    # the joint-fit card's session as the card takes it (and test_overview_key_results_are_read_from_
+    # the_shipped_artifacts): the headline fit's diagnostics row, else, when the bot's fail-soft
+    # diagnostics of a new fit are missing, the newest diagnosed session
+    summ = json.loads((data / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
+    own = [r for r in summ if r["session"] == fit]
+    card_fit = (own or [max(summ, key=lambda r: r["session"])])[0]["session"] if summ else fit
+    joint = next(k for k in ov if k.startswith("result:calibration.html#"))
+    assert ov[joint] == f"fit:{card_fit}", (ov[joint], card_fit)
+    assert ov["state-fit"] == f"fit:{fit}"
+    shown = dash.artifacts.load_surface(data)["session"]
+    surface_panels = [k for k in sf if k not in ("page-head", "surface-history")]
+    assert len(surface_panels) >= 15
+    assert all(sf[k] == f"surface:{shown}" for k in surface_panels), sf
+    assert sf["page-head"] == f"surface:{shown}"
+    assert sf["surface-history"] == "parts"
+    assert cb["page-head"] == f"fit:{fit}"
+    specs = _raw_specs(pages["/calibration"])
+    smiles = [k for k in cb if k.startswith("smile-")]
+    assert smiles
+    for pid in smiles:
+        quotes = (specs.get(f"chart-{pid}") or {}).get("quotes")
+        assert cb[pid] == (f"surface:{fit}" if quotes else f"fit:{fit}"), pid
+    slug = dash.desk_monitor.slug
+    for key in ("oos_rmse", "short_oos_rmse", "vix_rmse", "params_at_bound", "feller"):
+        assert mr[f"check-{slug(key)}"] == f"fit:{fit}", key
+    for key in ("vix_rep_gap", "arb_exec_share", "median_abs_hs"):
+        row = re.search(rf'<tr id="check-{slug(key)}"[^>]*>(.*?)</tr>', pages["/model-risk"],
+                        re.DOTALL).group(1)
+        # the session whose artifact the row reads (its path is set with word breaks)
+        own_s = re.search(r"data_store/surface/(\d{4}-\d{2}-\d{2})/", re.sub(r"<[^>]+>", "", row)).group(1)
+        assert mr[f"check-{slug(key)}"] in (f"surface:{own_s}", "parts"), key
+    # β drift reads the market database's newest chain: the last later chain of the Research table
+    rows = re.findall(r'<tr[^>]*data-chain="([^"]+)"><td>[^<]*</td><td class="nowrap">[^<]*</td>'
+                      r'<td>[^<]*</td><td class="num">[^<]*</td><td>later, out of sample</td>',
+                      pages["/research"])
+    assert rows
+    assert mr["check-beta-drift"] == rows[-1], (mr["check-beta-drift"], rows)
+    assert rk["page-head"] == f"cal:{_greeks_source_calibration(data)}"
+    assert all(v == rk["page-head"] for k, v in rk.items() if k not in ("page-head", "hedge"))
 
 
 # ── P2.7: no half-empty grid rows, no blank panel bottoms ────────────────────
@@ -8807,8 +9187,10 @@ _LAYOUT_JS = """([maxUnused, maxBlank, exempt]) => {
           || el.classList.contains('grow-col')) return;
       last = Math.max(last, el.getBoundingClientRect().bottom);
     });
-    if (last !== -Infinity && p.getBoundingClientRect().bottom - last > maxBlank)
-      blanks.push(p.id + ' ' + Math.round(p.getBoundingClientRect().bottom - last));
+    // a panel's feet (its chain's source line, where it is cited) are content too
+    const foot = [...p.children].find(c => c.classList.contains('panel-foot') && vis(c));
+    const end = foot ? foot.getBoundingClientRect().top : p.getBoundingClientRect().bottom;
+    if (last !== -Infinity && end - last > maxBlank) blanks.push(p.id + ' ' + Math.round(end - last));
   });
   return {holes, blanks};
 }"""
@@ -8824,7 +9206,8 @@ def test_browser_grid_rows_are_full_and_panels_end_with_their_content(site_brows
     the blank below the replication panel's closed disclosure (135 px at 1440)
     and the scenario grid's (111 px at 1920). Nor is a .grow-col box itself: it
     stretches to its panel, so only what it holds is content (counting it hid a
-    440 px smile in a 1,446 px panel)."""
+    440 px smile in a 1,446 px panel). A panel's feet (the chain's source line,
+    tier 0.2, and "Cited on") are content: the blank is measured to the first."""
     ctx, page = _page(site_browser, width, 900)
     try:
         for name in ("index.html", "surface.html", "calibration.html", "risk.html", "research.html",
@@ -9250,7 +9633,7 @@ def test_vrp_beta_table_is_recomputed_from_the_market_db(dash, pages):
     f = _vol_frame().loc[start:end].dropna(subset=["rv_fwd"])
     tbl = html[html.index('id="vrp-beta-table"'):]
     tbl = tbl[:tbl.index("</table>")]
-    rows = re.findall(r'<tr[^>]*data-vrp-beta="([\d.]+)">(.*?)</tr>', tbl, re.DOTALL)
+    rows = re.findall(r'<tr[^>]*data-vrp-beta="([\d.]+)"[^>]*>(.*?)</tr>', tbl, re.DOTALL)
     assert [float(b) for b, _ in rows] == list(dict.fromkeys(betas))
     for b, cells in rows:
         beta = float(b)
@@ -9398,7 +9781,7 @@ def _monitor_rows(html: str) -> list[tuple[str, str, str]]:
     m = re.search(r'<table class="tbl cards" id="monitor-table">.*?<tbody>(.*?)</tbody>', html, re.DOTALL)
     assert m is not None
     tbody = m.group(1)
-    return re.findall(r'<tr id="(check-[\w-]+)" data-status="(\w+)">(.*?)</tr>', tbody, re.DOTALL)
+    return re.findall(r'<tr id="(check-[\w-]+)" data-status="(\w+)"[^>]*>(.*?)</tr>', tbody, re.DOTALL)
 
 
 def test_model_risk_lists_breaches_first_and_counts_them_in_its_filters(dash, pages):
@@ -9417,6 +9800,12 @@ def test_model_risk_lists_breaches_first_and_counts_them_in_its_filters(dash, pa
     assert statuses[:n_breach] == ["breach"] * n_breach
     assert "breach" not in statuses[n_breach:]
     inv = [m["id"] for m in d["inventory"]] + [v["id"] for v in d["vendor_inputs"]] + ["Data"]
+    if not n_breach:
+        # with no BREACH on the record the order is also checked on the page's own rows
+        # with the last one made a BREACH: it must come first
+        rows_ = [{**m, "status": "breach" if i == len(d["monitors"]) - 1 else m["status"]}
+                 for i, m in enumerate(d["monitors"])]
+        assert dash.desk_monitor.order_checks(rows_, inv)[0]["id"] == d["monitors"][-1]["id"]
     for st in _SEVERITY:
         models = [m["model"] for m in d["monitors"] if m["status"] == st]
         assert models == sorted(models, key=inv.index), st
@@ -11819,6 +12208,62 @@ def test_the_recompute_audit_fails_on_one_wrong_digit(recompute_audit, frozen_si
     assert ("ticker", "1M ATMF (SVI-cal, 30 days), %") in failed
 
 
+
+def test_the_recompute_audit_fails_on_a_wrong_chain(recompute_audit, frozen_site, tmp_path):
+    """Tier 0.2: the chain each Surface panel, the Surface history's rows, the
+    comparison's captions and the Overview's surface line name is recomputed from the
+    session's surface.json by the audit's own code. In a copy of the frozen site, the
+    delta grid's source line, the history's first Chain cell, the first compared
+    session's chain and the surface line's chain each name another chain, and the
+    smile panel's source line another two-sided share; each is reported as a
+    mismatch."""
+    site = tmp_path / "site"
+    shutil.copytree(frozen_site, site)
+
+    def other(text: str) -> str:            # a chain other than the one printed
+        return ("Yahoo Finance close snapshot, no quote time" if "Yahoo Finance close snapshot" not in text
+                else "Cboe, quotes at 2026-01-02 21:14 UTC")
+    sf = site / "surface.html"
+    html = sf.read_text(encoding="utf-8")
+    foot = re.search(r'(<div class="panel-foot src-foot" id="delta-grid-chain">)(.*?)(</div>)', html,
+                     re.DOTALL)
+    assert foot
+    html = html[:foot.start(2)] + "Chain: " + other(foot.group(2)).replace(", ", " · ") + html[foot.end(2):]
+    row = re.search(r'id="surface-history-table".*?<tbody><tr[^>]*><td class="nowrap">[^<]*</td>'
+                    r'<td>([^<]*)</td>', html, re.DOTALL)
+    assert row
+    html = (html[:row.start(1)] + ("Yahoo close, no quote time" if not row.group(1).startswith("Yahoo close")
+                                   else "Cboe, quotes at 2026-01-02 21:14 UTC") + html[row.end(1):])
+    cap = re.search(r'id="vs-table-[\d-]+">\s*<caption[^>]*><strong class="vs-head">.*?</strong> \(([^)]*)\)',
+                    html, re.DOTALL)
+    assert cap
+    html = html[:cap.start(1)] + other(cap.group(1)) + html[cap.end(1):]
+    sf.write_text(html, encoding="utf-8")
+    ov = site / "index.html"
+    html = ov.read_text(encoding="utf-8")
+    line = re.search(r'id="surface-line"[^>]*>.*?; ([^)]*)\)', html, re.DOTALL)
+    assert line
+    ov.write_text(html[:line.start(1)] + other(line.group(1)) + html[line.end(1):], encoding="utf-8")
+    # the smile panel's source line with another two-sided share (its chain otherwise right)
+    html = sf.read_text(encoding="utf-8")
+    share = re.search(r'id="slices-chain">.*?(\d+\.\d% two-sided near the money'
+                      r'|two-sided share not recorded)', html, re.DOTALL)
+    assert share
+    wrong = ("12.3% two-sided near the money" if not share.group(1).startswith("12.3")
+             else "45.6% two-sided near the money")
+    sf.write_text(html[:share.start(1)] + wrong + html[share.end(1):], encoding="utf-8")
+    res = recompute_audit.run(site, SHIPPED)
+    failed = {(c.page, c.panel, c.label) for c in res["checks"] if not c.ok}
+    assert ("Surface", "panel source lines", "#delta-grid source line") in failed
+    assert ("Surface", "panel source lines", "#slices source line") in failed
+    assert any(p == "#surface-history" and lab.endswith("chain (its surface.json inputs)")
+               for _, p, lab in failed)
+    assert any(p == "#surface-change" and lab.endswith("its chain (surface.json inputs)")
+               for _, p, lab in failed)
+    assert ("Overview", "headline fit", "surface line: its chain (surface.json inputs): says '; "
+            + re.search(r'id="surface-line"[^>]*>.*?; ([^)]*)\)', (frozen_site / "index.html").read_text(
+                encoding="utf-8"), re.DOTALL).group(1) + ")'") in failed
+
 def test_the_audit_leaves_out_a_scorecard_model_the_producer_marks_unavailable(recompute_audit, tmp_path):
     """A session whose Heston fit was rejected stores Heston in its scorecard as
     {available: false, reason} with no metrics (the Cboe-rebuilt 2026-10-20 does).
@@ -12130,13 +12575,17 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
     later = {"inputs": {"source": "yfinance", "quote_time": None, "fetched_at": "2026-10-28T08:50:33Z",
                         "t_origin_basis": "session close 16:00 ET"}}
     assert dash.chain_source(later) == ["Yahoo Finance download", "fetched 2026-10-28 08:50 UTC",
-                                        "Yahoo reports no quote times", "T from the 16:00 ET close"]
+                                        "Yahoo reports no quote times", "T from the 16:00 ET close",
+                                        "two-sided share not recorded"]
     assert dash.chain_sentence(later) == ("a Yahoo Finance download fetched 2026-10-28 08:50 UTC "
-                                          "(Yahoo reports no quote times; T from the 16:00 ET close)")
+                                          "(Yahoo reports no quote times; T from the 16:00 ET close; "
+                                          "two-sided share not recorded)")
     assert dash.chain_source({"inputs": {"source": "yfinance", "t_origin_basis": "session close 16:00 ET"}}) \
-        == ["Yahoo Finance close snapshot", "no quote time"]
-    cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z"}}
-    assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC"]
+        == ["Yahoo Finance close snapshot", "no quote time", "two-sided share not recorded"]
+    cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z",
+                       "near_atm_two_sided_share": 1.0}}
+    assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC",
+                                       "100.0% two-sided near the money"]
     # every page that names a surface session's chain says what it is (the Overview's
     # surface result is the headline fit's session's, the others the newest session's)
     for route in ("/", "/surface", "/model-risk"):

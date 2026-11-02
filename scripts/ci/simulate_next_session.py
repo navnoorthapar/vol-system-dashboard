@@ -57,10 +57,26 @@ Friday session built that way failed ten presentation tests (pages and tests
 that assumed a Heston row, and pages that cited different sessions), so the
 site would not have deployed on any weekend.
 
-    python scripts/ci/simulate_next_session.py [--out DIR] [--full] [--keep] [--no-fit]
+With --force-fail the runs are made to fail (FUND_GRADE_PLAN 0.4): Yahoo's SPX
+download raises, as in an outage, in both scheduled slots of the session. The
+close slot and then the book slot (market,capture,calibrate,freeze: the one
+whose status says whether the site may be published) fail hard on the market
+step, exit 1, and each writes a complete run record saying so; the book run
+must not be publishable. The workflow's last step (`if: failure()`) then runs
+scripts/ci/bot_alert.py; here the copy's script is run as that step runs it,
+through its command line, with a fake `gh` first on PATH that answers from a
+run history built from the two runs' own records and logs every call (nothing
+is sent). With the close run failed before the book run it must open the one
+bot-failure issue naming both; with an issue already open it must comment on
+it; with a success between them (a cancelled run after it, a failure before)
+it must do nothing; a manual run must not even read the history. No fit, no
+gates: about two minutes, so test_ci_tools.py runs this mode in full.
+
+    python scripts/ci/simulate_next_session.py [--out DIR] [--full] [--keep] [--no-fit | --force-fail]
 
 Exit 1 when the simulated run does not accept (with --no-fit: skip) the fit and
-record the session, or when any gate fails. Nothing outside --out is written.
+record the session, or when any gate fails; with --force-fail, when the run does
+not fail or the alert does not do what it must. Nothing outside --out is written.
 About 10 minutes (+9 with --full) on 4 CPUs; the diagnostics take about 4.
 """
 from __future__ import annotations
@@ -206,7 +222,11 @@ def _patch(module, **functions) -> None:
 
 # ── the driver: runs INSIDE the copy (python <copy>/scripts/ci/simulate_next_session.py --drive) ──
 
-def drive(status_file: Path, no_fit: bool = False) -> int:
+# --force-fail: what the outage raises (the run must fail on it, and say so)
+OUTAGE = "simulated outage (--force-fail): Yahoo Finance unreachable"
+
+
+def drive(status_file: Path, no_fit: bool = False, force_fail: bool = False) -> int:
     root = ROOT
     sys.path.insert(0, str(root))
     import importlib.util
@@ -294,6 +314,10 @@ def drive(status_file: Path, no_fit: bool = False) -> int:
     _patch(dl, download_spx_ohlcv=spx_dl, download_tbill_rate=tbill_dl,
            download_vix_term_structure=lambda start, end: ts_frame(start, end, "yfinance"),
            download_vix_index=lambda start, end: vd_frame(start, end, "yfinance"))
+    if force_fail:
+        def outage(*args, **kwargs):
+            raise OSError(OUTAGE)
+        _patch(dl, download_spx_ohlcv=outage)
     _patch(cboe, download_vix_term_structure_history=(
         lambda start=None, end=None, tickers=None: ts_frame(start or "2000-01-01", end or session, "cboe")),
         download_vix_history=lambda: vd_frame("2000-01-01", session, "cboe"))
@@ -385,6 +409,16 @@ def drive(status_file: Path, no_fit: bool = False) -> int:
     os.environ["REFRESH_SLOT"] = "book"
     code = cr.main(["--steps", "market,capture,calibrate,freeze", "--status-file", str(status_file)],
                    now_utc=now, ticker_factory=Ticker)
+    if force_fail:
+        # the failed book slot is the run the alert step ends (its status is the outer
+        # run's); the close slot, failed on the same outage, is the scheduled run before
+        st = json.loads(status_file.read_text())
+        st["simulated"] = {"session": session, "after": last, "now_utc": now.isoformat(),
+                           "close_utc": close.isoformat(), "close_exit": code_close, "force_fail": True,
+                           "seconds": round(time.perf_counter() - t0, 1)}
+        status_file.write_text(json.dumps(st, indent=2, default=str))
+        print(f"book slot exit {code} (forced failure)", flush=True)
+        return code
     code = max(code, code_close)
     st = json.loads(status_file.read_text())
     st["simulated"] = {"session": session, "after": last, "now_utc": now.isoformat(), "no_fit": no_fit,
@@ -477,6 +511,184 @@ def outcome_problems(st: dict, tree: Path, no_fit: bool = False) -> list[str]:
     return problems
 
 
+# A stand-in for the GitHub CLI, first on PATH when bot_alert.py runs here. It answers
+# from a state file (the run history; the open issues) as `gh` would: `run list` keeps
+# the --event and --limit it is given, `issue list` the open issues with the label. It
+# logs every call (one JSON line each) and refuses any other command.
+FAKE_GH = r"""#!{python}
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_GH_LOG"], "a") as fh:
+    fh.write(json.dumps(args) + "\n")
+state = json.load(open(os.environ["FAKE_GH_STATE"]))
+def opt(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+verb = args[:2]
+if verb == ["run", "list"]:
+    runs = [r for r in state["runs"] if opt("--event") in (None, r["event"])]
+    print(json.dumps(runs[:int(opt("--limit", "20"))]))
+elif verb == ["issue", "list"]:
+    print(json.dumps([i for i in state["open_issues"] if opt("--label") in i["labels"]]))
+elif verb == ["label", "create"]:
+    pass
+elif verb == ["issue", "create"]:
+    print("https://github.invalid/issues/1")
+elif verb == ["issue", "comment"]:
+    print("https://github.invalid/issues/" + args[2] + "#issuecomment-1")
+else:
+    sys.stderr.write("fake gh: unexpected command " + " ".join(args) + "\n")
+    sys.exit(1)
+"""
+RUNS_URL = "https://github.invalid/actions/runs/"
+
+
+def run_history(tree: Path, statuses: dict) -> dict:
+    """The two forced runs as `gh run list` lists them, from their own run records
+    (data_store/runs/): {slot: entry}. Each is a scheduled run with an id of its own
+    and its record's start time; the book run, whose last step is the alert, is still
+    in progress; the close run is completed, failed or succeeded as its record's exit
+    code says."""
+    recs = [json.loads(p.read_text()) for p in sorted((tree / "data_store" / "runs").glob("run_*.json"))]
+    out = {}
+    for n, (slot, st) in enumerate(statuses.items()):
+        rec = next(r for r in recs if r.get("slot") == slot and r.get("run_utc") == st.get("run_utc"))
+        run_id = 9_000_000 + n
+        done = {"status": "completed", "conclusion": "failure" if rec.get("exit_code") else "success"}
+        out[slot] = {"databaseId": run_id, "event": "schedule", "createdAt": rec["run_utc"],
+                     "url": f"{RUNS_URL}{run_id}",
+                     **({"status": "in_progress", "conclusion": ""} if slot == "book" else done)}
+    return out
+
+
+def alert_cli(script: Path, work: Path, runs: list[dict], open_issues: list[dict], run_id: int,
+              event: str = "schedule", slot: str = "book") -> tuple[int, dict, list[list[str]]]:
+    """Run bot_alert.py (the file ``script``) as the workflow's `if: failure()` step does,
+    through its command line, with FAKE_GH first on PATH answering from ``runs`` and
+    ``open_issues``. The real gh is never reached: the fake is checked to be the gh
+    that PATH finds, and the run has no GitHub token or configuration. Returns (exit
+    code, the JSON line it prints, every gh call)."""
+    work.mkdir(parents=True, exist_ok=True)
+    bin_dir = work / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    fake = bin_dir / "gh"
+    fake.write_text(FAKE_GH.replace("{python}", sys.executable))
+    fake.chmod(0o755)
+    state, log = work / "gh_state.json", work / "gh_calls.jsonl"
+    state.write_text(json.dumps({"runs": runs, "open_issues": open_issues}))
+    log.write_text("")
+    (work / "gh_config").mkdir(exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GH_", "GITHUB_"))}
+    env.update(PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}", FAKE_GH_STATE=str(state),
+               FAKE_GH_LOG=str(log), GH_CONFIG_DIR=str(work / "gh_config"), GH_HOST="github.invalid")
+    if shutil.which("gh", path=env["PATH"]) != str(fake):
+        raise RuntimeError(f"the fake gh is not the one PATH finds: {shutil.which('gh', path=env['PATH'])}")
+    r = subprocess.run([sys.executable, str(script), "--run-id", str(run_id), "--event", event,
+                        "--run-url", f"{RUNS_URL}{run_id}", "--slot", slot,
+                        "--workflow", "daily_refresh.yml"],
+                       env=env, capture_output=True, text=True, timeout=120, check=False)
+    printed: dict = next((json.loads(ln) for ln in r.stdout.splitlines() if ln.startswith("{")), {})
+    calls = [json.loads(ln) for ln in log.read_text().splitlines() if ln.strip()]
+    return r.returncode, printed, calls
+
+
+def _flag(call: list[str], name: str) -> str | None:
+    return call[call.index(name) + 1] if name in call and call.index(name) + 1 < len(call) else None
+
+
+def alert_problems(tree: Path, statuses: dict, work: Path) -> tuple[list[str], list[tuple]]:
+    """What the copy's bot_alert.py does at the end of the failed book run, by its
+    command line on histories built from the two forced runs' records (run_history):
+      - the close run failed before it: create the bot-failure label and open one
+        issue, its title the streak, its body naming the close run;
+      - the same with a bot-failure issue already open: comment on it, open none;
+      - a success between them, a cancelled run after it and the failed close run
+        before it: the success ends the streak, so nothing is opened or touched;
+      - a manual run of the same failure: not even the history is read.
+    Returns (problems, report rows)."""
+    script = tree / "scripts" / "ci" / "bot_alert.py"
+    label = "bot-failure"
+    h = run_history(tree, statuses)
+    book, close = h["book"], h["close"]
+    if close["conclusion"] != "failure":
+        return [f"the close run's record says it did not fail: {close}"], []
+    older = {"databaseId": 8_999_990, "event": "schedule", "status": "completed", "conclusion": "success",
+             "createdAt": "2026-01-01T00:00:00+00:00", "url": f"{RUNS_URL}8999990"}
+    problems: list[str] = []
+    rows: list[tuple] = []
+    issue = {"number": 7, "url": "https://github.invalid/issues/7", "labels": [label]}
+    cases = {
+        "two failed in a row": ([book, close, older], [], "schedule"),
+        "an issue already open": ([book, close, older], [issue], "schedule"),
+        "a success between": ([book, {**older, "databaseId": 8_999_992, "conclusion": "cancelled",
+                                      "url": f"{RUNS_URL}8999992"},
+                               {**older, "databaseId": 8_999_991, "url": f"{RUNS_URL}8999991"}, close], [],
+                              "schedule"),
+        "a manual run": ([book, close, older], [], "workflow_dispatch"),
+    }
+    for name, (runs, issues, event) in cases.items():
+        try:
+            code, res, calls = alert_cli(script, work / re.sub(r"\W+", "_", name), runs, issues,
+                                         book["databaseId"], event=event)
+        except Exception as e:  # noqa: BLE001 (reported: the check failed, whatever raised)
+            problems.append(f"{name}: bot_alert.py could not be run: {type(e).__name__}: {e}")
+            continue
+        made = [c for c in calls if c[:2] == ["issue", "create"]]
+        said = [c for c in calls if c[:2] == ["issue", "comment"]]
+        touched = [c for c in calls if c[0] in ("issue", "label") and c[:2] != ["issue", "list"]]
+        if code != 0:
+            problems.append(f"{name}: bot_alert.py exited {code}")
+        if name == "two failed in a row":
+            body = (_flag(made[0], "--body") or "") if made else ""
+            if res.get("action") != "created" or res.get("streak") != 2 or len(made) != 1:
+                problems.append(f"{name}: one issue was not opened: {res}, gh calls {calls}")
+            elif not (_flag(made[0], "--label") == label
+                      and any(c[:3] == ["label", "create", label] for c in calls)
+                      and close["url"] in body and book["url"] in body
+                      and "2 scheduled runs failed" in (_flag(made[0], "--title") or "")):
+                problems.append(f"{name}: not the {label} issue naming both runs and the streak: {made[0]}")
+        elif name == "an issue already open":
+            if res.get("action") != "commented" or made or [c[2] for c in said] != ["7"]:
+                problems.append(f"{name}: did not comment on the open issue (and only on it): {res}, "
+                                f"gh calls {calls}")
+        elif name == "a success between":
+            if res.get("action") != "none" or res.get("streak") != 1 or touched:
+                problems.append(f"{name}: the success did not end the streak: {res}, gh calls {calls}")
+        elif res.get("action") != "none" or calls:
+            problems.append(f"{name}: a manual run read or touched GitHub: {res}, gh calls {calls}")
+        rows.append((f"failure alert ({name})", code, None,
+                     f"{res.get('action')}" + (f" issue {res.get('issue')}" if res.get("issue") else "")
+                     + f" (streak {res.get('streak')}; {len(calls)} gh calls)"))
+    return problems, rows
+
+
+def force_fail_problems(code: int, st: dict, tree: Path, close_st: dict,
+                        work: Path) -> tuple[list[str], list[tuple]]:
+    """--force-fail: both scheduled slots failed on the outage and recorded it, the
+    book run is not publishable, and bot_alert.py does what it must on histories built
+    from the two runs' records (alert_problems). Returns (problems, report rows)."""
+    problems: list[str] = []
+    if code == 0 or st.get("exit_code") != 1:
+        problems.append(f"the forced failure did not fail the book run (exit {code}, status exit "
+                        f"{st.get('exit_code')}): the alert step would not run")
+        return problems, []
+    for slot, s in (("close", close_st), ("book", st)):
+        errs = [str(e) for e in s.get("errors") or []]
+        if s.get("exit_code") != 1 or not any(OUTAGE in e for e in errs):
+            problems.append(f"the {slot} run did not fail on the forced outage: exit {s.get('exit_code')}, "
+                            f"errors {errs}")
+    if "freeze" not in (st.get("steps") or []):
+        problems.append(f"the book run did not include the freeze step: {st.get('steps')}")
+    if st.get("publishable") or not any(OUTAGE in str(b) for b in st.get("publish_blockers") or []):
+        problems.append(f"the failed book run is publishable or does not say why not: publishable "
+                        f"{st.get('publishable')}, blockers {st.get('publish_blockers')}")
+    statuses = {"close": close_st, "book": st}
+    rec = run_record_problems(tree, statuses)
+    if rec:
+        return [*problems, *rec], []
+    more, rows = alert_problems(tree, statuses, work)
+    return [*problems, *more], rows
+
+
 def _pytest(cwd: Path, files: list, log: Path) -> tuple:
     t0 = time.perf_counter()
     with open(log, "w") as fh:
@@ -491,12 +703,17 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, default=None, help="scratch directory (default: a temp dir)")
     ap.add_argument("--full", action="store_true", help="also run the whole suite in the copy")
     ap.add_argument("--keep", action="store_true", help="keep the copy")
-    ap.add_argument("--no-fit", action="store_true",
-                    help="Yahoo's book empty (the Saturday slot): no fit, the surface from the Cboe book")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--no-fit", action="store_true",
+                      help="Yahoo's book empty (the Saturday slot): no fit, the surface from the Cboe book")
+    mode.add_argument("--force-fail", action="store_true",
+                      help="Yahoo down in both slots: the runs must fail, the book run unpublishable, and "
+                           "bot_alert.py, run with a fake gh on the runs' own records, must open the "
+                           "bot-failure issue")
     ap.add_argument("--drive", type=Path, default=None, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if args.drive:
-        return drive(args.drive, no_fit=args.no_fit)
+        return drive(args.drive, no_fit=args.no_fit, force_fail=args.force_fail)
 
     out = Path(args.out or tempfile.mkdtemp(prefix="sim-next-session-")).resolve()
     tree = out / "tree"
@@ -511,11 +728,24 @@ def main(argv=None) -> int:
     status_file = out / "status.json"
     with open(out / "logs" / "bot.log", "w") as fh:
         r = subprocess.run([sys.executable, str(tree / "scripts" / "ci" / "simulate_next_session.py"),
-                            "--drive", str(status_file), *(["--no-fit"] if args.no_fit else [])],
+                            "--drive", str(status_file), *(["--no-fit"] if args.no_fit else []),
+                            *(["--force-fail"] if args.force_fail else [])],
                            cwd=tree, env=env, stdout=fh, stderr=subprocess.STDOUT, check=False)
-    problems = []
+    problems: list[str] = []
     st = json.loads(status_file.read_text()) if status_file.exists() else {}
     sim = st.get("simulated", {})
+    if args.force_fail:
+        close_file = status_file.with_name("status_close.json")
+        close_st = json.loads(close_file.read_text()) if close_file.exists() else {}
+        problems, rows = force_fail_problems(r.returncode, st, tree, close_st, out / "alert")
+        rows.insert(0, ("bot runs (forced failure: Yahoo's SPX download raises in both slots)", r.returncode,
+                        sim.get("seconds"),
+                        (f"session {sim.get('session')}: close exit {close_st.get('exit_code')}, book exit "
+                         f"{st.get('exit_code')}, publishable {st.get('publishable')}; errors "
+                         f"{st.get('errors')}")))
+        return _report(out, tree, rows, problems, args.keep,
+                       "Both runs failed as forced; the alert opens, comments on or leaves the issue as it "
+                       "must.")
     cal = st.get("calibration") or {}
     if r.returncode != 0:
         problems.append(f"cloud_refresh exited {r.returncode}: {st.get('errors')}")
@@ -552,12 +782,17 @@ def main(argv=None) -> int:
         rows.append((name, code, secs, tail))
         if code != 0:
             problems.append(f"{name} failed ({tail}); log {log}")
+    return _report(out, tree, rows, problems, args.keep)
+
+
+def _report(out: Path, tree: Path, rows: list, problems: list[str], keep: bool,
+            passed: str = "All gates pass.") -> int:
     report = ["| step | exit | seconds | result |", "|---|---|---|---|"]
     report += [f"| {a} | {b} | {c} | {d} |" for a, b, c, d in rows]
-    report += ["", *(f"- PROBLEM: {x}" for x in problems)] if problems else ["", "All gates pass."]
+    report += ["", *(f"- PROBLEM: {x}" for x in problems)] if problems else ["", passed]
     (out / "report.md").write_text("\n".join(report) + "\n")
     print("\n".join(report), flush=True)
-    if not args.keep and not problems:
+    if not keep and not problems:
         shutil.rmtree(tree, ignore_errors=True)
     return 1 if problems else 0
 

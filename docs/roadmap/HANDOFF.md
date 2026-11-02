@@ -186,7 +186,7 @@ Before building any of these, have the critics confirm it adds value. Each one g
 - The CSP stays `script-src 'self'`: no inline scripts or handlers.
 - axe must report 0 violations, with no horizontal overflow at 320–1920 px, including the 0.06em letter-spacing stress at 320.
 - Every number on a page comes from the data, never from a template or test literal.
-- The ruff (1295) and mypy (368) baselines may only shrink: `make lint typecheck`.
+- The ruff (1293) and mypy (368) baselines may only shrink: `make lint typecheck`.
 - desk.js stays within its gzip budget (31 KB; raise it by at most 1 KB, with a reason).
 - Git:
   - No WIP or unverified commits.
