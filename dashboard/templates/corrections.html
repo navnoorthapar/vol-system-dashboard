@@ -29,26 +29,26 @@
 {% set all_f = [] %}{% for r in d.rounds %}{% for f in r.findings %}{% set _ = all_f.append(f) %}{% endfor %}{% endfor %}
 {% set n_fixed = all_f|selectattr('status', 'equalto', 'fixed')|list|length %}
 {% set n_quant = all_f|selectattr('status', 'equalto', 'quantified')|list|length %}
-<div class="page-head">
+<div class="page-head" data-chain="none">
   <h1 class="page-title" id="audit-title">{{ d.rounds[0].id if d.rounds else 'C16' }}–{{ d.rounds[-1].id if d.rounds else 'C22' }} corrections — {{ all_f|length }} findings, {{ n_fixed }} fixed, {{ n_quant }} quantified</h1>
   <p class="page-sub" id="audit-sub">Each round as a blameless postmortem: what was wrong, why, how it was found, the fix, the tests that now pin it and what it did to the published result. {{ d.headline_trend }}</p>
   <div class="page-badge"><span class="nowrap">{{ d.n_tests }} regression tests cited</span><span class="sep">·</span><span class="nowrap">{{ d.rounds|map(attribute='commit_links')|map('length')|sum }} commits linked</span><span class="sep">·</span><span class="nowrap">C22 evidence from <code>c22_bridge.csv</code></span><span class="sep">·</span><span class="nowrap">C23 from <code>c23_bridge.csv</code></span></div>
 </div>
 
 <div class="g pair">
-  {% call m.panel('waterfall', 'C22 waterfall · portfolio P&L, one correction at a time', 's8', '$000s') %}
+  {% call m.panel('waterfall', 'C22 waterfall · portfolio P&L, one correction at a time', 's8', '$000s', chain='none') %}
     {% if d.charts.waterfall %}{{ m.chart(d.charts.waterfall, 'h400 tall-narrow') }}{% endif %}
     {% set _rb = (b.rows or {}).get('beta') %}{% set _rg = (b.rows or {}).get('r2_gate') %}
     <p class="note">Each bar is one correction's effect on portfolio P&amp;L in the order the bridge applies them (each row is cumulative), replayed on the C23-restated VIX record, so the last bar is today’s {{ m.cite('canonical run', 'research.html#equity') }}{% if d.c23_bridge %}; the published C22 run ended at {{ d.c23_bridge[0].pnl|usd(true) }} and the C23 table below accounts for the difference{% endif %}.{% if _rb and _rb.prev %} The {{ m.cite('β step', 'research.html#beta-grid') }} moves it by {{ _rb.d_pnl|usd_k }} (S1C {{ _rb.prev.s1c_pnl|usd_k }} → {{ _rb.s1c_pnl|usd_k }}, S1 {{ _rb.prev.s1_pnl|usd_k }} → {{ _rb.s1_pnl|usd_k }}){% endif %}{% if _rg %}; the single R2 gate by {{ _rg.d_pnl|usd_k }}{% endif %}.</p>
   {% endcall %}
-  {% call m.panel('headline', 'Published result after each round', 's4') %}
+  {% call m.panel('headline', 'Published result after each round', 's4', chain='none') %}
     {% if d.charts.headline %}{{ m.chart(d.charts.headline, 'h300 grow') }}{% endif %}
     <p class="note">C16 published no portfolio figure; C19 and C20 left it unchanged; C23 is the stored canonical run, with its intervals and nulls in {{ m.cite('the inference on Research', 'research.html#inference') }}.</p>
   {% endcall %}
 </div>
 
 <div class="g">
-  {% call m.panel('register', 'Findings register · every finding, ' ~ (d.rounds[0].id if d.rounds else 'C16') ~ '–' ~ (d.rounds[-1].id if d.rounds else 'C23'), 's12', (d.register|length) ~ ' findings') %}
+  {% call m.panel('register', 'Findings register · every finding, ' ~ (d.rounds[0].id if d.rounds else 'C16') ~ '–' ~ (d.rounds[-1].id if d.rounds else 'C23'), 's12', (d.register|length) ~ ' findings', chain='none') %}
     {% set _nq = d.register|selectattr('status', 'equalto', 'quantified')|list|length %}
     {% set _ng = d.register|selectattr('n_tests', 'equalto', 0)|list|length %}
     <div class="tabs js-only" role="group" aria-label="Filter the findings register">

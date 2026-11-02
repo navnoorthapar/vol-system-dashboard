@@ -39,6 +39,7 @@ import shutil
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -3475,9 +3476,11 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
               "corrections.html": 150_000, "model-risk.html": 100_000}
     # model-risk.html: 80 kB until VALIDATOR-12/13 added M21–M23, three checks and a
     # monitoring line per production model (about 88 kB). Its history strips draw one dot
-    # per stored session, about 150 bytes each, and the daily job adds a session a day:
-    # they are budgeted per dot (200 bytes) and the rest of the page as a whole, so the
-    # budget does not fail the bot's gate a few weeks of sessions from now.
+    # per stored session, and the daily job adds a session a day: they are budgeted per
+    # dot and the rest of the page as a whole, so the budget does not fail the bot's gate a
+    # few weeks of sessions from now. A dot was about 150 bytes (200 budgeted); since tier
+    # 0.2 it names the chain its value is read off (vendor, quote time, two-sided share)
+    # in its tooltip and in the strip's label, about 330 bytes (400 budgeted).
     for name, cap in budget.items():
         html = (out / name).read_text(encoding="utf-8")
         size = len(html.encode("utf-8"))
@@ -3485,7 +3488,7 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
             strips = re.findall(r'<svg class="hist".*?</svg>', html, re.DOTALL)
             hist = sum(len(x.encode("utf-8")) for x in strips)
             dots = html.count('<circle class="h-')
-            assert hist <= 200 * dots, (name, hist, dots)
+            assert hist <= 400 * dots, (name, hist, dots)
             size -= hist
         assert size <= cap, (name, size)
     # shared assets: the chart library is the only large script, fonts are subsets
@@ -6647,7 +6650,7 @@ def test_by_design_breaches_are_apart_from_live_ones(dash, pages, monkeypatch):
     html = pages["/model-risk"]
     designs = [c for c in d["monitors"] if c["status"] == "design"]
     for c in designs:
-        row = re.search(rf'<tr id="{c["id"]}" data-status="design">(.*?)</tr>', html, re.DOTALL)
+        row = re.search(rf'<tr id="{c["id"]}" data-status="design"[^>]*>(.*?)</tr>', html, re.DOTALL)
         assert row, c["id"]
         text = _html_unescape(" ".join(_visible_text("<body>" + row.group(1)).split()))
         assert "BY DESIGN" in text
@@ -6953,7 +6956,7 @@ def _findings(html: str) -> list[tuple[str, str, list[str]]]:
     cols = re.findall(r'<section class="([^"]+)"[^>]*>\s*<h3 class="find-head"[^>]*>(.*?)</h3>\s*'
                       r'<ul class="find-list[^"]*"[^>]*>(.*?)</ul>', strip.group(1), re.DOTALL)
     return [(c, _visible_text("<body>" + h).strip(),
-             re.findall(r'<li class="find-item">(.*?)</li>', ul, re.DOTALL))
+             re.findall(r'<li class="find-item"[^>]*>(.*?)</li>', ul, re.DOTALL))
             for c, h, ul in cols]
 
 
@@ -7454,7 +7457,7 @@ def test_overview_surface_line_is_the_one_month_row_with_its_age(dash, pages):
     ds = _desk_module()
     m1 = ds.constant_maturity(ds.delta_grid(*_desk_inputs()))[0]
     assert m1["label"] == "1M"
-    line = re.search(r'<p class="note" id="surface-line">(.*?)</p>', pages["/"], re.DOTALL)
+    line = re.search(r'<p class="note" id="surface-line"[^>]*>(.*?)</p>', pages["/"], re.DOTALL)
     assert line, "the Overview's headline-fit panel lost its surface line"
     text = re.sub(r"\s+([,.)])", r"\1", _visible_text("<body>" + line.group(1)))
     session = _surface_file("surface.json").parent.name
@@ -7627,7 +7630,8 @@ def test_skew_term_chart_is_log_log_with_units_and_the_slope_table_is_polyfit(da
         ts = sorted(sj["term_structure"], key=lambda t: t["T_days"])
         t1, k1 = np.array([x["T"] for x in sl]), np.array([ds.svi_atm_skew(x) for x in sl])
         t2, k2 = np.array([t["T_days"] / 365 for t in ts]), np.array([t["atm_skew_essvi"] for t in ts])
-        cells = rows[s["session"]]
+        # the cells after the session's Chain column (tier 0.2; the badge test checks it)
+        cells = [c for i, c in enumerate(rows[s["session"]]) if i != 1]
         for col, (t, k, lo) in zip((2, 3, 5, 6), ((t1, k1, 0), (t2, k2, 0), (t1, k1, 30), (t2, k2, 30))):
             keep = t * 365 >= lo
             ref = np.polyfit(np.log(t[keep]), np.log(np.abs(k[keep])), 1)[0]
@@ -7720,7 +7724,7 @@ def test_surface_change_against_the_compared_sessions_states_its_gap(dash, pages
     assert 'data-chart-filter="chart-atm-ts chart-rr-term"' in sec
     new = _cm_of(ds, next(s for s in inputs if s["session"] == head))
     for old in earlier:
-        cap = _html_unescape(re.search(rf'id="vs-table-{old}">\s*<caption>(.*?)</caption>', sec,
+        cap = _html_unescape(re.search(rf'id="vs-table-{old}">\s*<caption[^>]*>(.*?)</caption>', sec,
                                        re.DOTALL).group(1))
         gap = dash.session_age(old, head)
         assert f"vs {old}, {dash.plural(gap, 'NYSE session')} earlier" in re.sub(r"<[^>]+>", "", cap)
@@ -8338,7 +8342,6 @@ def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
     bot's fail-soft step allows, would otherwise be the headline), with the run record
     the bot writes for a fit its gate rejected. Returns (data dir, that session)."""
     from types import SimpleNamespace
-    from typing import Any
 
     from joint_vol_calibration.surface import report, scorecard
 
@@ -8746,7 +8749,7 @@ def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(d
               if cid.startswith("chart-smile-") and s_.get("quotes")]
     assert smiles
     assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
-    note = _visible_text("<body>" + re.search(r'<p class="note" id="smile-book">(.*?)</p>', html,
+    note = _visible_text("<body>" + re.search(r'<p class="note" id="smile-book"[^>]*>(.*?)</p>', html,
                                               re.DOTALL).group(1))
     assert (f"These panels draw the {fit} surface’s quotes, a Cboe book with {book['time']}, not the "
             f"{fit_name} the fit was made on.") in note
@@ -8888,16 +8891,20 @@ def _greeks_source_calibration(data: Path) -> str:
     parquet metadata), read without the dashboard's loader."""
     import pyarrow.parquet as pq
     meta = pq.read_schema(data / "greeks" / "greeks_surface.parquet").metadata or {}
-    prov = json.loads((meta.get(b"greeks_provenance") or meta.get(b"provenance")).decode())
+    raw = meta.get(b"greeks_provenance") or meta.get(b"provenance")
+    assert raw is not None, "the Greeks surface records no provenance"
+    prov = json.loads(raw.decode())
     src = prov.get("source") if isinstance(prov.get("source"), dict) else {}
     return Path(str(prov.get("source_calibration") or src.get("calibration_file"))).name
 
 
-def _names_chain(text: str, pv: dict) -> bool:
+def _names_chain(text: str, pv: dict | None) -> bool:
     """The chain's source badge in ``text``: chain_provenance's name (or its short
     form, 'Yahoo download') and its quote-time clause ('quotes at …', 'fetched …',
-    'no quote time')."""
+    'no quote time'); a chain whose source is not recorded says so."""
     t = re.sub(r"\s+", " ", text)
+    if pv is None:
+        return "source not recorded" in t
     return (pv["name"] in t or pv["short"] in t) and pv["badge"][0] in t
 
 
@@ -8907,127 +8914,226 @@ def _panel_html(html: str, pid: str) -> str:
     return m.group(1)
 
 
-# Pages with no session-level number read off a quote chain, and why. Every other
-# route is enumerated by test_every_number_from_a_quote_chain_names_its_chain.
-_NO_CHAIN_NUMBERS = {
-    "/research": "the backtest marks straddles at β·VIX, with no option prices; its β table names each "
-                 "chain it reads (a market-database chain or the live capture) in its own column",
-    "/corrections": "the corrections log: no session-level number",
+def _key_chain(dash, data: Path, key: str) -> dict | None:
+    """chain_provenance of the chain a page's data-chain key names, read from ``data``
+    here, not by the page's resolver (dashboard.app.chain_of_key): a surface session's
+    surface.json; a stored fit's own record (its chain_diagnostics and stored chain); a
+    stored chain's parquet (its source and quote-time columns); the live capture behind
+    β (its US/Eastern capture time in UTC); a forward ledger's book."""
+    kind, _, arg = key.partition(":")
+    if kind == "surface":
+        return dash.chain_provenance(_chain_of(data, arg))
+    if kind in ("fit", "cal"):
+        return _fit_pv(dash, data, f"joint_cal_{arg}.pkl" if kind == "fit" else arg)
+    if kind == "options":
+        ch = pd.read_parquet(data / "options" / f"spx_{arg}.parquet", columns=["source", "quote_time"])
+        src, qt = (sorted(set(ch[c].dropna().astype(str))) for c in ("source", "quote_time"))
+        return dash.chain_provenance({"inputs": {"source": src[0] if len(src) == 1 else None,
+                                                 "quote_time": qt[0] if len(qt) == 1 else None}})
+    if kind == "live":
+        live = json.loads((ROOT / "joint_vol_calibration" / "tests" / "fixtures"
+                           / "spx_chain_live_20261012.json").read_text())
+        at = pd.Timestamp(live["as_of_et"]).tz_localize("America/New_York").tz_convert("UTC")
+        return dash.chain_provenance({"inputs": {"source": "yfinance",
+                                                 "fetched_at": at.strftime("%Y-%m-%dT%H:%M:%SZ")}})
+    if kind == "ledger":
+        inp = json.loads((data / "forward" / f"ledger_{arg}.json").read_text())["inputs"]
+        return dash.chain_provenance({"inputs": {"source": inp["book"]["source"],
+                                                 "quote_time": inp["quote_time"]}})
+    raise AssertionError(f"unknown chain key {key!r}")
+
+
+# Every panel, page head, Model Risk check, Overview finding and result card declares in
+# data-chain what its numbers are read off: chain keys, 'parts' (its own elements carry
+# keys) or 'none'. A 'none' is listed here with why; any other unit is checked.
+_BACKTEST = "the backtest, marked at β·VIX with no option prices"
+_NO_CHAIN_UNITS: dict[str, dict[str, str]] = {
+    "/": {
+        "state-regime": "the rule label and its inputs: VIX, VVIX and SPX closes",
+        "state-ts": "VIX index closes", "state-pdv": "VIX against the PDV forecast of SPX closes",
+        "vx-curve": "VX futures settlements, not an option chain", "vix-ratio": "VIX and VIX3M closes",
+        "state-pipeline": "counts of stored records; its Cboe book row names each book and quote time",
+        "finding:calibration.html#history": "counts of stored fits",
+        "finding:research.html#inference": _BACKTEST, "result:research.html#inference": _BACKTEST,
+        "finding:research.html#research-classifier": "the classifier's accuracy on rule labels",
+        "finding:research.html#forward": "a count of registered ledger sessions",
+        "finding:calibration.html#vixleg": "a range over every gated fit, not one session's; each fit's "
+                                           "own score names its chain on Calibration #vixleg",
+        "finding:calibration.html#sigma-tradeoff": "the production σ box, a constant",
+    },
+    "/surface": {"surface-plan": "what the page will show: no number"},
+    "/risk": {"hedge": "a 2020 straddle priced at the VIX term structure, with no option chain"},
+    "/research": dict.fromkeys((
+        "page-head", "sleeve-spec", "equity", "drawdown", "rolling", "sleeves", "sleeve-pnl", "round-trips",
+        "trade-hists", "trade-stats", "drawdowns", "monthly", "annual", "inference", "beta-grid", "why",
+        "limits"), _BACKTEST) | {
+        "benchmarks": "Cboe strategy index levels, not an option chain",
+        "forecast": "vol forecasts of SPX closes", "research-classifier": "a classifier of rule labels",
+        "label-history": "rule labels"},
+    "/model-risk": {
+        "page-head": "counts of checks and models", "inventory": "the model inventory's prose",
+        "definitions": "the glossary", "check-calib-age": "a count of NYSE sessions",
+        "check-rate-reference": "the rate curve", "check-vx-lag": "the VX futures table's age",
+        "check-greeks-source": "whether the Greeks' fit is the headline fit (yes or no)",
+        "check-label-lag": "the market database's age", "check-ledger-chain": "the ledger's hash chain",
+        "check-svi-certificate": "whether the certificates are stored (yes or no)",
+        "check-classifier": "the classifier's accuracy"},
+    "/corrections": dict.fromkeys(("page-head", "waterfall", "headline", "register"),
+                                  "the corrections log: no number read off a chain"),
 }
 
 
+def _chain_units(soup) -> list[tuple[str, Any, list]]:
+    """(id, element, what it covers) of every unit a page must declare: the page head
+    (covering everything above the first panel: the Surface and Calibration tiles under
+    the badge, the Overview findings), each panel, each Model Risk check, each Overview
+    finding and result card."""
+    main = soup.select_one("main")
+    head = main.select_one(".page-head")
+    region, el = [head], head.find_next_sibling()
+    while el is not None and not ((el.name == "section" and "panel" in (el.get("class") or []))
+                                  or el.select_one("section.panel")):
+        region.append(el)
+        el = el.find_next_sibling()
+    units = [("page-head", head, region)]
+    units += [(x["id"], x, [x]) for x in main.select("section.panel")]
+    units += [(x["id"], x, [x]) for x in main.select("tr[id^=check-]")]
+    units += [(f"finding:{x.a['href']}", x, [x]) for x in main.select("li.find-item")]
+    units += [(f"result:{x['href']}", x, [x]) for x in main.select("a.result")]
+    return units
+
+
+def _own_text(el) -> str:
+    """An element's text without the parts that carry a data-chain of their own (rows,
+    captions, history dots): those are checked on their own, so a unit must name its
+    chain in its own text, not only in a nested part's."""
+    import copy
+    own = copy.copy(el)
+    for x in own.select("[data-chain]"):
+        x.decompose()
+    return own.get_text(" ")
+
+
+def _chain_audit(dash, data: Path, route: str, html: str) -> tuple[list, dict]:
+    """Every declaration of one page, checked: (what is wrong, {unit id: its keys})."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    for t in soup(["script", "style", "template", "noscript"]):
+        t.decompose()
+    bad: list[tuple] = []
+    keys_of: dict[str, str] = {}
+    exempt = _NO_CHAIN_UNITS.get(route, {})
+    cache: dict[str, dict | None] = {}
+
+    def names(text: str, keys: str) -> list[str]:
+        missing = []
+        for k in keys.split():
+            if k not in cache:
+                cache[k] = _key_chain(dash, data, k)
+            if not _names_chain(text, cache[k]):
+                missing.append(k)
+        return missing
+    for uid, el, scope in _chain_units(soup):
+        dc = el.get("data-chain")
+        keys_of[uid] = dc
+        if not dc:
+            bad.append((route, uid, "declares no data-chain"))
+        elif dc == "none":
+            if uid not in exempt:
+                bad.append((route, uid, "says it reads no chain but is not listed in _NO_CHAIN_UNITS"))
+        elif dc == "parts":
+            if not [x for s in scope for x in s.select("[data-chain]")
+                    if x.get("data-chain") not in ("none", "parts")]:
+                bad.append((route, uid, "'parts' with no part that names a chain"))
+        elif missing := names(" ".join(_own_text(s) for s in scope), dc):
+            bad.append((route, uid, "does not name", missing))
+    # every other element with keys, inside a unit or not (a row, caption, line or history
+    # dot); the page head names its chains in the region it covers, checked above
+    for el in soup.select("main [data-chain]"):
+        dc = str(el["data-chain"])
+        if dc in ("none", "parts") or "page-head" in (el.get("class") or []):
+            continue
+        if missing := names(_own_text(el), dc):
+            bad.append((route, el.get("id") or el.name, "does not name", missing,
+                        re.sub(r"\s+", " ", el.get_text(" "))[:120]))
+    return bad, keys_of
+
+
 def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
-    """Tier 0.2: each page that shows a number read off a session's quote chain shows
-    that chain's source badge beside it: its vendor and its quote time (a Cboe book's
-    'quotes at …', a Yahoo download's 'fetched …', a close snapshot's 'no quote time'),
-    in the number's own panel, row or sentence, on a record whose newest sessions are
-    Yahoo-sourced and on one whose newest are Cboe books. The Surface page named it
-    once, under its h1; a panel linked to on its own (#residuals), the Overview's
-    surface line, a Calibration smile, and a Model Risk row read without it, so a
-    Yahoo snapshot's figures could be read as a timed book's. Where a number describes
-    a fit it names the chain the fit was made on (its chain_diagnostics and stored
-    chain); a smile's quotes name the surface's book."""
-    data, pages, cal, fit = chain_view["data"], chain_view["pages"], chain_view["cal"], chain_view["fit"]
+    """Tier 0.2: a number read off a session's quote chain shows that chain's source
+    badge beside it (its vendor and its quote time: a Cboe book's 'quotes at …', a
+    Yahoo download's 'fetched …', a close snapshot's 'no quote time') in its own
+    panel, row, line or history dot, on every page, in each state the bot publishes
+    (chain_view: Yahoo or Cboe newest sessions, a newest fit without diagnostics).
+
+    The pages declare it: every panel, page head, Model Risk check, Overview finding
+    and result card carries a data-chain attribute with the chain keys its numbers are
+    read off ('surface:<session>', 'fit:<session>', 'options:<session>', 'live',
+    'ledger:<session>'), 'parts' when its rows or lines carry their own, or 'none'. So a
+    page cannot add a unit without saying what it reads, a 'none' must be listed above
+    with its reason, and each key is resolved here from the record (_key_chain) and
+    looked for in the text beside it. Where the session a unit reads is not in its key
+    alone, it is checked against the page's own rule (the joint-fit card's session, the
+    Greeks' source fit, the Model Risk rows' artifacts, β's newest chain)."""
+    data, pages, fit = chain_view["data"], chain_view["pages"], chain_view["fit"]
     newest = chain_view["newest"]
     assert (dash.chain_provenance(_chain_of(data, newest)) or {}).get("vendor") == chain_view["vendor"]
-    fit_pv = dash.chain_provenance(dash.fit_chain_record(cal, fit, data))
-    assert fit_pv
-    checked: dict[str, int] = collections.Counter()
-    missing: list[tuple] = []
+    assert set(_NO_CHAIN_UNITS) <= set(dash.ROUTES)
+    bad: list[tuple] = []
+    keys: dict[str, dict[str, str]] = {}
+    for route in dash.ROUTES:
+        b, keys[route] = _chain_audit(dash, data, route, pages[route])
+        bad += b
+    assert bad == [], (chain_view["view"], bad)
 
-    def need(route: str, what: str, text: str, pv: dict) -> None:
-        if not _names_chain(_visible_text("<body>" + text), pv):
-            missing.append((route, what, pv["name"], pv["badge"][0]))
-        checked[route] += 1
-    enumerated = {"/", "/surface", "/calibration", "/model-risk", "/risk"}
-    assert set(_NO_CHAIN_NUMBERS) | enumerated == set(dash.ROUTES)
-
-    # Overview: the surface line (its own session's chain), the headline fit (its chain),
-    # the surface result card (the session it cites) and the joint-fit card (its fit's)
-    ov = pages["/"]
-    line = re.search(r'<p class="note" id="surface-line">(.*?)</p>', ov, re.DOTALL).group(1)
+    # the session each key names is the one the page reads
+    ov, sf, cb, mr, rk = (keys[r] for r in ("/", "/surface", "/calibration", "/model-risk", "/risk"))
+    line = re.search(r'<p class="note" id="surface-line"[^>]*>(.*?)</p>', pages["/"], re.DOTALL).group(0)
     s_line = re.search(r"surface (?:<[^>]+>)?(\d{4}-\d{2}-\d{2})", line).group(1)
-    need("/", "surface line", line, dash.chain_provenance(_chain_of(data, s_line)))
-    need("/", "headline fit panel", _panel_html(ov, "state-fit").replace(line, ""), fit_pv)
-    card = re.search(r'<a class="result" href="surface.html#scorecard"(.*?)</a>', ov, re.DOTALL).group(1)
+    assert f'data-chain="surface:{s_line}"' in line
+    card = re.search(r'<a class="result" href="surface.html#scorecard"(.*?)</a>', pages["/"],
+                     re.DOTALL).group(1)
     s_card = re.search(r"data_store/surface/(\d{4}-\d{2}-\d{2})/scorecard.json", card).group(1)
-    need("/", "surface result card", card, dash.chain_provenance(_chain_of(data, s_card)))
-    joint = re.search(r'<a class="result" href="calibration.html#(?:rough-vs-heston|oos)"(.*?)</a>', ov,
-                      re.DOTALL).group(1)
-    # the card's session as the card takes it (and test_overview_key_results_are_read_from_
-    # the_shipped_artifacts): the headline fit's diagnostics row, else, when the bot's
-    # fail-soft diagnostics of a new fit are missing, the newest diagnosed session
+    assert ov["result:surface.html#scorecard"] == f"surface:{s_card}"
+    # the joint-fit card's session as the card takes it (and test_overview_key_results_are_read_from_
+    # the_shipped_artifacts): the headline fit's diagnostics row, else, when the bot's fail-soft
+    # diagnostics of a new fit are missing, the newest diagnosed session
     summ = json.loads((data / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
     own = [r for r in summ if r["session"] == fit]
     card_fit = (own or [max(summ, key=lambda r: r["session"])])[0]["session"] if summ else fit
-    assert card_fit in joint
-    need("/", "joint fit card", joint, _fit_pv(dash, data, f"joint_cal_{card_fit}.pkl"))
-
-    # Surface: the tiles under the page badge, every panel of the session it shows, the
-    # comparison's sessions and the history's rows
-    sf = pages["/surface"]
+    joint = next(k for k in ov if k.startswith("result:calibration.html#"))
+    assert ov[joint] == f"fit:{card_fit}", (ov[joint], card_fit)
+    assert ov["state-fit"] == f"fit:{fit}"
     shown = dash.artifacts.load_surface(data)["session"]
-    pv = dash.chain_provenance(_chain_of(data, shown))
-    head = sf[sf.index('<div class="page-head">'):sf.index('<div class="g')]
-    assert 'id="surface-scores"' in head
-    need("/surface", "chain badge over the tiles", head, pv)
-    panels = re.findall(r'<section class="panel[^"]*" id="([\w-]+)"', sf)
-    assert len(panels) >= 15
-    for pid in panels:
-        body = _panel_html(sf, pid)
-        if pid == "surface-history":                      # one row per session: its own chain
-            heads = _table_heads(sf, "surface-history-table")
-            rows = _table_rows(sf, "surface-history-table")
-            if "Chain" not in heads:
-                missing.append(("/surface", f"{pid}: no Chain column"))
-                continue
-            col = heads.index("Chain")
-            missing.extend(("/surface", f"{pid} {r[0]}", r[col]) for r in rows
-                           if r[col] != dash.chain_provenance(_chain_of(data, r[0]))["short"])
-            checked["/surface"] += len(rows)
-            continue
-        need("/surface", pid, body, pv)
-        if pid == "surface-change":                       # each compared session's own chain
-            for s_, cap in re.findall(r'id="vs-table-([\d-]+)">\s*<caption>(.*?)</caption>', body, re.DOTALL):
-                need("/surface", f"vs {s_}", cap, dash.chain_provenance(_chain_of(data, s_)))
-
-    # Calibration: the badge names the fit's chain; each smile its quotes' book (the
-    # surface of the fit's session), or the fit's chain where it draws the model alone
-    cb = pages["/calibration"]
-    badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', cb, re.DOTALL).group(1)
-    need("/calibration", "chain badge", badge, fit_pv)
-    specs = _raw_specs(cb)
-    smiles = re.findall(r'<section class="panel[^"]*" id="(smile-[\d-]+)"', cb)
+    surface_panels = [k for k in sf if k not in ("page-head", "surface-history")]
+    assert len(surface_panels) >= 15
+    assert all(sf[k] == f"surface:{shown}" for k in surface_panels), sf
+    assert sf["page-head"] == f"surface:{shown}"
+    assert sf["surface-history"] == "parts"
+    assert cb["page-head"] == f"fit:{fit}"
+    specs = _raw_specs(pages["/calibration"])
+    smiles = [k for k in cb if k.startswith("smile-")]
     assert smiles
     for pid in smiles:
         quotes = (specs.get(f"chart-{pid}") or {}).get("quotes")
-        need("/calibration", pid, _panel_html(cb, pid),
-             dash.chain_provenance(_chain_of(data, fit)) if quotes else fit_pv)
-
-    # Model Risk: the calibrator's rows name the fit's chain; the half-spread, VIX
-    # replication and arbitrage rows the book of the surface session they read
-    mr = pages["/model-risk"]
+        assert cb[pid] == (f"surface:{fit}" if quotes else f"fit:{fit}"), pid
     slug = dash.desk_monitor.slug
     for key in ("oos_rmse", "short_oos_rmse", "vix_rmse", "params_at_bound", "feller"):
-        row = re.search(rf'<tr id="check-{slug(key)}"[^>]*>(.*?)</tr>', mr, re.DOTALL).group(1)
-        need("/model-risk", key, row, fit_pv)
+        assert mr[f"check-{slug(key)}"] == f"fit:{fit}", key
     for key in ("vix_rep_gap", "arb_exec_share", "median_abs_hs"):
-        row = re.search(rf'<tr id="check-{slug(key)}"[^>]*>(.*?)</tr>', mr, re.DOTALL).group(1)
-        if key == "median_abs_hs" and "is not scored on" in row:      # no value: nothing to source
-            continue
+        row = re.search(rf'<tr id="check-{slug(key)}"[^>]*>(.*?)</tr>', pages["/model-risk"],
+                        re.DOTALL).group(1)
         # the session whose artifact the row reads (its path is set with word breaks)
-        own = re.search(r"data_store/surface/(\d{4}-\d{2}-\d{2})/", re.sub(r"<[^>]+>", "", row)).group(1)
-        need("/model-risk", key, row, dash.chain_provenance(_chain_of(data, own)))
-
-    # Risk: the Greeks are their source fit's (the calibration file their surface records,
-    # not always the headline fit); its banner names that fit's chain
-    rk = pages["/risk"]
-    banner = re.search(r'<div id="greeks-provenance"(.*?)</div>\s*</div>\s*</div>', rk, re.DOTALL).group(1)
-    src_cal = _greeks_source_calibration(data)
-    assert src_cal in banner
-    need("/risk", "Greeks provenance", banner, _fit_pv(dash, data, src_cal))
-    assert missing == [], (chain_view["vendor"], missing)
-    assert all(checked[r] for r in enumerated), checked
+        own_s = re.search(r"data_store/surface/(\d{4}-\d{2}-\d{2})/", re.sub(r"<[^>]+>", "", row)).group(1)
+        assert mr[f"check-{slug(key)}"] in (f"surface:{own_s}", "parts"), key
+    # β drift reads the market database's newest chain: the last later chain of the Research table
+    rows = re.findall(r'<tr[^>]*data-chain="([^"]+)"><td>[^<]*</td><td class="nowrap">[^<]*</td>'
+                      r'<td>[^<]*</td><td class="num">[^<]*</td><td>later, out of sample</td>',
+                      pages["/research"])
+    assert rows
+    assert mr["check-beta-drift"] == rows[-1], (mr["check-beta-drift"], rows)
+    assert rk["page-head"] == f"cal:{_greeks_source_calibration(data)}"
+    assert all(v == rk["page-head"] for k, v in rk.items() if k not in ("page-head", "hedge"))
 
 
 # ── P2.7: no half-empty grid rows, no blank panel bottoms ────────────────────
@@ -9520,7 +9626,7 @@ def test_vrp_beta_table_is_recomputed_from_the_market_db(dash, pages):
     f = _vol_frame().loc[start:end].dropna(subset=["rv_fwd"])
     tbl = html[html.index('id="vrp-beta-table"'):]
     tbl = tbl[:tbl.index("</table>")]
-    rows = re.findall(r'<tr[^>]*data-vrp-beta="([\d.]+)">(.*?)</tr>', tbl, re.DOTALL)
+    rows = re.findall(r'<tr[^>]*data-vrp-beta="([\d.]+)"[^>]*>(.*?)</tr>', tbl, re.DOTALL)
     assert [float(b) for b, _ in rows] == list(dict.fromkeys(betas))
     for b, cells in rows:
         beta = float(b)
@@ -9668,7 +9774,7 @@ def _monitor_rows(html: str) -> list[tuple[str, str, str]]:
     m = re.search(r'<table class="tbl cards" id="monitor-table">.*?<tbody>(.*?)</tbody>', html, re.DOTALL)
     assert m is not None
     tbody = m.group(1)
-    return re.findall(r'<tr id="(check-[\w-]+)" data-status="(\w+)">(.*?)</tr>', tbody, re.DOTALL)
+    return re.findall(r'<tr id="(check-[\w-]+)" data-status="(\w+)"[^>]*>(.*?)</tr>', tbody, re.DOTALL)
 
 
 def test_model_risk_lists_breaches_first_and_counts_them_in_its_filters(dash, pages):
@@ -12113,17 +12219,18 @@ def test_the_recompute_audit_fails_on_a_wrong_chain(recompute_audit, frozen_site
     assert foot
     html = html[:foot.start(2)] + "Chain: " + other(foot.group(2)).replace(", ", " · ") + html[foot.end(2):]
     row = re.search(r'id="surface-history-table".*?<tbody><tr[^>]*><td class="nowrap">[^<]*</td>'
-                    r'<td class="nowrap">([^<]*)</td>', html, re.DOTALL)
+                    r'<td>([^<]*)</td>', html, re.DOTALL)
     assert row
-    html = html[:row.start(1)] + ("Cboe" if row.group(1) != "Cboe" else "Yahoo close") + html[row.end(1):]
-    cap = re.search(r'id="vs-table-[\d-]+">\s*<caption><strong class="vs-head">.*?</strong> \(([^)]*)\)',
+    html = (html[:row.start(1)] + ("Yahoo close, no quote time" if not row.group(1).startswith("Yahoo close")
+                                   else "Cboe, quotes at 2026-01-02 21:14 UTC") + html[row.end(1):])
+    cap = re.search(r'id="vs-table-[\d-]+">\s*<caption[^>]*><strong class="vs-head">.*?</strong> \(([^)]*)\)',
                     html, re.DOTALL)
     assert cap
     html = html[:cap.start(1)] + other(cap.group(1)) + html[cap.end(1):]
     sf.write_text(html, encoding="utf-8")
     ov = site / "index.html"
     html = ov.read_text(encoding="utf-8")
-    line = re.search(r'id="surface-line">.*?; ([^)]*)\)', html, re.DOTALL)
+    line = re.search(r'id="surface-line"[^>]*>.*?; ([^)]*)\)', html, re.DOTALL)
     assert line
     ov.write_text(html[:line.start(1)] + other(line.group(1)) + html[line.end(1):], encoding="utf-8")
     res = recompute_audit.run(site, SHIPPED)
@@ -12134,7 +12241,7 @@ def test_the_recompute_audit_fails_on_a_wrong_chain(recompute_audit, frozen_site
     assert any(p == "#surface-change" and lab.endswith("its chain (surface.json inputs)")
                for _, p, lab in failed)
     assert ("Overview", "headline fit", "surface line: its chain (surface.json inputs): says '; "
-            + re.search(r'id="surface-line">.*?; ([^)]*)\)', (frozen_site / "index.html").read_text(
+            + re.search(r'id="surface-line"[^>]*>.*?; ([^)]*)\)', (frozen_site / "index.html").read_text(
                 encoding="utf-8"), re.DOTALL).group(1) + ")'") in failed
 
 def test_the_audit_leaves_out_a_scorecard_model_the_producer_marks_unavailable(recompute_audit, tmp_path):

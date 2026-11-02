@@ -31,7 +31,7 @@
 {% else %}{% set beta_src_txt = beta_txt %}{% set beta_check_txt = 'the estimation chains are not available' %}{% endif %}
 {% set inf = d.inference or {} %}
 
-<div class="page-head">
+<div class="page-head" data-chain="none">
   <h1 class="page-title">Research · delta-hedged straddle backtest, <span class="nowrap">{{ d.start_date|fmt }} → {{ d.end_date|fmt }}</span>{% if d.eq_dates %} ({{ "{:,}".format(d.eq_dates|length) }} sessions){% endif %}</h1>
   <p class="page-sub">Equal-weight S1C + S3 + S4 sleeves on $1M of collateral, after every correction round from C16 on. A documented negative result.</p>
   <div class="page-badge">
@@ -62,7 +62,7 @@
 {% set sp = d.sleeve_spec %}
 {% if sp %}
 <div class="g">
-  {% call m.panel('sleeve-spec', 'Sleeve specification · what each sleeve trades', 's12', 'from the engine and signal modules') %}
+  {% call m.panel('sleeve-spec', 'Sleeve specification · what each sleeve trades', 's12', 'from the engine and signal modules', chain='none') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Sleeve specification (scrollable)">
     <table class="tbl dense cards spec" id="sleeve-spec-table">
       <thead><tr><th scope="col">Sleeve</th><th scope="col">Role</th><th scope="col">Instrument</th><th scope="col">Side (trades)</th><th scope="col">Entry rule</th><th scope="col">Exit rule</th><th scope="col" class="num">Max hold</th><th scope="col">Sizing</th><th scope="col">Costs</th></tr></thead>
@@ -75,19 +75,19 @@
 {% endif %}
 
 <div class="g">
-  {% call m.panel('equity', 'Cumulative return · portfolio, sleeves and T-bills', 's12', 'R2 sessions shaded') %}
+  {% call m.panel('equity', 'Cumulative return · portfolio, sleeves and T-bills', 's12', 'R2 sessions shaded', chain='none') %}
     {% if d.charts.equity %}{{ m.chart(d.charts.equity, 'h400') }}{% endif %}
     <p class="note">Each sleeve's own NAV relative to its start; the portfolio's daily P&amp;L is the equal-weight mean of S1C, S3 and S4. Full daily resolution; drag or use the slider to zoom.</p>
   {% endcall %}
   {# under the equity curve, full width on its x axis: one chart group (a pointer
      on one shows the date on all three; the slider, the presets, the year menu
      and a click on a year's bar zoom all three) #}
-  {% call m.panel('drawdown', 'Drawdown', 's12', 'zooms with the curve above') %}{% if d.charts.drawdown %}{{ m.chart(d.charts.drawdown, 'h180') }}{% endif %}{% endcall %}
-  {% call m.panel('rolling', 'Rolling 126-session Sharpe', 's12', 'zooms with the curve above') %}{% if d.charts.rolling %}{{ m.chart(d.charts.rolling, 'h180') }}{% endif %}{% endcall %}
+  {% call m.panel('drawdown', 'Drawdown', 's12', 'zooms with the curve above', chain='none') %}{% if d.charts.drawdown %}{{ m.chart(d.charts.drawdown, 'h180') }}{% endif %}{% endcall %}
+  {% call m.panel('rolling', 'Rolling 126-session Sharpe', 's12', 'zooms with the curve above', chain='none') %}{% if d.charts.rolling %}{{ m.chart(d.charts.rolling, 'h180') }}{% endif %}{% endcall %}
 </div>
 
 <div class="g pair">
-  {% call m.panel('sleeves', 'Per-sleeve performance', 's8') %}
+  {% call m.panel('sleeves', 'Per-sleeve performance', 's8', chain='none') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Per-sleeve performance (scrollable)">
     <table class="tbl" id="sleeve-table">
       <thead><tr><th scope="col">Signal</th><th scope="col" class="num">Total P&amp;L</th><th scope="col" class="num">Sharpe</th><th scope="col" class="num">Ann. return</th><th scope="col" class="num">Win rate</th><th scope="col" class="num">Trades</th><th scope="col">Role</th></tr></thead>
@@ -97,18 +97,18 @@
     <p class="note">S3 is a short SPX straddle: the index leg of a dispersion trade, with no single-name leg (the store has no single-stock options). S1 and S2 are reference strategies, not in the portfolio. Sharpe: {{ d.sharpe_convention or 'convention not recorded in the stored results' }}.
     {% for t in d.open_trades %}{{ t.signal|upper }}'s count includes a straddle opened on the last session ({{ t.entry }}) and still open, carrying only its entry cost ({{ t.net_pnl|usd(true) }}); the engine's win rate counts it as a loss.{% endfor %}</p>
   {% endcall %}
-  {% call m.panel('sleeve-pnl', 'Total P&L by sleeve', 's4', '$000s') %}{% if d.charts.sleeves %}{{ m.chart(d.charts.sleeves, 'h220 grow') }}{% endif %}{% endcall %}
+  {% call m.panel('sleeve-pnl', 'Total P&L by sleeve', 's4', '$000s', chain='none') %}{% if d.charts.sleeves %}{{ m.chart(d.charts.sleeves, 'h220 grow') }}{% endif %}{% endcall %}
 </div>
 
 {% if d.rt %}{% set rt = d.rt %}
 <div class="g pair">
-  {% call m.panel('round-trips', 'Every trade · P&L by entry date', 's8', 'mark-to-model at β·VIX') %}
+  {% call m.panel('round-trips', 'Every trade · P&L by entry date', 's8', 'mark-to-model at β·VIX', chain='none') %}
     {{ m.chart(d.charts.round_trips, 'h300 grow') }}
     <p class="quote-readout point-readout js-only" id="chart-round-trips-readout" data-points-for="chart-round-trips" tabindex="0" aria-live="polite" aria-describedby="chart-round-trips-readout-help">Trade readout: hover a dot, or focus here and step through the trades by entry date with ← → (Page Up / Down: 10 trades; Home / End).</p>
     <span class="sr-only" id="chart-round-trips-readout-help">Arrow keys step through the shown sleeves’ round trips in order of entry date; each step reads the sleeve, the entry date and the P&amp;L in $000s.</span>
     <p class="note" id="round-trips-note">Each dot is one round trip (a straddle from entry to exit), at its entry date and its net P&amp;L in $000s: priced and marked with Black–Scholes at β·VIX, after costs and financing, so no dot is a traded fill. The reference strategies S1 and S2 are in the statistics below, not on the chart. The open trade is hollow and carries only its entry cost. The trade log’s “combined” records (the research-only agreement rule, not in the portfolio; see the <a href="#sleeve-spec">sleeve specification</a>) are left out.</p>
   {% endcall %}
-  {% call m.panel('trade-hists', 'Closed round trips · P&L and days held', 's4', rt.n_port_closed ~ ' closed · S1C, S3, S4') %}
+  {% call m.panel('trade-hists', 'Closed round trips · P&L and days held', 's4', rt.n_port_closed ~ ' closed · S1C, S3, S4', chain='none') %}
     <h3 class="sub-head">P&amp;L per round trip<span class="sub-meta">$000s, closed trades</span></h3>
     {{ m.chart(d.charts.trade_pnl_hist, 'h240') }}
     <h3 class="sub-head">Days held<span class="sub-meta">calendar days, entry to exit</span></h3>
@@ -116,7 +116,7 @@
   {% endcall %}
 </div>
 <div class="g">
-  {% call m.panel('trade-stats', 'Round-trip statistics by sleeve', 's12', 'closed trades') %}
+  {% call m.panel('trade-stats', 'Round-trip statistics by sleeve', 's12', 'closed trades', chain='none') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Round-trip statistics by sleeve (scrollable)">
     <table class="tbl dense wrap-head" id="trade-stats-tbl">
       <caption>Trades of each sleeve, mark-to-model at β·VIX, in $000s of the sleeve’s own NAV: closed trades only except Total (every trade, the open one’s entry cost included); P(profit) = share of closed trades with P&amp;L &gt; 0; 5 worst / losses = the five largest losses’ share of all losses (and 5 best / gains of all gains); days are calendar days from entry to exit</caption>
@@ -128,7 +128,7 @@
   {% endcall %}
 </div>
 <div class="g">
-  {% call m.panel('drawdowns', 'Worst drawdowns · portfolio and each sleeve', 's12', 'NAV to ' ~ rt.end) %}
+  {% call m.panel('drawdowns', 'Worst drawdowns · portfolio and each sleeve', 's12', 'NAV to ' ~ rt.end, chain='none') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Worst drawdowns (scrollable)">
     <table class="tbl dense wrap-head" id="drawdowns-tbl">
       <caption>The five deepest drawdowns of each NAV (fewer where there are fewer): the peak is the last session at the running high before the fall, the valley the low before the peak is regained, the recovery the first session back at the peak; depth = valley / peak − 1; sessions from the peak to the recovery, or to {{ rt.end }} when not recovered</caption>
@@ -142,10 +142,10 @@
 {% endif %}
 
 <div class="g pair">
-  {% call m.panel('monthly', 'Monthly returns', 's7', 'against the prior month-end NAV') %}
+  {% call m.panel('monthly', 'Monthly returns', 's7', 'against the prior month-end NAV', chain='none') %}
     {% if d.monthly %}{{ m.heatmap(d.monthly, 'monthly-grid', 'Portfolio return (%) by month; the last column is the calendar year', 'Year', [m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], '−' ~ ((d.monthly.lim * 100)|fmt('.1f')) ~ '%', '+' ~ ((d.monthly.lim * 100)|fmt('.1f')) ~ '%', 'month cells · orange loss, blue gain; the sign is in every cell'), m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], '−' ~ ((d.monthly.year_lim * 100)|fmt('.1f')) ~ '%', '+' ~ ((d.monthly.year_lim * 100)|fmt('.1f')) ~ '%', 'Year column, on its own wider scale')], grow=True) }}{% endif %}
   {% endcall %}
-  {% call m.panel('annual', 'Annual return and half-year Sharpe', 's5') %}
+  {% call m.panel('annual', 'Annual return and half-year Sharpe', 's5', chain='none') %}
     {% if d.charts.annual %}{{ m.chart(d.charts.annual, 'h180 grow') }}{% endif %}
     {% if d.charts.halfyear %}{{ m.chart(d.charts.halfyear, 'h220 grow') }}{% endif %}
     <p class="note">Years compound exactly to the cumulative return{% if d.ann_partial_note %} ({{ d.ann_partial_note|dates }}){% endif %}. <strong class="neg">{{ d.wf_neg|fmt }}</strong> of {{ d.wf_total|fmt }} half-years are negative{% if d.wf_flat %} · {{ d.wf_flat }} flat{% endif %}. Sub-periods of one run: nothing is refitted per window, so this is not walk-forward evidence.</p>
@@ -153,7 +153,7 @@
 </div>
 
 <div class="g pair">
-  {% call m.panel('inference', 'Inference · intervals, nulls, multiple testing', 's7', 'mark-to-model P&L') %}
+  {% call m.panel('inference', 'Inference · intervals, nulls, multiple testing', 's7', 'mark-to-model P&L', chain='none') %}
     {% if inf.state == 'ok' %}
       {% set bs = d.boot_settings or {} %}
       <div class="tbl-wrap" tabindex="0" role="region" aria-label="Sharpe intervals by series (scrollable)">
@@ -193,7 +193,7 @@
       <p class="note">Recorded in the stored run now: S3 timing p = {{ k.get('s3_null_p')|fmt('.3f') }} against 200 random-walk null paths ({{ s3_base_txt }}): the legacy 200-path null, superseded in C23 by exposure-matched nulls.</p>
     {% endif %}
   {% endcall %}
-  {% call m.panel('benchmarks', 'Real-settlement benchmarks · Cboe strategy indices', 's5') %}
+  {% call m.panel('benchmarks', 'Real-settlement benchmarks · Cboe strategy indices', 's5', chain='none') %}
     {% if inf.state == 'ok' and d.bench_rows %}
       <div class="tbl-wrap" tabindex="0" role="region" aria-label="Benchmark co-movement (scrollable)">
       <table class="tbl dense" id="bench-table"><caption>Daily correlation of excess returns, {{ (d.bench_window or [])|join(' → ') }}</caption>
@@ -218,8 +218,10 @@
   {% endcall %}
 </div>
 
+{# the open P&L is marked on the newest ledger's captured book, which its source line names #}
+{% set fw_chain = ('ledger:' ~ d.forward.last) if (d.forward and d.forward.state == 'ok') else 'none' %}
 <div class="g pair">
-  {% call m.panel('forward', 'Forward test · pre-registered, executable prices', 's7') %}
+  {% call m.panel('forward', 'Forward test · pre-registered, executable prices', 's7', chain=fw_chain) %}
     {% set fw = d.forward or {} %}
     {% if fw.state == 'ok' %}
       <p class="note">{{ fw.n }} session{{ '' if fw.n == 1 else 's' }} registered, {{ fw.first }} → {{ fw.last }}; each file carries the SHA-256 of the one before it and of its captured chain, and the chain checks out. Entries at the ask (long) or bid (short), marks at bid / ask / mid on later captured books.</p>
@@ -239,7 +241,7 @@
       {{ m.missing(fw, 'Each session the bot captures, the signals become listed SPX straddles at that book’s bid and ask, marked on every later captured book: a forward test nobody can backfill.') }}
     {% endif %}
   {% endcall %}
-  {% call m.panel('forecast', 'Vol forecasts · 21-day QLIKE', 's5') %}
+  {% call m.panel('forecast', 'Vol forecasts · 21-day QLIKE', 's5', chain='none') %}
     {% if d.forecast_rows %}{% set fm = d.forecast_meta %}
       <div class="tbl-wrap" tabindex="0" role="region" aria-label="Forecast losses (scrollable)">
       <table class="tbl dense" id="forecast-table"><caption>21-day realised-vol forecasts, {{ fm.start }} → {{ fm.end }} ({{ fm.n|fmt(',') }} origins); lower QLIKE is better</caption>
@@ -258,7 +260,7 @@
 {% set vr = d.vrp %}
 {% if vr and d.charts.vrp_levels %}
 <div class="g">
-  {% call m.panel('vrp', 'Implied against realised vol · what the β·VIX mark leaves of the premium', 's12', vr.first ~ ' → ' ~ vr.last) %}
+  {% call m.panel('vrp', 'Implied against realised vol · what the β·VIX mark leaves of the premium', 's12', vr.first ~ ' → ' ~ vr.last, chain='parts') %}
     {{ m.chart(d.charts.vrp_levels, 'h300') }}
     {% if d.charts.vrp_bars %}{{ m.chart(d.charts.vrp_bars, 'h160') }}{% endif %}
     <div class="split mt8">
@@ -266,7 +268,7 @@
         <div class="tbl-wrap" tabindex="0" role="region" aria-label="Ex-post premium by β (scrollable)">
         <table class="tbl dense wrap-head cards" id="vrp-beta-table"><caption>β·VIX − RV21 forward, {{ vr.start }} → {{ vr.end }}, {{ (vr.rows[0].n if vr.rows else none)|fmt(',') }} sessions (vol pts; variance-space: vol pts²)</caption>
           <thead><tr><th scope="col" class="num">{{ 'β'|sym }}</th><th scope="col">Which</th><th scope="col" class="num">Mean</th><th scope="col" class="num">Median</th><th scope="col" class="num">Above zero</th><th scope="col" class="num">{{ '(β·VIX)² − RV²'|sym }}</th></tr></thead>
-          <tbody>{% for r in vr.rows %}<tr{% if r.backtest %} class="em"{% endif %} data-vrp-beta="{{ r.beta|fmt('.2f') }}"><td class="num" data-label="β">{{ r.beta|fmt('.2f') }}</td><td class="wrap" data-label="Which">{{ r.why|dates }}</td><td class="num" data-label="Mean">{{ r.mean|signed('.2f') }}</td><td class="num" data-label="Median">{{ r.median|signed('.2f') }}</td><td class="num" data-label="Above zero">{{ r.share_pos|fmt('.1f') }}%</td><td class="num" data-label="(β·VIX)² − RV²">{{ r.var_mean|signed('.1f') }}</td></tr>{% endfor %}</tbody>
+          <tbody>{% for r in vr.rows %}<tr{% if r.backtest %} class="em"{% endif %} data-vrp-beta="{{ r.beta|fmt('.2f') }}"{% if r.chain %} data-chain="{{ r.chain }}"{% endif %}><td class="num" data-label="β">{{ r.beta|fmt('.2f') }}</td><td class="wrap" data-label="Which">{{ r.why|dates }}</td><td class="num" data-label="Mean">{{ r.mean|signed('.2f') }}</td><td class="num" data-label="Median">{{ r.median|signed('.2f') }}</td><td class="num" data-label="Above zero">{{ r.share_pos|fmt('.1f') }}%</td><td class="num" data-label="(β·VIX)² − RV²">{{ r.var_mean|signed('.1f') }}</td></tr>{% endfor %}</tbody>
         </table>
         </div>
         {% if vr.full %}<p class="note" id="vrp-full">Full sample, {{ vr.full.first }} → {{ vr.full.last }} ({{ vr.full.n|fmt(',') }} sessions with a forward window): VIX − RV21 forward averages <strong>{{ vr.full.mean|signed('.2f') }} vol pts</strong> and is positive on {{ vr.full.share_pos|fmt('.1f') }}% of sessions.{% if vr.now %} Today, {{ vr.now.date }}: VIX {{ vr.now.vix|fmt('.2f') }} against RV21 trailing {{ vr.now.rv|fmt('.2f') }} ({{ vr.now.spread|signed('.2f') }} vol pts); its forward value is not known until 21 sessions later.{% endif %}</p>{% endif %}
@@ -283,18 +285,18 @@
 {% set grid = b.get('grid') or [] %}
 {% if be or grid %}
 <div class="g pair top" id="beta">
-  {% call m.panel('beta-chains', 'β = ATM vol / VIX · the chains behind it', 's6') %}
+  {% call m.panel('beta-chains', 'β = ATM vol / VIX · the chains behind it', 's6', chain='parts') %}
     {% if be %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="β estimation chains (scrollable)">
     <table class="tbl dense" id="beta-chains">
       <thead><tr><th scope="col">Chain</th><th scope="col">Session</th><th scope="col">Rule regime</th><th scope="col" class="num">ATM 30d / VIX</th><th scope="col">Use</th></tr></thead>
-      <tbody>{% for c in be.chains %}<tr{% if c.role != 'estimation' %} class="muted"{% endif %}><td>{{ c.kind }}</td><td class="nowrap">{{ c.session }}</td><td>{{ c.regime or '—' }}</td><td class="num">{{ c.ratio|fmt('.3f') }}</td><td>{% if c.role == 'estimation' %}estimation{% elif c.role == 'later' %}later, out of sample{% else %}excluded: {{ c.status[10:]|prose }}{% endif %}</td></tr>{% endfor %}</tbody>
+      <tbody>{% for c in be.chains %}<tr{% if c.role != 'estimation' %} class="muted"{% endif %} data-chain="{{ c.key }}"><td>{{ c.kind }}: {{ key_cell(c.key) }}</td><td class="nowrap">{{ c.session }}</td><td>{{ c.regime or '—' }}</td><td class="num">{{ c.ratio|fmt('.3f') }}</td><td>{% if c.role == 'estimation' %}estimation{% elif c.role == 'later' %}later, out of sample{% else %}excluded: {{ c.status[10:]|prose }}{% endif %}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
     <p class="note">{{ beta_src_txt }}; {{ beta_check_txt }}. 30-day ATM-forward implied vol (Black-76 on put–call-parity forwards) over the same-time VIX; no ATM-IV history exists before 2026, so β is assumed constant over {{ yrs }}.</p>
     {% else %}<p class="note">The estimation chains are not available.</p>{% endif %}
   {% endcall %}
-  {% call m.panel('beta-grid', 'β sensitivity · the full backtest re-run at each β', 's6') %}
+  {% call m.panel('beta-grid', 'β sensitivity · the full backtest re-run at each β', 's6', chain='none') %}
     {% if grid %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="β sensitivity grid (scrollable)">
     <table class="tbl dense wrap-head" id="beta-grid">
@@ -310,7 +312,7 @@
 {% endif %}
 
 <div class="g pair">
-  {% call m.panel('why', 'Why the edge disappeared', 's8') %}
+  {% call m.panel('why', 'Why the edge disappeared', 's8', chain='none') %}
     <div class="prose">
       <p>Priced at {{ beta_txt }} × VIX, S1 is {{ s1.get('total_pnl')|usd_k }} ({{ s1.get('win_rate')|pct(0, false) }} win){% if s1f %}, and its sign flips between β = {{ s1f.lo|fmt('.2f') }} and {{ s1f.hi|fmt('.2f') }}{% endif %}. The contrarian inversion S1C is {{ s1c.get('total_pnl')|usd_k }}, so neither direction of the PDV-spread trade makes money. The portfolio is {{ k.get('cum_ret')|pct }} cumulative (Sharpe {{ k.get('sharpe')|fmt(".2f") }}, max drawdown {{ k.get('mdd')|pct }}); S3 ({{ s3.get('total_pnl')|usd_k }}, {{ s3.get('win_rate')|pct(0, false) }} win) is the only positive sleeve, {{ s3_beta_txt }}; like every sleeve’s, its P&amp;L is an excess return over T-bills (the hurdle is 0). Each sleeve’s sign at each β is in the {{ m.cite('β grid', '#beta-grid') }}; what the β·VIX mark leaves of the premium, against realised vol, is in {{ m.cite('implied against realised', '#vrp') }}.</p>
     </div>
@@ -324,7 +326,7 @@
     </div>
     {% endcall %}
   {% endcall %}
-  {% call m.panel('limits', 'Limitations', 's4') %}
+  {% call m.panel('limits', 'Limitations', 's4', chain='none') %}
     <ul class="prose" style="padding-left:16px;">
       <li><strong>Option prices.</strong> All P&amp;L is Black–Scholes on β·VIX{% if d.option_snapshots and d.option_snapshots.dates %}; the database's {{ d.option_snapshots.dates|length }} SPX chain{{ 's' if d.option_snapshots.dates|length != 1 else '' }} ({{ "{:,}".format(d.option_snapshots.n_rows) }} rows) are from {{ d.option_snapshots.dates[0] }}{% if d.option_snapshots.dates|length > 1 %} to {{ d.option_snapshots.dates[-1] }}{% endif %}{% endif %}.</li>
       <li><strong>Breadth.</strong> S3 {% if s3.get('rolls') %}enters {{ s3.entries }} times{% else %}trades {{ s3.get('n_trades')|fmt }} times{% endif %} in {{ yrs }}.</li>
@@ -344,7 +346,7 @@
 <h2 class="section-title" id="research-prototypes">Research prototypes · not used for trading</h2>
 <div class="g pair start">
   {% set c = d.clf or {} %}
-  {% call m.panel('research-classifier', 'ML regime classifier · research only', 's6') %}
+  {% call m.panel('research-classifier', 'ML regime classifier · research only', 's6', chain='none') %}
     {% if c.clf_available %}
     <p class="note">{{ m.chip('research only', 'watch') }} Next-session forecast from the features of {{ c.clf_feature_date }}: <strong>{{ c.clf_label }}</strong> at {{ c.clf_conf|fmt(".1f")|u('%') }}{% if c.clf_agrees == false %}, disagreeing with the rule label{% endif %}.
     {% if c.clf_oos_acc is not none %}{{ c.clf_oos_acc|fmt|u('%') }} out-of-sample, it loses to the {{ c.clf_persistence_acc|fmt|u('%') }} “predict-yesterday” baseline{% else %}It loses to the “predict-yesterday” baseline{% endif %}, so it is <strong>not used for trading</strong>.</p>
@@ -362,7 +364,7 @@
     {% endif %}
   {% endcall %}
 
-  {% call m.panel('label-history', 'Rule-label distribution', 's6', c.reg_span) %}
+  {% call m.panel('label-history', 'Rule-label distribution', 's6', c.reg_span, chain='none') %}
     {% if c.reg_total %}
     <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));">
       {% for k_, name in [(0, 'R0 long gamma'), (1, 'R1 short gamma'), (2, 'R2 vomma active')] %}

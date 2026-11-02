@@ -7,7 +7,10 @@
 {% block og_description %}Greeks of the headline Heston surface (vomma flag, vega, vanna, delta), a spot × vol scenario grid and the daily Greek P&amp;L explain of a delta-hedged straddle.{% endblock %}
 
 {% block content %}
-<div class="page-head">
+{# the Greeks are their source fit's: every number of the surface is read off the chain
+   that fit was made on (tier 0.2); the banner and each panel's source line name it #}
+{% set gk = ('cal:' ~ d.provenance.source_calibration) if (d.provenance and d.provenance.source_calibration) else 'none' %}
+<div class="page-head" data-chain="{{ gk }}">
   <h1 class="page-title">Risk · Greeks, scenarios and P&amp;L explain</h1>
   <p class="page-sub">Second-order Greeks of the stored Heston surface, where a vol move's P&amp;L is mostly convexity, and how well the Greeks explain a hedged position's daily P&amp;L.</p>
   <div class="page-badge"><span class="nowrap">Surface {{ d.surface_date|fmt }}</span>{% if d.greeks_age %} <span class="age-{{ d.stale[0].level if d.stale else 'ok' }}">({{ d.greeks_age|plural('session') }} old)</span>{% endif %}<span class="sep">·</span><span class="nowrap">{{ d.n_cells|fmt }} of {{ d.n_grid|fmt }} grid nodes</span><span class="sep">·</span><span class="nowrap">{{ d.n_maturities|fmt }} maturities</span></div>
@@ -50,7 +53,7 @@
 {% if cg %}<p class="note" id="cash-greeks-note" style="margin:-2px 0 8px;">Cash Greeks of the scenario grid's reference book: one {{ cg.tenor_days|fmt('.0f') }}-day SPX straddle struck at the forward ({{ cg.forward|fmt(',.1f') }}; S {{ cg.S|fmt(',.1f') }}), Black-76 at the fit's ATM-forward vol {{ (cg.iv_atm_forward * 100)|fmt('.2f') }}%, × {{ cg.multiplier|fmt('.0f') }} for one SPX contract. $gamma is ½·Γ·(1% of S)²·100. Unit conversions of the same Greeks, not a position: the site holds no book.</p>{% endif %}
 
 <div class="g">
-  {% call m.panel('greeks-grid', 'Greeks by maturity and ln(K/F)', 's12', d.surface_date) %}
+  {% call m.panel('greeks-grid', 'Greeks by maturity and ln(K/F)', 's12', d.surface_date, chain=gk) %}
     <div class="tabs js-only" role="tablist" aria-label="Greek shown in the grid" data-state-key="greek" hidden>
       <button class="btn" type="button" role="tab" id="tab-vomma" aria-controls="grid-vomma" aria-selected="true" data-value="vomma">Vomma flag</button>
       {% for g in d.greek_grids %}<button class="btn" type="button" role="tab" id="tab-{{ g.key }}" aria-controls="grid-{{ g.key }}" aria-selected="false" data-value="{{ g.key }}">{{ g.label }}</button>{% endfor %}
@@ -94,7 +97,7 @@
 
 {% if d.n_unstable %}
 <div class="g">
-  {% call m.panel('unstable', 'Unstable nodes · ' ~ rule_short, 's6', 'sorted by ' ~ metric_lower) %}
+  {% call m.panel('unstable', 'Unstable nodes · ' ~ rule_short, 's6', 'sorted by ' ~ metric_lower, chain=gk) %}
     <div class="tbl-wrap capped" tabindex="0" role="region" aria-label="Unstable node details (scrollable)">
     <table class="tbl dense">
       {# the column the table is sorted by comes right after the node's position, so it is on screen on a phone #}
@@ -103,7 +106,7 @@
     </table>
     </div>
   {% endcall %}
-  {% call m.panel('flag-scatter', metric_name ~ ' against ln(K/F)', 's6') %}
+  {% call m.panel('flag-scatter', metric_name ~ ' against ln(K/F)', 's6', chain=gk) %}
     {% if d.charts.scatter %}{{ m.chart(d.charts.scatter, 'h300') }}{{ m.tenor_key(d.charts.scatter) }}{% endif %}
     <p class="note">Largest at short maturities away from the money, where a vol move's P&amp;L is mostly convexity rather than vega.</p>
   {% endcall %}
@@ -111,7 +114,7 @@
 {% endif %}
 
 <div class="g level">
-  {% call m.panel('scenario', 'Scenario grid · spot × vol, full revaluation', 's6') %}
+  {% call m.panel('scenario', 'Scenario grid · spot × vol, full revaluation', 's6', chain=gk) %}
     {% set sc = d.scenario or {} %}
     {% if sc.state == 'ok' %}
     <div class="tabs js-only" role="group" aria-label="Units of the scenario P&amp;L">
@@ -132,7 +135,7 @@
     {{ m.missing(sc, 'A spot (−10% … +10%) × parallel vol (−5 … +10 vol pts) P&L grid of a reference book, fully revalued, under sticky-strike and sticky-moneyness dynamics.') }}
     {% endif %}
   {% endcall %}
-  {% call m.panel('qv-vanna', 'QV convexity and mean vanna by maturity', 's6') %}
+  {% call m.panel('qv-vanna', 'QV convexity and mean vanna by maturity', 's6', chain=gk) %}
     {% if d.charts.qv %}{{ m.chart(d.charts.qv, 'h180') }}{% endif %}
     {% if d.charts.vanna %}{{ m.chart(d.charts.vanna, 'h180') }}{% endif %}
     {% call m.method() %}
@@ -143,7 +146,7 @@
 
 {% if d.hedge %}{% set h = d.hedge %}
 <div class="g">
-  {% call m.panel('hedge', 'P&L explain · delta-hedged 1-year ATM straddle, 2020', 's12', h.start ~ ' → ' ~ h.end) %}
+  {% call m.panel('hedge', 'P&L explain · delta-hedged 1-year ATM straddle, 2020', 's12', h.start ~ ' → ' ~ h.end, chain='none') %}
     <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));">
       {{ m.kpi('Total P&L', h.cum_total|signed(',.1f'), unit='idx pts', tone=h.cum_total|tone) }}
       {% for name, v in h.cum.items() %}{{ m.kpi(name, v|signed(',.1f'), unit='idx pts', tone=v|tone) }}{% endfor %}

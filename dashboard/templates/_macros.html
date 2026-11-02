@@ -1,18 +1,24 @@
 {# Shared page components. Every chart: role="img" container with an accessible
    name, a JSON spec (never executed) and a server-rendered table behind it. #}
 
-{# src: the panel's source line, the chain its numbers are read off (app.chain_foot:
-   'Chain: Cboe', 'quotes at …'), set like the page's chain badge (tier 0.2) #}
-{% macro panel(id, title, span='s6', meta=None, cls='', src=None) -%}
-<section class="panel {{ span }} {{ cls }}" id="{{ id }}" aria-labelledby="{{ id }}-t">
+{# chain (tier 0.2): what the panel's numbers are read off, as its data-chain
+   attribute: chain keys (app.chain_of_key: 'surface:2026-10-30', 'fit:2026-10-29'),
+   'parts' (its chain-derived numbers sit in rows or lines with keys of their own) or
+   'none'. test_dashboard.py requires it on every panel. Keys give the panel a source
+   line per chain (app.key_feet: 'Chain: Cboe', 'quotes at …'); src overrides that line
+   with its own parts, set like the page's chain badge; foot=False leaves it out where
+   the panel's text names the chain already. #}
+{% macro panel(id, title, span='s6', meta=None, cls='', src=None, chain=None, foot=True) -%}
+{%- set _feet = [src] if src else (key_feet(chain) if foot and chain and chain not in ('parts', 'none') else []) %}
+<section class="panel {{ span }} {{ cls }}" id="{{ id }}" aria-labelledby="{{ id }}-t"{% if chain %} data-chain="{{ chain }}"{% endif %}>
   <div class="panel-head">
     <h2 class="panel-title" id="{{ id }}-t">{{ title|sym }}</h2>
     <span class="panel-side">{{ monitored_chips(id) }}{% if meta %}<span class="panel-meta">{{ meta }}</span>{% endif %}
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="{{ id }}" aria-label="Copy a link to the {{ title }} panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">{{ caller() }}</div>
-  {%- if src %}
-  <div class="panel-foot src-foot" id="{{ id }}-chain">{% for p in src %}<span class="nowrap">{{ p }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</div>{% endif %}
+  {%- for foot in _feet %}
+  <div class="panel-foot src-foot" id="{{ id }}-chain{{ '' if loop.first else '-' ~ loop.index }}">{% for p in foot %}<span class="nowrap">{{ p }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</div>{% endfor %}
   {%- set _cb = cited_on(id) %}{% if _cb %}
   <div class="panel-foot cite-foot" id="{{ id }}-cited">Cited on: {% for c in _cb %}<a href="{{ c.page }}{% if c.panel %}#{{ c.panel }}{% endif %}">{{ c.label }}</a>{{ ' · ' if not loop.last }}{% endfor %}</div>{% endif %}
 </section>
@@ -196,7 +202,7 @@
 {% macro vs_table(head, v) -%}
       <div class="tbl-wrap" tabindex="0" role="region" aria-label="Change against {{ v.session }} (scrollable)">
       <table class="tbl dense dgrid nr" id="vs-table-{{ v.session }}">
-        <caption><strong class="vs-head">vs {{ v.session }}, {{ v.gap|plural('NYSE session') }} earlier</strong>{% if v.chain %} ({{ v.chain }}){% endif %}: the SVI-cal surface at constant maturity, each cell {{ v.session }} → {{ head }} (ATMF in %; RR, BF and Δ in vol pts); Δ = {{ head }} − {{ v.session }}</caption>
+        <caption data-chain="surface:{{ v.session }}"><strong class="vs-head">vs {{ v.session }}, {{ v.gap|plural('NYSE session') }} earlier</strong>{% if v.chain %} ({{ v.chain }}){% endif %}: the SVI-cal surface at constant maturity, each cell {{ v.session }} → {{ head }} (ATMF in %; RR, BF and Δ in vol pts); Δ = {{ head }} − {{ v.session }}</caption>
         <thead><tr><th scope="col">Tenor</th><th scope="col" class="num">ATMF</th><th scope="col" class="num">Δ ATMF</th><th scope="col" class="num">RR25</th><th scope="col" class="num">Δ RR25</th><th scope="col" class="num">BF25</th><th scope="col" class="num">Δ BF25</th></tr></thead>
         <tbody>{% for r in v.rows %}<tr{% if not r.available %} class="muted"{% endif %}><th scope="row">{{ r.label }}</th>{% for k in ('atmf', 'rr25', 'bf25') %}{% set c = r[k] %}<td>{{ c.old|fmt('.2f') if k == 'atmf' else c.old|signed('.2f') }} → {{ c.new|fmt('.2f') if k == 'atmf' else c.new|signed('.2f') }}</td><td>{{ c.delta|signed('.2f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
       </table>

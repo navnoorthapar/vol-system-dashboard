@@ -160,9 +160,10 @@ def chain_stamp(inputs: dict, universe: dict | None = None) -> str | None:
 
 
 def chain_short(inputs: dict, universe: dict | None = None) -> str | None:
-    """'Cboe', 'Yahoo download' or 'Yahoo close': the Surface history's Chain cell."""
+    """'Cboe', 'Yahoo download' or 'Yahoo close' and the quote-time clause: a table
+    cell naming a session's chain ('Cboe, quotes at 2026-10-30 23:49 UTC')."""
     w = chain_words(inputs, universe)
-    return SHORT_NAMES.get(w[0], w[0]) if w else None
+    return f"{SHORT_NAMES.get(w[0], w[0])}, {w[2][0]}" if w else None
 
 
 def fit_chain_inputs(store: Store, cal: dict, session: str) -> dict:

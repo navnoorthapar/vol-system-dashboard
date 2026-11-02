@@ -515,6 +515,29 @@ def stale_cause(store: Store, f: Facts, session: str) -> str | tuple[str, str, b
 Item = tuple[str, str, Parts, str]          # (link, lead, parts, note)
 
 
+def surface_stamp(store: Store, session: str) -> str:
+    """The chain a surface session was built from, as a page names it (tier 0.2):
+    'Cboe, quotes at …' from its surface.json inputs."""
+    path = f"surface/{session}/surface.json"
+    sj = store.json(path) if (store.root / path).exists() else {}
+    return chain_stamp(sj.get("inputs") or {}, sj.get("universe") or {}) or "chain source not recorded"
+
+
+def fit_stamp(store: Store, f: Facts, session: str) -> str:
+    """The chain the gate-passing fit of ``session`` was made on (its chain_diagnostics
+    and stored chain), as a page names it."""
+    own = next((r for r in reversed(f["gated"]) if r["session"] == session), None)
+    return ((chain_stamp(fit_chain_inputs(store, own["cal"], session)) if own else None)
+            or "chain source not recorded")
+
+
+def chains_said(stamps: list[tuple[str, str]]) -> str:
+    """' Chain: …; fit chain: ….': the end of a finding that names its chains, labelled
+    by what they are ('Chain' a surface's book, 'Fit chain' a fit's)."""
+    out = [f"{lab if i == 0 else lab[0].lower() + lab[1:]}: {s}" for i, (lab, s) in enumerate(stamps)]
+    return " " + "; ".join(out) + "."
+
+
 def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
     """'Works': the surface on held-out strikes (the headline fit's session), the VIX
     replication of the session Surface shows (its stored gap checked against replicated
@@ -525,8 +548,9 @@ def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
     if sh and sh["cur"]["mhs"] is not None:
         c = sh["cur"]
         items.append(("surface.html#scorecard", "Arbitrage-free SVI surface",
-                      [c["mhs"], c["inside"], sh["sess"], *([sh["newer"]] if sh["newer"] else [])],
-                      "scorecard.json out_of_sample of the headline fit's session"))
+                      [c["mhs"], c["inside"], sh["sess"], *([sh["newer"]] if sh["newer"] else []),
+                       chains_said([("Chain", surface_stamp(store, sh["sess"]))])],
+                      "scorecard.json out_of_sample of the headline fit's session; its surface's chain"))
         # the replication of the session the Surface page shows (the newest surface session),
         # which the item links to, not the headline fit's: no Heston figure is paired with it
         shown = store.surface_sessions()[-1]
@@ -543,7 +567,8 @@ def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
                       rep_v - off)
             n_dep = om.vix_departures(rep)
             items.append(("surface.html#vix-replication", "VIX replicated from the stored chain",
-                          [gap, shown, *([float(n_dep)] if n_dep else [])],
+                          [gap, shown, *([float(n_dep)] if n_dep else []),
+                           chains_said([("Chain", surface_stamp(store, shown))])],
                           ("gap from vix_replication.json of the session Surface shows; departures are "
                            "its listed deviations")))
     legacy = sum(r["legacy"] for r in f["arc"])
@@ -552,20 +577,23 @@ def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
     items.append(("calibration.html#history", "The gate keeps broken-data fits off the page",
                   [float(legacy), float(len(cur)), *([float(n_ok)] if n_ok != len(cur) else [])],
                   "every joint_cal_*.pkl, legacy flag and gate restated"))
-    sk = skew_item(f)
+    sk = skew_item(store, f)
     return items + ([sk[1]] if sk and sk[0] else [])
 
 
-def skew_item(f: Facts) -> tuple[bool, Item] | None:
+def skew_item(store: Store, f: Facts) -> tuple[bool, Item] | None:
     """Heston's ATM skew against the SVI-cal market's: (within 10% at every listed
     expiry, the item)."""
     sk = f["skew"]
     if not sk:
         return None
     f0 = sk["rows"][0]
+    # the market's skew is read off the surface's book, Heston's off the headline fit
+    stamps = chains_said([("Chain", surface_stamp(store, sk["head"])),
+                          ("Fit chain", fit_stamp(store, f, f["head"]["session"]))]) if f["head"] else ""
     parts = [sk["lo"], sk["hi"], *([] if sk["steeper"] or sk["flatter"] else [float(len(sk["rows"]))]),
              sk["head"], abs(f0["heston"]), abs(f0["svi"]), f0["T_days"], min(sk["slopes"]),
-             max(sk["slopes"]), float(len(sk["slopes"]))]
+             max(sk["slopes"]), float(len(sk["slopes"])), *([stamps] if stamps else [])]
     works = sk["lo"] >= 0.9 and sk["hi"] <= 1.1
     lead = ("Heston's ATM skew matches the market's" if works else
             "Heston's ATM skew is steeper than the market's" if sk["steeper"] else
@@ -595,9 +623,10 @@ def fails_items(store: Store, f: Facts) -> list[Item]:
     if head and se:
         vv = own_vvix(f)
         items.append(("calibration.html#oos", "One-factor Heston at the short end",
-                      [se[2], se[0], se[1], *(vv or ()), head["session"]],
+                      [se[2], se[0], se[1], *(vv or ()), head["session"],
+                       chains_said([("Fit chain", fit_stamp(store, f, head["session"]))])],
                       f"worst expiry ≤ {SHORT_END_DAYS:.0f} days of the headline pickle"))
-    sk = skew_item(f)
+    sk = skew_item(store, f)
     if sk and not sk[0]:
         items.append(sk[1])
     inf, bt = f["inf"], f["bt"]
@@ -633,7 +662,8 @@ def next_items(store: Store, f: Facts) -> list[Item]:
         side = h_side(jr["cur"])
         items.append(("calibration.html#rough-vs-heston", "Rough Heston in production",
                       [float(jr["lower"]), float(jr["n"]),
-                       *([jr["cur"]["joint_rough_H"]] if side == "floor" else []), jr["cur"]["session"]],
+                       *([jr["cur"]["joint_rough_H"]] if side == "floor" else []), jr["cur"]["session"],
+                       chains_said([("Fit chain", fit_stamp(store, f, jr["cur"]["session"]))])],
                       "diagnostics/summary.json rows"))
     legs = f["legs"]
     with_leg = [v["leg"] for v in legs["views"] if v["leg"]]
@@ -681,6 +711,9 @@ def check_findings(a: Audit, store: Store, f: Facts) -> None:
             if li is not None:
                 a.text(P_FIND, f"{href}: lead", li.a, lead)
             said(a, P_FIND, href, li, parts, note)
+            for p_ in parts:                    # the chains it names, word for word (tier 0.2)
+                if isinstance(p_, str) and p_.startswith((" Chain: ", " Fit chain: ")):
+                    says(a, P_FIND, f"{href}: its chains", li, p_.strip(), True)
     check_finding_words(a, f)
 
 
@@ -781,13 +814,11 @@ def joint_card(a: Audit, store: Store, f: Facts, jr: dict[str, Any], c: Tag | No
     detail += [cur["session"], cur["joint_rough_oos"]]
     detail += [cur["joint_rough_H"]] if cur.get("joint_rough_H") is not None else []
     detail += [float(jr["lower"]), float(jr["n"]), float(jr["same"])]
-    own = next((r for r in reversed(f["gated"]) if r["session"] == cur["session"]), None)
-    stamp = chain_stamp(fit_chain_inputs(store, own["cal"], own["session"])) if own else None
-    detail += [f" Fit chain: {stamp}."] if stamp else []
+    stamp = fit_stamp(store, f, cur["session"])
+    detail += [f" Fit chain: {stamp}."]
     el = part(c, ".result-d")
     said(a, P_KEY, "joint fit card: detail", el, detail, "diagnostics/summary.json")
-    says(a, P_KEY, "joint fit card: its fit's chain (chain_diagnostics)", el, f" Fit chain: {stamp}.",
-         stamp is not None)
+    says(a, P_KEY, "joint fit card: its fit's chain (chain_diagnostics)", el, f" Fit chain: {stamp}.", True)
     says(a, P_KEY, "joint fit card", el, "(σ on its box cap)", "sigma" in (cur.get("on_bound") or []))
     says(a, P_KEY, "joint fit card", el, "on its floor", h_side(cur) == "floor")
     says(a, P_KEY, "joint fit card", el, "(= Heston)", h_side(cur) == "ceiling")
@@ -1311,9 +1342,9 @@ def check_fit(a: Audit, store: Store, f: Facts) -> None:
         a.num(P_FIT, f"{key} value", sp, v)
     check_surface_line(a, store, f, sec)
     check_constraints(a, f, sec, box)
-    stamp = chain_stamp(fit_chain_inputs(store, cal, head["session"]))
+    stamp = chain_stamp(fit_chain_inputs(store, cal, head["session"])) or "chain source not recorded"
     fc = sec.select_one("#fit-chain")
-    if present(a, P_FIT, "the fit's chain", fc, stamp is not None) and stamp and fc is not None:
+    if present(a, P_FIT, "the fit's chain", fc, True) and fc is not None:
         said(a, P_FIT, "the fit's chain (its chain_diagnostics)", fc, [stamp])
         a.text(P_FIT, "the fit's chain (its chain_diagnostics)", fc, f"Fit chain: {stamp}.")
 

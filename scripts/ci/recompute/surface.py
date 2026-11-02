@@ -2099,7 +2099,7 @@ def history(a: Audit, c: Ctx) -> None:
                 name == c.session)
         sj = (x.sj if x is not None else None) or {}
         a.text(P_HIST, f"{name} chain (its surface.json inputs)", td[1],
-               chain_short(sj.get("inputs") or {}, sj.get("universe") or {}) or "—")
+               chain_short(sj.get("inputs") or {}, sj.get("universe") or {}) or "source not recorded")
         td = td[1:]                     # the columns after the chain, as before it was added
         cell(a, P_HIST, f"{name} scored quotes (its residual table)", td[1],
              float(len(x.mkt)) if x is not None else M.num(r.get("n_quotes")))
@@ -2200,8 +2200,7 @@ def chain_feet(a: Audit, c: Ctx) -> None:
     theirs."""
     parts = chain_parts(c)
     feet = a.soup.select("section.panel > .panel-foot.src-foot")
-    a.equal(P_FOOT, "source lines (a recorded chain source and SVI-cal slices)", bool(feet),
-            bool(parts and c.listed))
+    a.equal(P_FOOT, "source lines (a recorded chain source)", bool(feet), bool(parts))
     for el in feet:
         sec = el.find_parent("section")
         pid = str(sec.get("id")) if sec is not None else "?"
