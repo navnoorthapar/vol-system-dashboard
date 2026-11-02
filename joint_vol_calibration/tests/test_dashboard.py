@@ -8971,33 +8971,97 @@ def _vendor_store(dash, tmp_path: Path, vendor: str, no_diag: bool = False) -> t
 
 
 def _link_options(data: Path, two_books: bool) -> None:
-    """``data``/options as committed, linked file by file. ``two_books``: the newest
-    session with SPX books stored also holds an overnight (Global Trading Hours) book
-    after its closing one, as the book slot stores one after a weekday close slot
-    (FUND_GRADE_PLAN 0.8; the Overview's pipeline panel then names both), unless it
-    has one already: a record beside the newest book, quoted three hours later."""
-    (data / "options").mkdir()
+    """``data``/options as committed, linked file by file (the raw books' records and the
+    private store's manifests in directories of their own, so a record can be added).
+    ``two_books``: the newest session with SPX books stored, whichever directory holds
+    them, also holds whichever of a closing and an overnight (Global Trading Hours) book
+    it lacks, as a weekday's close slot and the book slot after it store them
+    (FUND_GRADE_PLAN 0.8; the Overview's pipeline panel then names both): a record
+    beside the raw books, the closing book quoted at the session's Cboe close, the
+    overnight book three hours after the session's newest book. The bot also publishes
+    a newest session with only its overnight book (the close slot refuses a closing book
+    that fails the quote-state gate) and one whose books are held privately (manifests
+    only): the view still has both books then."""
+    opts = data / "options"
+    opts.mkdir()
     for child in (SHIPPED / "options").iterdir():
-        if child.name != "cboe":
-            (data / "options" / child.name).symlink_to(child)
-    cb = data / "options" / "cboe"
-    cb.mkdir()
-    for child in (SHIPPED / "options" / "cboe").iterdir():
-        (cb / child.name).symlink_to(child)
-    recs = {p.stem: json.loads(p.read_text()) for p in cb.glob("spx_*.json")}
+        if child.name not in ("cboe", "cboe_manifest"):
+            (opts / child.name).symlink_to(child)
+    recs: list[dict] = []
+    for sub in ("cboe", "cboe_manifest"):
+        src = SHIPPED / "options" / sub
+        if sub == "cboe" or src.is_dir():
+            (opts / sub).mkdir()
+        for child in (src.iterdir() if src.is_dir() else []):
+            (opts / sub / child.name).symlink_to(child)
+        recs += [json.loads(p.read_text()) for p in sorted((opts / sub).glob("spx_*.json"))]
     if not two_books or not recs:
         return
-    newest = max(str(r["session"]) for r in recs.values())
-    mine = [r for r in recs.values() if str(r["session"]) == newest]
-    if any(r.get("book_state") == "gth" for r in mine):
-        return
-    base = max(mine, key=lambda r: str(r["quote_time"]))
-    qt = pd.Timestamp(base["quote_time"]) + pd.Timedelta(hours=3)
-    fetched = qt + pd.Timedelta(minutes=15)
-    (cb / f"spx_{newest}_{fetched:%H%M%S}Z.json").write_text(json.dumps(
-        {**base, "book_state": "gth", "quote_time": f"{qt:%Y-%m-%dT%H:%M:%S}Z",
-         "fetched_at": f"{fetched:%Y-%m-%dT%H:%M:%S}Z", "rows": int(base["rows"]) + 974,
-         "two_sided_rows": int(base["two_sided_rows"]) + 345}))
+    newest = max(str(r["session"]) for r in recs)
+    mine = sorted((r for r in recs if str(r["session"]) == newest), key=lambda r: str(r["quote_time"]))
+    states = {r.get("book_state") for r in mine}
+    base = mine[-1]
+    add = []
+    if "closing" not in states:
+        add.append(("closing", pd.Timestamp(f"{newest}T21:14:30Z"), -7, -2))
+    if "gth" not in states:
+        add.append(("gth", pd.Timestamp(base["quote_time"]) + pd.Timedelta(hours=3), 974, 345))
+    for state, qt, more, more_two in add:
+        fetched = qt + pd.Timedelta(minutes=15)
+        (opts / "cboe" / f"spx_{newest}_{fetched:%H%M%S}Z.json").write_text(json.dumps(
+            {**base, "session": newest, "book_state": state, "quote_time": f"{qt:%Y-%m-%dT%H:%M:%S}Z",
+             "fetched_at": f"{fetched:%Y-%m-%dT%H:%M:%S}Z", "rows": int(base["rows"]) + more,
+             "two_sided_rows": int(base["two_sided_rows"]) + more_two}))
+
+
+@pytest.mark.parametrize("stored", ["closing", "overnight", "both", "private"])
+def test_the_badge_tests_cboe_view_holds_both_books_of_the_newest_session_whatever_it_stored(
+        tmp_path, monkeypatch, stored):
+    """The badge test's Cboe view (_link_options) gives the newest session with SPX books
+    a closing and an overnight book, the weekday state whose two books the Overview
+    names. It added only an overnight book, and read only options/cboe: a newest session
+    with only its overnight book (the close slot stores no closing book that fails the
+    quote-state gate) or with its books held privately (options/cboe_manifest) kept one
+    book, and the badge test, which requires both there, failed on a state the bot
+    publishes. Each stored book is kept as committed; an older session is left alone."""
+    src = tmp_path / "shipped" / "options"
+    (src / "cboe").mkdir(parents=True)
+    (src / "spx_2026-10-30.parquet").write_bytes(b"")
+
+    def rec(sub: str, session: str, state: str, qt: str) -> None:
+        (src / sub).mkdir(exist_ok=True)
+        (src / sub / f"spx_{session}_{qt[11:13]}{qt[14:16]}00Z.json").write_text(json.dumps(
+            {"underlying": "SPX", "session": session, "book_state": state, "quote_time": qt,
+             "rows": 100, "two_sided_rows": 90, "expiries": 3}))
+
+    rec("cboe", "2026-10-29", "gth", "2026-10-30T07:16:04Z")
+    if stored in ("closing", "both"):
+        rec("cboe", "2026-10-30", "closing", "2026-10-30T21:52:05Z")
+    if stored in ("overnight", "both"):
+        rec("cboe", "2026-10-30", "gth", "2026-10-31T07:16:04Z")
+    if stored == "private":
+        rec("cboe_manifest", "2026-10-30", "closing", "2026-10-30T21:52:05Z")
+    shipped = {p.relative_to(src): p.read_text() for p in src.rglob("*.json")}
+    monkeypatch.setitem(globals(), "SHIPPED", tmp_path / "shipped")
+    data = tmp_path / "data"
+    data.mkdir()
+    _link_options(data, two_books=True)
+
+    opts = data / "options"
+    assert (opts / "spx_2026-10-30.parquet").exists()
+    for rel, text in shipped.items():
+        assert (opts / rel).read_text() == text, rel
+    recs = [json.loads(p.read_text()) for sub in ("cboe", "cboe_manifest")
+            for p in (opts / sub).glob("spx_*.json")]
+    newest = sorted((r for r in recs if r["session"] == "2026-10-30"), key=lambda r: r["quote_time"])
+    assert [r["book_state"] for r in newest] == ["closing", "gth"]
+    assert [r["book_state"] for r in recs if r["session"] == "2026-10-29"] == ["gth"]
+    # without two_books the view is the record as committed
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    _link_options(plain, two_books=False)
+    assert sorted(str(p.relative_to(plain / "options")) for p in (plain / "options").rglob("*.json")) == \
+        sorted(str(r) for r in shipped)
 
 
 # the states the bot publishes that change which chain a number is read off: the newest
@@ -9316,9 +9380,14 @@ def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
     books = [p for sub in ("cboe", "cboe_manifest") for p in (data / "options" / sub).glob("*.json")]
     assert ov["state-pipeline"] == ("parts" if books else "none")
     newest_books = re.findall(r'data-chain="book:(spx_[^"]+)"', pages["/"])
-    assert newest_books
-    if chain_view["vendor"] == "cboe":
-        assert len(newest_books) == 2, newest_books
+    spx = [(p.stem, json.loads(p.read_text())) for sub in ("cboe", "cboe_manifest")
+           for p in (data / "options" / sub).glob("spx_*.json")]
+    last = max(str(r["session"]) for _, r in spx)
+    mine = sorted(((k, r) for k, r in spx if str(r["session"]) == last),
+                  key=lambda x: str(x[1]["quote_time"]))
+    assert newest_books == [k for k, _ in mine]
+    if chain_view["vendor"] == "cboe":              # the view's weekday state: both books
+        assert {r.get("book_state") for _, r in mine} >= {"closing", "gth"}, newest_books
     shown = dash.artifacts.load_surface(data)["session"]
     surface_panels = [k for k in sf if k not in ("page-head", "surface-history")]
     assert len(surface_panels) >= 15
