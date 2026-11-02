@@ -745,6 +745,14 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                 # with none stored, why the close slot did not store the one it
                 # fetched, as its run record says (None: no record says so)
                 "closing_book_refusal": src.get("closing_book_refusal"),
+                # with none stored and none refused, what the close slot's run records
+                # hold (quotes.closing_book_run), the overnight note's reason
+                "closing_book_run": src.get("closing_book_run"),
+                # a closing-state book's underlying last trade and the check it passed to
+                # be the closing book (cboe_downloader.closing_book_check; None for
+                # another book), which the audit's clock reads too
+                "underlying_last_trade_time": src.get("underlying_last_trade_time"),
+                "closing_book_check": src.get("closing_book_check"),
                 "near_atm_two_sided_share": sq.diagnostics.get("near_atm_two_sided_share"),
                 "t_origin": sq.diagnostics.get("t_origin"),
                 "t_origin_basis": sq.diagnostics.get("t_origin_basis"),

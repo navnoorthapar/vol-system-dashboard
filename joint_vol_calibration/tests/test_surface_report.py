@@ -714,6 +714,43 @@ def test_a_closing_book_is_one_whose_underlying_last_traded_by_the_close(tmp_pat
     assert any("(the session's closing book did not pass the quote-state gates)" in n for n in notes)
 
 
+def test_surface_json_records_the_closing_book_check_and_the_close_slots_runs(tmp_path, monkeypatch):
+    """w5 review, minors 1 and 3: the surface's choice of book holds the closing
+    book's last-trade check and, with no closing book stored, what the close slot's
+    run records say, and the recompute audit compares surface.json's record of each
+    with the stored books and data_store/runs. surface.json kept neither, so the
+    audit's comparisons never ran and its clock read no last trade (it took every
+    book quoted in the closing hours for the closing book). surface.json now records
+    the check, the last trade it read, and the close slot's runs, as the chain
+    selection gives them."""
+    from joint_vol_calibration.data import cboe_downloader as cd
+    from joint_vol_calibration.surface import quotes as sqm
+
+    gth = "2026-10-19T02:30:00Z"            # Sun 22:30 ET: GTH for Monday, after Friday SESSION
+    path, _ = _capture_store(tmp_path, monkeypatch, gth, book_state="gth")
+    closing = _second_capture(path, f"spx_{SESSION}_221000Z", "2026-10-16T21:55:00Z", "closing",
+                              "2026-10-16T22:10:00Z")
+    side_path = closing.with_suffix(".json")
+    side = json.loads(side_path.read_text())
+    side["underlying_last_trade_time"] = f"{SESSION}T16:14:59"
+    side_path.write_text(json.dumps(side))
+    sq = sqm.load_session_quotes(SESSION)
+    inp = report.run_session(SESSION, models=["essvi"])["surface"]["inputs"]
+    assert inp["chain"] == f"data_store/options/cboe/{closing.name}"
+    assert inp["underlying_last_trade_time"] == f"{SESSION}T16:14:59"
+    assert inp["closing_book_check"] == sq.inputs["closing_book_check"] == {
+        "last_trade": f"{SESSION}T16:14:59", "cutoff": "16:15", "result": cd.LAST_TRADE_OK}
+    assert inp["closing_book_run"] is None                  # a closing book is stored
+    # no closing book stored and no close-slot run recorded: the overnight book, and the
+    # record of the runs the note's reason rests on
+    closing.unlink()
+    side_path.unlink()
+    inp = report.run_session(SESSION, models=["essvi"])["surface"]["inputs"]
+    assert inp["chain"] == f"data_store/options/cboe/{path.name}"
+    assert inp["closing_book_check"] is None
+    assert inp["closing_book_run"] == sqm.closing_book_run(SESSION) == sqm.CLOSE_RUN_NONE
+
+
 def test_a_closing_book_held_privately_that_this_run_cannot_read_builds_nothing(tmp_path, monkeypatch):
     """w5 review, minor 2: with the private book store, a failed clone at the start of
     a book slot left CBOE_BOOKS_DIR empty, and the session's surface was built from its
