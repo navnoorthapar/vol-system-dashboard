@@ -1169,14 +1169,14 @@ class TestRecomputeAudit:
         assert M.closing_book_refusal(store, "2026-10-28") == "OSError: x"
         assert M.closing_book_refusal(store, "2026-10-27") is None
 
-        def failed(refusal, note=None):
+        def failed(refusal, note=None, run=None, version=R.REPORT_VERSION):
             inputs = {"source": "cboe", "quote_time": quoted, "book_state": "gth", "closing_books": 0,
-                      "closing_book_refusal": refusal}
+                      "closing_book_refusal": refusal, **({"closing_book_run": run} if run else {})}
             if note is None:                                         # the note the producer writes
                 sq = types.SimpleNamespace(session=session, inputs=inputs,
                                            clean_diagnostics={"quote_time": quoted})
                 note = R._timing_note(sq, *R._calc_time_ny(sq))
-            ctx = types.SimpleNamespace(vx={"report_version": R.REPORT_VERSION}, session=session,
+            ctx = types.SimpleNamespace(vx={"report_version": version}, session=session,
                                         sj={"inputs": inputs}, store=store)
             a = rc.core.Audit("t", BeautifulSoup(f"<ul><li>{html.escape(str(note))}</li></ul>", "lxml"))
             S.overnight_note(a, ctx, a.soup.select("li"))
@@ -1191,10 +1191,22 @@ class TestRecomputeAudit:
                   "it is compared with: the gap mixes the replication's error with the market's move "
                   "overnight.")
         assert failed(why, timing) == [reason]
-        assert failed(None) == [record_, reason]                     # surface.json lost the reason
+        run_ = "surface.json closing_book_run = the close slot's run records (data_store/runs)"
+        assert failed(None, run="skipped") == [record_, run_, reason]   # surface.json lost the reason
         (root / "runs" / "run_a.json").unlink()                      # no record of the refusal
-        assert failed(None) == []
-        assert failed(None, timing) == []
+        assert M.closing_book_run(store, session) == "skipped"       # run c: the feed showed another book
+        assert failed(None, run="skipped") == []
+        # w5 review, minor 1: report_version 6's timing reason (a claim about the feed's hours
+        # that is not observed) is that version's; from 7 the reason is the run records'
+        assert failed(None, timing, version=6) == []
+        assert failed(None, timing, run="skipped") == [reason]
+        (root / "runs" / "run_c.json").unlink()
+        assert M.closing_book_run(store, session) == "none"
+        assert failed(None, run="none") == []
+        assert failed(None, run="skipped") == [run_, reason]
+        record("e", "2026-10-29T22:07:05+00:00", close, "captured", None)   # caught, then not kept
+        assert M.closing_book_run(store, session) == "captured"
+        assert failed(None, run="captured") == []
 
     def test_it_rebuilds_the_heston_rows_fit_time_clause_from_the_fits_record(self, monkeypatch, tmp_path):
         """FUND_GRADE_PLAN 0.8: a session scored on its closing book whose Heston fit was

@@ -2033,10 +2033,21 @@ def deviations(a: Audit, c: Ctx, vix: GapSplit | None, causes: list[str]) -> Non
 
 OVERNIGHT_NOTE = "The book is the overnight (Global Trading Hours) book"
 OVERNIGHT_NOTE_VERSION = 6          # the report_version that writes it
+CLOSE_RUN_VERSION = 7               # the report_version whose reason follows the close slot's run records
 # the reason clauses as the producer writes them (report._timing_note), with its straight
 # apostrophes: the page prints the producer's note as written
+# report_version 6's one reason when no closing book was stored and none refused (a
+# claim about the feed's hours that is not observed); version 7 states what the close
+# slot's run records hold
 OVERNIGHT_WHY_NONE = ("(no closing book of the session is stored: Cboe's delayed feed shows it only until "
                       "Global Trading Hours open at 20:15 ET)")
+OVERNIGHT_WHY_RUN = {
+    "captured": ("(the close slot captured the session's closing book, but the store holds none: it was "
+                 "not kept)"),
+    "skipped": ("(the close slot's runs stored no closing book: by the clock, or by the quote time of the "
+                "book downloaded, the delayed feed showed another book)"),
+    "none": "(no run of the close slot is recorded for the session)",
+}
 OVERNIGHT_WHY_FAILED = "(the session's closing book did not pass the quote-state gates)"
 OVERNIGHT_WHY_REFUSED = "(the job did not store the session's closing book: {})"
 
@@ -2074,15 +2085,21 @@ def overnight_note(a: Audit, c: Ctx, lis: list[Tag]) -> None:
     # it had none to fetch
     stored = M.closing_books(c.store, c.session)
     refusal = None if stored else M.closing_book_refusal(c.store, c.session)
+    run = None if stored else M.closing_book_run(c.store, c.session)
     if "closing_books" in inp:
         a.equal(P_VIX, "surface.json closing_books = the session's stored closing books (this audit's clock)",
                 inp.get("closing_books"), stored)
     if "closing_book_refusal" in inp:
         a.equal(P_VIX, "surface.json closing_book_refusal = the close slot's run record (data_store/runs)",
                 inp.get("closing_book_refusal"), refusal)
+    if "closing_book_run" in inp:
+        a.equal(P_VIX, "surface.json closing_book_run = the close slot's run records (data_store/runs)",
+                inp.get("closing_book_run"), run)
+    by_runs = isinstance(version, int) and version >= CLOSE_RUN_VERSION
     a.text(P_VIX, "overnight-book note: why no closing book was used (the stored records)", li,
            OVERNIGHT_WHY_FAILED if stored else
-           OVERNIGHT_WHY_REFUSED.format(refusal.rstrip(".")) if refusal else OVERNIGHT_WHY_NONE,
+           OVERNIGHT_WHY_REFUSED.format(refusal.rstrip(".")) if refusal else
+           OVERNIGHT_WHY_RUN[str(run)] if by_runs else OVERNIGHT_WHY_NONE,
            contains=True)
 
 

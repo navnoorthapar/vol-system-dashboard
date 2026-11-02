@@ -121,7 +121,13 @@ SCHEMA_VERSION = 1
 #      the session's stored closing books; none stored because the close slot
 #      did not store the one it fetched: inputs.closing_book_refusal, the
 #      reason its run record gives)
-REPORT_VERSION = 6
+#   7  the overnight note's reason when no closing book is stored states only
+#      what the close slot's run records hold (inputs.closing_book_run): the
+#      slot captured the book but it was not kept, it stored none because the
+#      feed showed another book, or no run of it is recorded for the session
+#      (it did not exist yet); version 6 gave one reason for all three, a
+#      claim about the feed's hours that is not observed
+REPORT_VERSION = 7
 SURFACE_DIR = DATA_DIR / "surface"
 
 
@@ -437,6 +443,18 @@ def _early(session: str) -> str:
     return " (an early close)" if db.is_early_close(session) else ""
 
 
+# why a session built from its overnight book has no closing book, when it holds
+# none and no close-slot run refused one: what its close-slot run records hold, as
+# quotes.closing_book_run names them
+CLOSE_RUN_WHY = {
+    sqm.CLOSE_RUN_CAPTURED: (" (the close slot captured the session's closing book, but the store holds "
+                             "none: it was not kept)"),
+    sqm.CLOSE_RUN_SKIPPED: (" (the close slot's runs stored no closing book: by the clock, or by the quote "
+                            "time of the book downloaded, the delayed feed showed another book)"),
+    sqm.CLOSE_RUN_NONE: " (no run of the close slot is recorded for the session)",
+}
+
+
 def _timing_note(sq: sqm.SessionQuotes, calc: datetime, basis: str) -> str | None:
     """The gap note on a Cboe book's timing: the replication follows Cboe's
     rule at the book's instant, and the official close it is set against is
@@ -451,8 +469,8 @@ def _timing_note(sq: sqm.SessionQuotes, calc: datetime, basis: str) -> str | Non
                if sq.inputs.get("closing_books") else
                # the close slot fetched it and its run record says why it was not stored
                f" (the job did not store the session's closing book: {refusal})" if refusal else
-               " (no closing book of the session is stored: Cboe's delayed feed shows it only "
-               "until Global Trading Hours open at 20:15 ET)")
+               # what else the close slot's run records hold
+               CLOSE_RUN_WHY.get(str(sq.inputs.get("closing_book_run")), CLOSE_RUN_WHY[sqm.CLOSE_RUN_NONE]))
         return (f"The book is the overnight (Global Trading Hours) book{why}, quoted at "
                 f"{calc:%Y-%m-%d %H:%M} ET, {hours:.1f} hours after the {cutoff:%H:%M} ET print of "
                 f"{sq.session}{_early(sq.session)} it is compared with: the gap mixes the "

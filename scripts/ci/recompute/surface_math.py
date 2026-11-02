@@ -780,6 +780,41 @@ def closing_books(store: Store, session: str) -> int:
     return n
 
 
+def _close_slot_runs(store: Store, session: str) -> list[tuple[str, dict]]:
+    """The close slot's runs of ``session`` from data_store/runs/run_*.json (schema
+    run_ledger/1): runs of the closebook step alone ("closebook" in its steps,
+    "capture" not) whose capture is of ``session``, with each one's SPX capture record
+    ({} when it holds none), oldest first by run_utc."""
+    runs = store.root / "runs"
+    found: list[tuple[str, dict]] = []
+    for path in sorted(runs.glob("run_*.json")) if runs.is_dir() else []:
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("schema") != "run_ledger/1":
+            continue
+        steps = rec.get("steps") or []
+        capt = rec.get("capture") or {}
+        if "closebook" in steps and "capture" not in steps and str(capt.get("session")) == session:
+            spx = (capt.get("captures") or {}).get("SPX")
+            found.append((str(rec.get("run_utc")), spx if isinstance(spx, dict) else {}))
+    return sorted(found, key=lambda x: x[0])
+
+
+def closing_book_run(store: Store, session: str) -> str:
+    """What the close slot's run records say of a session whose store holds no closing
+    book: 'refused' (a run did not store it and says why), 'captured' (a run captured
+    or found it, yet the store holds none), 'skipped' (its runs stored none) or 'none'
+    (no close-slot run of the session is recorded)."""
+    if closing_book_refusal(store, session):
+        return "refused"
+    runs = _close_slot_runs(store, session)
+    if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
+        return "captured"
+    return "skipped" if runs else "none"
+
+
 def closing_book_refusal(store: Store, session: str) -> str | None:
     """Why the job did not store ``session``'s closing SPX book, from its run records
     (data_store/runs/run_*.json, schema run_ledger/1): the newest run (by run_utc) of the

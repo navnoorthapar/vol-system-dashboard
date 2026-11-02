@@ -521,8 +521,9 @@ def test_a_gth_book_is_calculated_at_its_quote_time_and_departs_from_nothing(tmp
     assert vixd["calculation_time_source"].startswith(f"the Cboe book's quote time {qt}")
     assert not any(d.startswith("Calculation time") for d in vixd["deviations"])
     hours = (ny - datetime.fromisoformat(f"{SESSION}T16:15")).total_seconds() / 3600.0
-    assert sum(n.startswith("The book is the overnight (Global Trading Hours) book (no closing book of "
-                            "the session is stored")
+    # no run record of the close slot here: the note says only that (w5 review, minor 1)
+    assert sum(n.startswith("The book is the overnight (Global Trading Hours) book (no run of the close "
+                            "slot is recorded for the session)")
                and f"quoted at {ny:%Y-%m-%d %H:%M} ET, {hours:.1f} hours after the 16:15 ET print of "
                    f"{SESSION} it is compared with: the gap mixes the replication's error with the "
                    "market's move overnight." in n for n in vixd["gap_notes"]) == 1
@@ -637,14 +638,34 @@ def test_a_session_whose_closing_book_the_close_slot_did_not_store_says_why(tmp_
     assert sum(n.startswith(f"{lead}(the job did not store the session's closing book: {why}), quoted at ")
                for n in notes) == 1
     assert not any("Cboe's delayed feed shows it only" in n for n in notes)
-    # no record says the close slot refused the book: the timing reason, as before
-    (runs / "run_1.json").unlink()
-    sq = sqm.load_session_quotes(SESSION)
-    assert sq.inputs["closing_book_refusal"] is None
-    notes = report.run_session(SESSION, models=["essvi"])["vix_replication"]["gap_notes"]
-    assert sum(n.startswith(f"{lead}(no closing book of the session is stored: Cboe's delayed feed shows it "
-                            "only until Global Trading Hours open at 20:15 ET), quoted at ")
-               for n in notes) == 1
+    # w5 review, minor 1: with no refusal recorded the note gave one reason, a claim about
+    # the feed's hours that is not observed ('Cboe's delayed feed shows it only until
+    # Global Trading Hours open'), even for a session before the close slot existed and
+    # for a book the close slot caught but the store lost. Each reason now states what
+    # the close slot's run records hold.
+    def note_of() -> tuple[str, str]:
+        sq = sqm.load_session_quotes(SESSION)
+        assert sq.inputs["closing_book_refusal"] is None
+        notes = report.run_session(SESSION, models=["essvi"])["vix_replication"]["gap_notes"]
+        mine = [n for n in notes if n.startswith(lead)]
+        assert len(mine) == 1
+        assert not any("Cboe's delayed feed shows it only" in n for n in notes)
+        return sq.inputs["closing_book_run"], mine[0]
+    (runs / "run_1.json").unlink()            # left: the close slot's run that found another book
+    run, text = note_of()
+    assert run == sqm.CLOSE_RUN_SKIPPED
+    assert text.startswith(f"{lead}(the close slot's runs stored no closing book: by the clock, or by the "
+                           "quote time of the book downloaded, the delayed feed showed another book), "
+                           "quoted at ")
+    (runs / "run_2.json").unlink()            # no close-slot run of the session (as before the slot existed)
+    run, text = note_of()
+    assert run == sqm.CLOSE_RUN_NONE
+    assert text.startswith(f"{lead}(no run of the close slot is recorded for the session), quoted at ")
+    record("5", "2026-10-16T22:07:05+00:00", close, SESSION, "captured", None)   # caught, then not kept
+    run, text = note_of()
+    assert run == sqm.CLOSE_RUN_CAPTURED
+    assert text.startswith(f"{lead}(the close slot captured the session's closing book, but the store holds "
+                           "none: it was not kept), quoted at ")
 
 
 def test_a_closing_book_in_the_private_store_is_found(tmp_path, monkeypatch):
