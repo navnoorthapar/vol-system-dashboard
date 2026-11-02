@@ -570,7 +570,8 @@ def test_a_sessions_closing_book_is_preferred_to_its_later_overnight_book(tmp_pa
     assert sq.inputs["closing_books"] == 1
     assert sq.inputs["source_reason"].startswith(
         "the session's closing book (its quotes the ones standing at the 16:15 ET close, when the "
-        "official VIX-family closes are computed); it passes the quote-state gates")
+        "official VIX-family closes are computed; its record holds no underlying last-trade time, so that "
+        "could not be checked); it passes the quote-state gates")
     out = report.run_session(SESSION, models=["essvi"])
     vixd = out["vix_replication"]
     assert out["surface"]["inputs"]["chain"] == sq.inputs["chain"]
@@ -666,6 +667,51 @@ def test_a_session_whose_closing_book_the_close_slot_did_not_store_says_why(tmp_
     assert run == sqm.CLOSE_RUN_CAPTURED
     assert text.startswith(f"{lead}(the close slot captured the session's closing book, but the store holds "
                            "none: it was not kept), quoted at ")
+
+
+def test_a_closing_book_is_one_whose_underlying_last_traded_by_the_close(tmp_path, monkeypatch):
+    """w5 review, minor 3: the session's book in the 'closing' state (by its quote time)
+    was called its closing book, 'its quotes the ones standing at the 16:15 ET close',
+    without checking the underlying's last trade time the capture records. Its last
+    trade must be on the session at or before the close: a later one leaves it refused
+    (the overnight book is used, and the note says the closing book did not pass the
+    gates); the check is recorded in surface.json, and a record without a last-trade
+    time says it could not be checked."""
+    from joint_vol_calibration.data import cboe_downloader as cd
+    from joint_vol_calibration.surface import quotes as sqm
+
+    gth = "2026-10-19T02:30:00Z"            # Sun 22:30 ET: GTH for Monday, after Friday SESSION
+    path, _ = _capture_store(tmp_path, monkeypatch, gth, book_state="gth")
+    closing = _second_capture(path, f"spx_{SESSION}_221000Z", "2026-10-16T21:55:00Z", "closing",
+                              "2026-10-16T22:10:00Z")
+    side_path = closing.with_suffix(".json")
+
+    def built(last_trade):
+        side = json.loads(side_path.read_text())
+        side["underlying_last_trade_time"] = last_trade
+        side_path.write_text(json.dumps(side))
+        return sqm.load_session_quotes(SESSION).inputs
+
+    inp = built(f"{SESSION}T16:14:59")
+    assert inp["book_state"] == "closing"
+    assert inp["closing_book_check"] == {"last_trade": f"{SESSION}T16:14:59", "cutoff": "16:15",
+                                         "result": cd.LAST_TRADE_OK}
+    assert inp["underlying_last_trade_time"] == f"{SESSION}T16:14:59"
+    reason = inp["source_reason"]
+    assert f"its underlying's last trade {SESSION}T16:14:59 ET, at or before that close" in reason
+    inp = built(None)
+    assert inp["book_state"] == "closing"
+    assert inp["closing_book_check"]["result"] == cd.LAST_TRADE_MISSING
+    reason = inp["source_reason"]
+    assert "its record holds no underlying last-trade time, so that could not be checked" in reason
+    inp = built(f"{SESSION}T17:40:00")
+    assert inp["book_state"] == "gth"
+    assert inp["closing_books"] == 1
+    late = (f"options/cboe/{closing.name}: its underlying's last trade, {SESSION}T17:40:00 ET, is not at "
+            "or before the session's 16:15 ET close")
+    assert any(r.startswith(late) for r in inp["refused"])
+    notes = report.run_session(SESSION, models=["essvi"])["vix_replication"]["gap_notes"]
+    assert any("(the session's closing book did not pass the quote-state gates)" in n for n in notes)
 
 
 def test_a_closing_book_in_the_private_store_is_found(tmp_path, monkeypatch):

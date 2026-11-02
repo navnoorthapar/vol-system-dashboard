@@ -746,3 +746,28 @@ def test_committed_manifests_are_whole(path):
     for k in ("sha256", "parquet_sha256", "sidecar_sha256"):
         assert len(man[k]) == 64, k
     assert man["private_path"] == f"{cb.PRIVATE_BOOKS_SUBDIR}/{path.stem}.parquet"
+
+
+@pytest.mark.parametrize(("last_trade", "session", "result"), [
+    ("2026-10-30T16:14:59", "2026-10-30", cb.LAST_TRADE_OK),          # the 10-30 closing book's record
+    ("2026-10-30T16:15:00", "2026-10-30", cb.LAST_TRADE_OK),
+    ("2026-10-30T16:15:01", "2026-10-30", cb.LAST_TRADE_LATE),
+    ("2026-10-30T20:15:00-04:00", "2026-10-30", cb.LAST_TRADE_LATE),  # with its offset: 20:15 ET
+    ("2026-10-30T20:10:00Z", "2026-10-30", cb.LAST_TRADE_OK),         # 16:10 EDT
+    ("2026-10-29T16:14:59", "2026-10-30", cb.LAST_TRADE_LATE),        # another session's
+    ("2026-11-27T13:14:59", "2026-11-27", cb.LAST_TRADE_OK),          # the early close's 13:15
+    ("2026-11-27T13:20:00", "2026-11-27", cb.LAST_TRADE_LATE),
+    (None, "2026-10-30", cb.LAST_TRADE_MISSING),
+    ("not a time", "2026-10-30", cb.LAST_TRADE_MISSING),
+])
+def test_a_closing_book_is_checked_by_its_underlyings_last_trade(last_trade, session, result):
+    """w5 review, minor 3: a book was called the session's closing book (its quotes
+    the ones standing at the close) by the clock alone, its quote time after the
+    cutoff and before Global Trading Hours open, though its record holds the
+    underlying's last trade time. The check: that last trade on the session's own
+    date at or before its cutoff (16:15 ET, 13:15 on an early close); a record
+    without one says it could not be checked."""
+    got = cb.closing_book_check(last_trade, session)
+    assert got["result"] == result
+    assert got["last_trade"] == last_trade
+    assert got["cutoff"] == ("13:15" if session == "2026-11-27" else "16:15")

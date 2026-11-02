@@ -1571,6 +1571,27 @@ class TestRecomputeAudit:
                                   "2026-10-27") == M.BOOK_OVERNIGHT          # Tue 20:20 ET
         assert M.replication_book({}, "2026-10-26") is None
 
+    def test_it_calls_a_book_closing_only_if_its_underlying_last_traded_by_the_close(self, monkeypatch):
+        """w5 review, minor 3: a Cboe book quoted after the close and before Global
+        Trading Hours open was its closing book by the clock alone. When surface.json
+        records the underlying's last trade time, the audit also requires it on the
+        session at or before the close (16:15 ET, 13:15 on an early close); a record
+        without one is classified by the clock."""
+        import importlib
+        _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        rec = {"source": "cboe", "quote_time": "2026-10-30T23:49:50Z"}               # Fri 19:49 ET
+        assert M.replication_book(rec, "2026-10-30") == M.BOOK_CLOSING
+        for last, want in (("2026-10-30T16:14:59", M.BOOK_CLOSING), ("2026-10-30T16:15:00", M.BOOK_CLOSING),
+                           ("2026-10-30T16:40:00", M.BOOK_OTHER), ("2026-10-29T16:14:59", M.BOOK_OTHER),
+                           ("2026-10-30T20:10:00+00:00", M.BOOK_CLOSING)):
+            assert M.replication_book({**rec, "underlying_last_trade_time": last}, "2026-10-30") == want, last
+        early = {"source": "cboe", "quote_time": "2026-11-27T20:00:00Z"}             # Fri 15:00 EST
+        assert M.replication_book({**early, "underlying_last_trade_time": "2026-11-27T13:14:59"},
+                                  "2026-11-27") == M.BOOK_CLOSING
+        assert M.replication_book({**early, "underlying_last_trade_time": "2026-11-27T13:30:00"},
+                                  "2026-11-27") == M.BOOK_OTHER
+
     def test_it_names_a_yahoo_download_by_when_it_was_fetched(self, monkeypatch):
         """w5 review, major 3: the Surface page put the bot's Yahoo download of 2026-11-02,
         fetched at 03:30 UTC in the next session's overnight hours, in one 'Yahoo chain'

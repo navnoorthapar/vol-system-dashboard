@@ -792,7 +792,8 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None,
                 st["captures"][und] = {"status": "skipped", "reason": why, "summary": summ}
                 log.info("  Cboe %s capture not stored: %s", und, why)
                 continue
-            dead = _live_book_refusal(cap, expected) if closing_only else None
+            dead = (_live_book_refusal(cap, expected) or _last_trade_refusal(cap, expected)
+                    if closing_only else None)
             if dead:
                 # an emptied or one-sided closing book: never used, so never committed
                 st["captures"][und] = {"status": "rejected", "reason": dead, "summary": summ}
@@ -853,6 +854,21 @@ def _live_book_refusal(cap, session: str) -> "str | None":
     n = (clean.diagnostics or {}).get("n_near_atm")
     return (f"{why}: {n} near-ATM lines, the quote-state gate needs "
             f"{oc.MIN_TWO_SIDED_SHARE:.0%} two-sided")
+
+
+def _last_trade_refusal(cap, session: str) -> "str | None":
+    """Why the closebook step does not store ``cap`` as the session's closing
+    book by its underlying's last trade (None: it may): one recorded after the
+    session's close (cboe_downloader.closing_book_check) is not the regular
+    session's last quotes, whatever the quote time says. A capture that records
+    no last-trade time is stored, and the surface built from it says it could
+    not be checked."""
+    from joint_vol_calibration.data import cboe_downloader as cboe
+    chk = cboe.closing_book_check(cap.underlying_last_trade_time, session)
+    if chk["result"] != cboe.LAST_TRADE_LATE:
+        return None
+    return (f"its underlying's last trade, {chk['last_trade']} ET, is not at or before the session's "
+            f"{chk['cutoff']} ET close, so it is not the closing book")
 
 
 def _discard_partial_capture(d: pathlib.Path, cap, cboe) -> None:

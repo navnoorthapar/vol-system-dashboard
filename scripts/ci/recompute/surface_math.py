@@ -764,7 +764,25 @@ def replication_book(inputs: dict | None, session: str, universe: dict | None = 
     if overnight_at(at, session):
         return BOOK_OVERNIGHT
     after_close = at >= dt.datetime.combine(day, cboe_close_time(session), NY)
-    return BOOK_CLOSING if after_close and at < dt.datetime.combine(nxt, GTH_CLOSE, NY) else BOOK_OTHER
+    if not (after_close and at < dt.datetime.combine(nxt, GTH_CLOSE, NY)):
+        return BOOK_OTHER
+    return BOOK_CLOSING if last_trade_by_close(inp.get("underlying_last_trade_time"), session) else BOOK_OTHER
+
+
+def last_trade_by_close(last_trade: Any, session: str) -> bool:
+    """A closing book's underlying last trade (New York local time as Cboe publishes
+    it, or with its UTC offset) on the session's date at or before its close (16:15 ET,
+    13:15 on an NYSE early close); True when none is recorded (the record cannot say)."""
+    if not last_trade:
+        return True
+    try:
+        at = dt.datetime.fromisoformat(str(last_trade))
+    except ValueError:
+        return True
+    if at.tzinfo is not None:
+        at = at.astimezone(NY).replace(tzinfo=None)
+    close = dt.datetime.combine(dt.date.fromisoformat(session), cboe_close_time(session))
+    return at.date() == close.date() and at <= close
 
 
 def closing_books(store: Store, session: str) -> int:

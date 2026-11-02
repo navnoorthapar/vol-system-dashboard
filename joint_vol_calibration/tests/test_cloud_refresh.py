@@ -45,6 +45,24 @@ def _load():
 
 # ── Import hygiene ────────────────────────────────────────────────────────────
 
+def test_the_close_slot_refuses_a_closing_book_whose_underlying_traded_after_the_close():
+    """w5 review, minor 3: the close slot stored a book in the 'closing' state (by its
+    quote time) as the session's closing book without reading the underlying's last
+    trade time its capture records. One that last traded after the close is not the
+    regular session's last quotes, and is refused with the reason; one that records no
+    last trade is stored (the surface says it could not be checked)."""
+    from types import SimpleNamespace
+
+    cr = _load()
+    for last, refused in (("2026-10-30T16:14:59", False), (None, False), ("2026-10-30T18:00:00", True)):
+        why = cr._last_trade_refusal(SimpleNamespace(underlying_last_trade_time=last), "2026-10-30")
+        assert (why is not None) is refused, last
+    late = SimpleNamespace(underlying_last_trade_time="2026-10-30T18:00:00")
+    assert cr._last_trade_refusal(late, "2026-10-30") == (
+        "its underlying's last trade, 2026-10-30T18:00:00 ET, is not at or before the session's 16:15 ET "
+        "close, so it is not the closing book")
+
+
 def test_import_has_no_side_effects(tmp_path, monkeypatch):
     """Pre-C22 the import chdir'ed to the repo root, configured root logging
     and froze TODAY, making other tests order-dependent."""
