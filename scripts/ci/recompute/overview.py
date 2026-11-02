@@ -783,18 +783,19 @@ def surface_card(a: Audit, store: Store, sh: dict[str, Any], c: Tag | None) -> N
     a.text(P_KEY, "surface card: what is held out", part(c, ".result-k"),
            f"Arbitrage-free SVI surface · {held}")
     said(a, P_KEY, "surface card: median |model − mid|, half-spreads", part(c, ".result-v"), [cur["mhs"]])
-    words = chain_words(inputs)
+    words = chain_words(inputs, sj.get("universe") or {})
     detail: Parts = [float(cur["n"]), sh["sess"], *([sh["newer"]] if sh["newer"] else []), cur["inside"]]
     if cur["butterfly"] is not None and cur["calendar"] is not None:
         detail += [float(cur["butterfly"]), float(cur["calendar"])]
     if hes:
         detail += [hes["mhs"], hes["inside"]]
-    detail += [f" {words[0]}, {words[1]}."] if words else []  # (name, time clause, badge parts)
+    # (name, time clause, badge parts ending with the two-sided share)
+    detail += [f" {words[0]}, {words[1]}, {words[2][-1]}."] if words else []
     el = part(c, ".result-d")
     said(a, P_KEY, "surface card: detail", el, detail, "scorecard.json, surface.json inputs")
     says(a, P_KEY, "surface card: detail", el, NEWER, bool(sh["newer"]))
     if words:
-        says(a, P_KEY, "surface card: detail", el, f"{words[0]}, {words[1]}.", True)
+        says(a, P_KEY, "surface card: detail", el, f"{words[0]}, {words[1]}, {words[2][-1]}.", True)
     rng = part(c, ".kpi-ci.kpi-range")
     if present(a, P_KEY, "surface card: range over sessions", rng, sh["n_sessions"] > 1) and rng is not None:
         mh = [r["mhs"] for r in sh["rows"] if r["mhs"] is not None]

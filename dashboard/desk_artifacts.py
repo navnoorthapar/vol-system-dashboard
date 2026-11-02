@@ -321,7 +321,8 @@ def validate_surface_json(obj: dict, session: str) -> None:
 def surface_fit_inputs(data_dir: Path, session: str) -> dict:
     """What a session's surface was fitted on (surface/<session>/surface.json):
     ``rule`` (fit_set.rule, which quotes were held out), ``source``,
-    ``quote_time``, ``fetched_at`` and ``t_origin_basis`` (inputs). Empty when the
+    ``quote_time``, ``fetched_at``, ``t_origin_basis`` and the near-the-money
+    two-sided share (inputs, else universe). Empty when the
     file does not exist. Without ``fetched_at`` a Yahoo download recorded since
     2026-10-27 (its fetch instant in fetched_at, no quote time) read as a close
     snapshot with no quote time."""
@@ -333,9 +334,13 @@ def surface_fit_inputs(data_dir: Path, session: str) -> dict:
     validate_surface_json(obj, session)
     fit_set: dict = obj["fit_set"] if isinstance(obj.get("fit_set"), dict) else {}
     inputs: dict = obj["inputs"] if isinstance(obj.get("inputs"), dict) else {}
+    universe: dict = obj["universe"] if isinstance(obj.get("universe"), dict) else {}
+    share = inputs.get("near_atm_two_sided_share")
     return {"rule": fit_set.get("rule"), "source": inputs.get("source"),
             "quote_time": inputs.get("quote_time"), "fetched_at": inputs.get("fetched_at"),
-            "t_origin_basis": inputs.get("t_origin_basis")}
+            "t_origin_basis": inputs.get("t_origin_basis"),
+            "near_atm_two_sided_share": (share if share is not None
+                                         else universe.get("near_atm_two_sided_share"))}
 
 
 def validate_vix_replication(obj: dict, session: str) -> None:

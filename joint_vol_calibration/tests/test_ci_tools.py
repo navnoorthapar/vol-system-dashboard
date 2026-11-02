@@ -1109,8 +1109,9 @@ class TestRecomputeAudit:
             d = tmp_path / "surface" / s
             d.mkdir(parents=True)
             (d / "residuals.parquet").write_text("")
+            share = {"near_atm_two_sided_share": 1.0} if s == "2026-11-02" else {}
             (d / "surface.json").write_text(json.dumps({"inputs": {"source": "cboe",
-                                                                   "quote_time": f"{s}T21:14:30Z"}}))
+                                                                   "quote_time": f"{s}T21:14:30Z", **share}}))
             (d / "vix_replication.json").write_text(json.dumps({
                 "indices": {"VIX": {"gap_vs_official": gap, "replicated": 20.0 + gap, "official": 20.0}},
                 "deviations": [f"departure {i}" for i in range(devs)]}))
@@ -1123,11 +1124,13 @@ class TestRecomputeAudit:
              "head": {"session": "2026-10-29"}, "arc": [], "skew": None}
         a = rc.core.Audit("t", BeautifulSoup("", "lxml"))
         items = {link: parts for link, _, parts, _ in ov.works_items(a, rc.data.Store(tmp_path), f)}
-        # each names its own session's chain (tier 0.2)
-        assert items["surface.html#vix-replication"] == [1.92, "2026-11-02", 3.0,
-                                                         " Chain: Cboe, quotes at 2026-11-02 21:14 UTC."]
-        assert items["surface.html#scorecard"][2:] == ["2026-10-29", "2026-11-02",
-                                                       " Chain: Cboe, quotes at 2026-10-29 21:14 UTC."]
+        # each names its own session's chain and its two-sided share, or that none is recorded (0.2)
+        assert items["surface.html#vix-replication"] == [
+            1.92, "2026-11-02", 3.0,
+            " Chain: Cboe, quotes at 2026-11-02 21:14 UTC, 100.0% two-sided near the money."]
+        assert items["surface.html#scorecard"][2:] == [
+            "2026-10-29", "2026-11-02",
+            " Chain: Cboe, quotes at 2026-10-29 21:14 UTC, two-sided share not recorded."]
 
     def test_it_checks_the_overviews_stale_fit_banner_and_its_cause(self, monkeypatch, tmp_path):
         """A Friday without a fit followed by a skipped one left the headline fit 2 NYSE

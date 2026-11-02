@@ -4960,7 +4960,7 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
         held = ("alternate strikes held out" if str(fit_in.get("rule") or "").startswith("alternate strikes")
                 else "held-out strikes")
         pv = chain_provenance({"inputs": fit_in})
-        snap = f" {pv['name']}, {pv['time']}." if pv else ""
+        snap = f" {pv['name']}, {pv['time']}, {pv['share']}." if pv else ""
         out.append({
             "key": f"Arbitrage-free SVI surface · {held}",
             "value": _fmt(sr["median_abs_hs"], ".2f"), "unit": "half-spreads",
@@ -6156,13 +6156,24 @@ def chain_provenance(surface_json: dict) -> dict | None:
     runs from, never 'quotes at'. A Cboe book records the time of its quotes.
     Keys: vendor ('yahoo', 'cboe' or the raw source), name, short, time (the
     quote-time clause), badge (that clause in parts short enough to set
-    unbroken on a 320 px phone), download (a Yahoo chain with a known fetch
-    instant)."""
+    unbroken on a 320 px phone), share (the near-the-money two-sided share the
+    chain records, near_atm_two_sided_share: '99.8% two-sided near the money',
+    else 'two-sided share not recorded'; FUND_GRADE_PLAN 0.2's third badge
+    part), download (a Yahoo chain with a known fetch instant)."""
     inp = surface_json.get("inputs") or {}
     uni = surface_json.get("universe") or {}
     src = str(inp.get("source") or uni.get("source") or "").strip().lower()
     if not src:
         return None
+    pv = _chain_provenance(inp, uni, src)
+    sh = _num(inp.get("near_atm_two_sided_share"))
+    sh = _num(uni.get("near_atm_two_sided_share")) if sh is None else sh
+    pv["share"] = (f"{_fmt(sh * 100, '.1f')}% two-sided near the money" if sh is not None
+                   else "two-sided share not recorded")
+    return pv
+
+
+def _chain_provenance(inp: dict, uni: dict, src: str) -> dict:
     qt = inp.get("quote_time") or uni.get("quote_time")
     if src in YAHOO:
         fetched = qt or inp.get("fetched_at") or uni.get("fetched_at")
@@ -6182,9 +6193,10 @@ def chain_provenance(surface_json: dict) -> dict | None:
 
 
 def _chain_clause(surface_json: dict) -> str:
-    """'Yahoo Finance close snapshot, no quote time' (chain_provenance), for a note."""
+    """'Yahoo Finance close snapshot, no quote time, two-sided share not recorded'
+    (chain_provenance), for a note."""
     pv = chain_provenance(surface_json)
-    return f"{pv['name']}, {pv['time']}" if pv else "chain source not recorded"
+    return f"{pv['name']}, {pv['time']}, {pv['share']}" if pv else "chain source not recorded"
 
 
 def chain_sentence(surface_json: dict) -> str:
@@ -6196,18 +6208,20 @@ def chain_sentence(surface_json: dict) -> str:
         return "a chain whose source is not recorded"
     if pv["download"]:
         when, _, rest = pv["time"].partition("; ")
-        return f"a {pv['name']} {when} ({rest.replace(', ', '; ')})"
+        return f"a {pv['name']} {when} ({rest.replace(', ', '; ')}; {pv['share']})"
     if pv["time"] == "no quote time":
-        return f"a {pv['name']} with no quote time"
+        return f"a {pv['name']} with no quote time ({pv['share']})"
     if pv["vendor"] == "cboe":
-        return f"a {pv['name']} book with {pv['time']}"
-    return f"a {pv['name']}, {pv['time']}"
+        return f"a {pv['name']} book with {pv['time']} ({pv['share']})"
+    return f"a {pv['name']}, {pv['time']} ({pv['share']})"
 
 
 def chain_source(surface_json: dict) -> list[str] | None:
-    """['Yahoo Finance close snapshot', 'no quote time'] from surface.json inputs and universe."""
+    """['Yahoo Finance close snapshot', 'no quote time', 'two-sided share not recorded']
+    from surface.json inputs and universe: the name, the quote-time clause's parts and
+    the two-sided share."""
     pv = chain_provenance(surface_json)
-    return [pv["name"], *pv["badge"]] if pv else None
+    return [pv["name"], *pv["badge"], pv["share"]] if pv else None
 
 
 # Tier 0.2: every number read off a session's quote chain carries that chain's
@@ -6215,10 +6229,11 @@ def chain_source(surface_json: dict) -> list[str] | None:
 # only in the page's badge: a panel linked to on its own, a Model Risk row or an
 # Overview line was read without it. test_dashboard.py enumerates them.
 def chain_stamp(surface_json: dict | None) -> str | None:
-    """'Cboe, quotes at 2026-10-30 23:49 UTC', 'Yahoo Finance download, fetched
-    2026-10-30 08:51 UTC': the chain's name and quote-time clause, for a sentence."""
+    """'Cboe, quotes at 2026-10-30 23:49 UTC, 100.0% two-sided near the money',
+    'Yahoo Finance download, fetched 2026-10-30 08:51 UTC, two-sided share not
+    recorded': the chain's name, quote-time clause and two-sided share, for a sentence."""
     pv = chain_provenance(surface_json or {})
-    return f"{pv['name']}, {pv['badge'][0]}" if pv else None
+    return f"{pv['name']}, {pv['badge'][0]}, {pv['share']}" if pv else None
 
 
 def chain_foot(surface_json: dict | None, label: str = "Chain") -> list[str] | None:
@@ -6235,10 +6250,11 @@ def chain_short(surface_json: dict | None) -> str | None:
 
 
 def chain_cell(surface_json: dict | None) -> str | None:
-    """'Cboe, quotes at 2026-10-30 23:49 UTC', 'Yahoo download, fetched 2026-10-29
-    07:32 UTC', 'Yahoo close, no quote time': a table cell naming a session's chain."""
+    """'Cboe, quotes at 2026-10-30 23:49 UTC, 100.0% two-sided near the money', 'Yahoo
+    close, no quote time, two-sided share not recorded': a table cell naming a session's
+    chain."""
     pv = chain_provenance(surface_json or {})
-    return f"{pv['short']}, {pv['badge'][0]}" if pv else None
+    return f"{pv['short']}, {pv['badge'][0]}, {pv['share']}" if pv else None
 
 
 def fit_chain_of(session: str | None) -> dict | None:
@@ -6435,6 +6451,7 @@ def fit_chain_record(cal: dict, session: str | None, data_dir: Path | None = Non
     anchors = _num(cal.get("n_spx_options"))
     inputs = {"source": diag.get("source") or stored_src, "quote_time": diag.get("quote_time"),
               "fetched_at": diag.get("fetched_at"), "t_origin_basis": diag.get("t_origin_basis"),
+              "near_atm_two_sided_share": diag.get("near_atm_two_sided_share"),
               "chain": f"data_store/options/{path.name}", "chain_rows": rows}
     universe = {"n_universe": int(anchors) + int(oos) if anchors is not None and oos is not None else None,
                 "n_expiries": n_exp}

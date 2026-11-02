@@ -7988,16 +7988,18 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
 
 def test_chain_badge_names_the_source_and_the_quote_time(dash):
     """P2.5: the badge is generic: a Yahoo snapshot says so and that it has no
-    quote time; a Cboe-sourced chain prints 'Cboe' and its quote time."""
+    quote time; a Cboe-sourced chain prints 'Cboe' and its quote time. Tier 0.2: each
+    gives the chain's near-the-money two-sided share, or says it is not recorded."""
     yahoo = {"inputs": {"source": "yfinance", "quote_time": None, "chain_rows": 6191},
              "universe": {"n_universe": 2913, "n_expiries": 17}}
     assert dash.chain_badge(yahoo, [43, 40, 41, 43]) == (
-        "Chain: Yahoo Finance close snapshot · no quote time · 6,191 rows → 2,913 scored · "
-        "17 expiries (other stored sessions 40–43)")
+        "Chain: Yahoo Finance close snapshot · no quote time · two-sided share not recorded · 6,191 rows "
+        "→ 2,913 scored · 17 expiries (other stored sessions 40–43)")
     cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-23T15:59:30-04:00", "chain_rows": 9000},
-            "universe": {"n_universe": 4000, "n_expiries": 30}}
+            "universe": {"n_universe": 4000, "n_expiries": 30, "near_atm_two_sided_share": 0.99775}}
     txt = dash.chain_badge(cboe, [17])
-    assert txt.startswith("Chain: Cboe · quotes at 2026-10-23 15:59:30-04:00 · 9,000 rows → 4,000 scored")
+    assert txt.startswith("Chain: Cboe · quotes at 2026-10-23 15:59:30-04:00 · 99.8% two-sided near the money"
+                          " · 9,000 rows → 4,000 scored")
     assert txt.endswith("30 expiries (other stored session 17)")
     assert "Yahoo" not in txt
     assert "no quote time" not in txt
@@ -8751,8 +8753,8 @@ def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(d
     assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
     note = _visible_text("<body>" + re.search(r'<p class="note" id="smile-book"[^>]*>(.*?)</p>', html,
                                               re.DOTALL).group(1))
-    assert (f"These panels draw the {fit} surface’s quotes, a Cboe book with {book['time']}, not the "
-            f"{fit_name} the fit was made on.") in note
+    assert (f"These panels draw the {fit} surface’s quotes, a Cboe book with {book['time']} "
+            f"({book['share']}), not the {fit_name} the fit was made on.") in note
     oos = _visible_text("<body>" + re.search(r'id="oos".*?<p class="note">(.*?)</p>', html,
                                              re.DOTALL).group(1))
     assert "In half-spreads on the session’s Cboe quotes, not the chain fitted here, see" in oos
@@ -8900,12 +8902,13 @@ def _greeks_source_calibration(data: Path) -> str:
 
 def _names_chain(text: str, pv: dict | None) -> bool:
     """The chain's source badge in ``text``: chain_provenance's name (or its short
-    form, 'Yahoo download') and its quote-time clause ('quotes at …', 'fetched …',
-    'no quote time'); a chain whose source is not recorded says so."""
+    form, 'Yahoo download'), its quote-time clause ('quotes at …', 'fetched …',
+    'no quote time') and its two-sided share ('99.8% two-sided near the money',
+    'two-sided share not recorded'); a chain whose source is not recorded says so."""
     t = re.sub(r"\s+", " ", text)
     if pv is None:
         return "source not recorded" in t
-    return (pv["name"] in t or pv["short"] in t) and pv["badge"][0] in t
+    return (pv["name"] in t or pv["short"] in t) and pv["badge"][0] in t and pv["share"] in t
 
 
 def _panel_html(html: str, pid: str) -> str:
@@ -8938,8 +8941,9 @@ def _key_chain(dash, data: Path, key: str) -> dict | None:
                                                  "fetched_at": at.strftime("%Y-%m-%dT%H:%M:%SZ")}})
     if kind == "ledger":
         inp = json.loads((data / "forward" / f"ledger_{arg}.json").read_text())["inputs"]
-        return dash.chain_provenance({"inputs": {"source": inp["book"]["source"],
-                                                 "quote_time": inp["quote_time"]}})
+        return dash.chain_provenance({"inputs": {
+            "source": inp["book"]["source"], "quote_time": inp["quote_time"],
+            "near_atm_two_sided_share": inp["book"].get("near_atm_two_sided_share")}})
     raise AssertionError(f"unknown chain key {key!r}")
 
 
@@ -9061,8 +9065,9 @@ def _chain_audit(dash, data: Path, route: str, html: str) -> tuple[list, dict]:
 
 def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
     """Tier 0.2: a number read off a session's quote chain shows that chain's source
-    badge beside it (its vendor and its quote time: a Cboe book's 'quotes at …', a
-    Yahoo download's 'fetched …', a close snapshot's 'no quote time') in its own
+    badge beside it (its vendor, its quote time: a Cboe book's 'quotes at …', a Yahoo
+    download's 'fetched …', a close snapshot's 'no quote time', and the share of its
+    near-the-money lines that are two-sided, or that it is not recorded) in its own
     panel, row, line or history dot, on every page, in each state the bot publishes
     (chain_view: Yahoo or Cboe newest sessions, a newest fit without diagnostics).
 
@@ -12204,8 +12209,9 @@ def test_the_recompute_audit_fails_on_a_wrong_chain(recompute_audit, frozen_site
     comparison's captions and the Overview's surface line name is recomputed from the
     session's surface.json by the audit's own code. In a copy of the frozen site, the
     delta grid's source line, the history's first Chain cell, the first compared
-    session's chain and the surface line's chain each name another chain, and each is
-    reported as a mismatch."""
+    session's chain and the surface line's chain each name another chain, and the
+    smile panel's source line another two-sided share; each is reported as a
+    mismatch."""
     site = tmp_path / "site"
     shutil.copytree(frozen_site, site)
 
@@ -12233,9 +12239,18 @@ def test_the_recompute_audit_fails_on_a_wrong_chain(recompute_audit, frozen_site
     line = re.search(r'id="surface-line"[^>]*>.*?; ([^)]*)\)', html, re.DOTALL)
     assert line
     ov.write_text(html[:line.start(1)] + other(line.group(1)) + html[line.end(1):], encoding="utf-8")
+    # the smile panel's source line with another two-sided share (its chain otherwise right)
+    html = sf.read_text(encoding="utf-8")
+    share = re.search(r'id="slices-chain">.*?(\d+\.\d% two-sided near the money'
+                      r'|two-sided share not recorded)', html, re.DOTALL)
+    assert share
+    wrong = ("12.3% two-sided near the money" if not share.group(1).startswith("12.3")
+             else "45.6% two-sided near the money")
+    sf.write_text(html[:share.start(1)] + wrong + html[share.end(1):], encoding="utf-8")
     res = recompute_audit.run(site, SHIPPED)
     failed = {(c.page, c.panel, c.label) for c in res["checks"] if not c.ok}
     assert ("Surface", "panel source lines", "#delta-grid source line") in failed
+    assert ("Surface", "panel source lines", "#slices source line") in failed
     assert any(p == "#surface-history" and lab.endswith("chain (its surface.json inputs)")
                for _, p, lab in failed)
     assert any(p == "#surface-change" and lab.endswith("its chain (surface.json inputs)")
@@ -12555,13 +12570,17 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
     later = {"inputs": {"source": "yfinance", "quote_time": None, "fetched_at": "2026-10-28T08:50:33Z",
                         "t_origin_basis": "session close 16:00 ET"}}
     assert dash.chain_source(later) == ["Yahoo Finance download", "fetched 2026-10-28 08:50 UTC",
-                                        "Yahoo reports no quote times", "T from the 16:00 ET close"]
+                                        "Yahoo reports no quote times", "T from the 16:00 ET close",
+                                        "two-sided share not recorded"]
     assert dash.chain_sentence(later) == ("a Yahoo Finance download fetched 2026-10-28 08:50 UTC "
-                                          "(Yahoo reports no quote times; T from the 16:00 ET close)")
+                                          "(Yahoo reports no quote times; T from the 16:00 ET close; "
+                                          "two-sided share not recorded)")
     assert dash.chain_source({"inputs": {"source": "yfinance", "t_origin_basis": "session close 16:00 ET"}}) \
-        == ["Yahoo Finance close snapshot", "no quote time"]
-    cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z"}}
-    assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC"]
+        == ["Yahoo Finance close snapshot", "no quote time", "two-sided share not recorded"]
+    cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z",
+                       "near_atm_two_sided_share": 1.0}}
+    assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC",
+                                       "100.0% two-sided near the money"]
     # every page that names a surface session's chain says what it is (the Overview's
     # surface result is the headline fit's session's, the others the newest session's)
     for route in ("/", "/surface", "/model-risk"):
