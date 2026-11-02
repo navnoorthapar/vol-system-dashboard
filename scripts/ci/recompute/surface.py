@@ -2024,9 +2024,11 @@ def deviations(a: Audit, c: Ctx, vix: GapSplit | None, causes: list[str]) -> Non
 
 OVERNIGHT_NOTE = "The book is the overnight (Global Trading Hours) book"
 OVERNIGHT_NOTE_VERSION = 6          # the report_version that writes it
-OVERNIGHT_WHY_NONE = ("(no closing book of the session is stored: Cboe’s delayed feed shows it only until "
+# the reason clauses as the producer writes them (report._timing_note), with its straight
+# apostrophes: the page prints the producer's note as written
+OVERNIGHT_WHY_NONE = ("(no closing book of the session is stored: Cboe's delayed feed shows it only until "
                       "Global Trading Hours open at 20:15 ET)")
-OVERNIGHT_WHY_FAILED = "(the session’s closing book did not pass the quote-state gates)"
+OVERNIGHT_WHY_FAILED = "(the session's closing book did not pass the quote-state gates)"
 
 
 def overnight_note(a: Audit, c: Ctx, lis: list[Tag]) -> None:

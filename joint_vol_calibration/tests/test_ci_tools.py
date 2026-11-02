@@ -929,9 +929,9 @@ class TestRecomputeAudit:
         root = tmp_path / "data_store"
         (root / "options" / "cboe").mkdir(parents=True)
         store = rc.data.Store(root)
-        none_stored = ("(no closing book of the session is stored: Cboe’s delayed feed shows it only until "
+        none_stored = ("(no closing book of the session is stored: Cboe's delayed feed shows it only until "
                        "Global Trading Hours open at 20:15 ET)")
-        failed_gates = "(the session’s closing book did not pass the quote-state gates)"
+        failed_gates = "(the session's closing book did not pass the quote-state gates)"
 
         def note(quoted, hours, why=none_stored):
             return (f"{S.OVERNIGHT_NOTE} {why}, quoted at {quoted} ET, "
@@ -971,6 +971,47 @@ class TestRecomputeAudit:
             {"underlying": "SPX", "session": "2026-10-29", "quote_time": "2026-10-30T08:36:08Z"}))
         assert failed([note("2026-10-30 04:36", "12.4", failed_gates)], closing_books=1) == []
         assert failed([note("2026-10-30 04:36", "12.4")], closing_books=0) == [count, why]
+
+    def test_it_accepts_the_overnight_note_as_the_producer_writes_it(self, monkeypatch, tmp_path):
+        """FUND_GRADE_PLAN 0.8: the audit's two reasons for building a session from its
+        overnight book were written with a typographic apostrophe (Cboe’s, session’s);
+        the producer writes a straight one and the page prints its note as written. So
+        the first session built from an overnight book under report_version 6 (any
+        weekday whose close slot stores no closing book) would fail the audit, and with
+        it the deploy. The audit is now fed the note report._timing_note writes, by the
+        producer's own clock, with no closing book stored and with one stored."""
+        import html
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+
+        from joint_vol_calibration.surface import report as R
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        root = tmp_path / "data_store"
+        (root / "options" / "cboe").mkdir(parents=True)
+        session, quoted = "2026-10-29", "2026-10-30T08:36:08Z"   # Fri 04:36 ET: the overnight book
+
+        def failed(closing_books):
+            inputs = {"source": "cboe", "quote_time": quoted, "book_state": "gth",
+                      "closing_books": closing_books}
+            sq = types.SimpleNamespace(session=session, inputs=inputs,
+                                       clean_diagnostics={"quote_time": quoted})
+            calc, basis = R._calc_time_ny(sq)
+            note = R._timing_note(sq, calc, basis)
+            assert note is not None
+            assert note.startswith(S.OVERNIGHT_NOTE)
+            ctx = types.SimpleNamespace(vx={"report_version": R.REPORT_VERSION}, session=session,
+                                        sj={"inputs": inputs}, store=rc.data.Store(root))
+            a = rc.core.Audit("t", BeautifulSoup(f"<ul><li>{html.escape(note)}</li></ul>", "lxml"))
+            S.overnight_note(a, ctx, a.soup.select("li"))
+            return [c.label for c in a.checks if not c.ok]
+
+        assert failed(0) == []
+        (root / "options" / "cboe" / f"spx_{session}_220705Z.json").write_text(json.dumps(
+            {"underlying": "SPX", "session": session, "quote_time": "2026-10-29T21:52:05Z"}))
+        assert failed(1) == []
 
     def test_it_rebuilds_the_heston_rows_fit_time_clause_from_the_fits_record(self, monkeypatch, tmp_path):
         """FUND_GRADE_PLAN 0.8: a session scored on its closing book whose Heston fit was
