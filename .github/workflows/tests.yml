@@ -116,7 +116,10 @@ jobs:
   simulate:
     name: next-session simulation (the bot's gates on a new fit)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # since wave 1 the simulated run also rebuilds sessions from their 45-expiry Cboe
+    # books (about 5.5 minutes of artifacts and backfill); with its gates and the full
+    # suite the job took about 47 minutes and was cancelled at 45 with every gate passed
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
