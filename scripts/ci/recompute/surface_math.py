@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import itertools
+import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -707,6 +708,98 @@ def replication_instant(inputs: dict, session: str) -> tuple[str, str] | None:
         return None
     at = dt.datetime.fromisoformat(str(t0)).astimezone(NY)
     return at.replace(tzinfo=None).isoformat(timespec="minutes"), "chain_t_origin"
+
+
+# which book a session's replication sets against the Cboe close, as the page names it
+BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER = "closing", "overnight", "yahoo", "other"
+BOOK_ORDER = (BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER)
+GTH_CLOSE = dt.time(9, 15)
+
+
+def replication_book(inputs: dict | None, session: str) -> str | None:
+    """The book a session was built from, from surface.json's record of its chain and
+    this audit's own clock rules: a Cboe book quoted after the session's close and
+    outside the next session's Global Trading Hours (20:15 ET the evening before it to
+    09:15) is its closing book; one quoted inside them its overnight book; any other
+    Cboe instant (the session's own hours, the 09:15-09:30 pause) 'other'; a chain of
+    another source a Yahoo chain. None without a recorded source."""
+    inp = inputs or {}
+    src, qt = inp.get("source"), inp.get("quote_time")
+    if src is None:
+        return None
+    if src != "cboe":
+        return BOOK_YAHOO
+    if not qt:
+        return BOOK_OTHER
+    at = dt.datetime.fromisoformat(str(qt)).astimezone(NY)
+    day = dt.date.fromisoformat(session)
+    nxt = day + dt.timedelta(days=1)
+    while not is_session(nxt):
+        nxt += dt.timedelta(days=1)
+    if dt.datetime.combine(nxt - dt.timedelta(days=1), GTH_OPEN, NY) <= at < dt.datetime.combine(
+            nxt, GTH_CLOSE, NY):
+        return BOOK_OVERNIGHT
+    after_close = at >= dt.datetime.combine(day, cboe_close_time(session), NY)
+    return BOOK_CLOSING if after_close and at < dt.datetime.combine(nxt, GTH_CLOSE, NY) else BOOK_OTHER
+
+
+def closing_books(store: Store, session: str) -> int:
+    """How many SPX books of ``session`` the record holds that are its closing book by
+    this audit's clock (replication_book on each record's quote time): the records
+    beside raw books committed here and the manifests of books held privately."""
+    n = 0
+    for sub in ("cboe", "cboe_manifest"):
+        for jp in sorted((store.root / "options" / sub).glob(f"spx_{session}_*.json")):
+            rec = json.loads(jp.read_text())
+            n += replication_book({"source": "cboe", "quote_time": rec.get("quote_time")},
+                                  session) == BOOK_CLOSING
+    return n
+
+
+def closing_book_refusal(store: Store, session: str) -> str | None:
+    """Why the job did not store ``session``'s closing SPX book, from its run records
+    (data_store/runs/run_*.json, schema run_ledger/1): the newest run (by run_utc) of the
+    close slot's step alone ("closebook" in its steps, "capture" not) whose capture is of
+    ``session`` and whose SPX capture is "rejected" or "failed", its recorded reason; None
+    when no record says so."""
+    runs = store.root / "runs"
+    found: list[tuple[str, str]] = []
+    for path in sorted(runs.glob("run_*.json")) if runs.is_dir() else []:
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("schema") != "run_ledger/1":
+            continue
+        steps = rec.get("steps") or []
+        capt = rec.get("capture") or {}
+        spx = (capt.get("captures") or {}).get("SPX") or {}
+        if ("closebook" in steps and "capture" not in steps and str(capt.get("session")) == session
+                and spx.get("status") in ("rejected", "failed") and spx.get("reason")):
+            found.append((str(rec.get("run_utc")), str(spx["reason"])))
+    return max(found)[1] if found else None
+
+
+def fit_left_the_closing_book(downloaded: str | None, session: str) -> bool | None:
+    """Whether a chain downloaded at ``downloaded`` (UTC) holds quotes from after the
+    session's closing book gave way to the next session's Global Trading Hours book
+    (the delayed feed's quotes are 15 minutes old): its quote instant at or after
+    20:15 ET on the evening before the next session and before that session's 09:30
+    open. None without a download time."""
+    if not downloaded:
+        return None
+    try:
+        at = dt.datetime.fromisoformat(str(downloaded))
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=dt.UTC)
+    quoted = (at - dt.timedelta(minutes=15)).astimezone(NY)
+    nxt = dt.date.fromisoformat(session) + dt.timedelta(days=1)
+    while not is_session(nxt):
+        nxt += dt.timedelta(days=1)
+    return (dt.datetime.combine(nxt - dt.timedelta(days=1), GTH_OPEN, NY) <= quoted
+            < dt.datetime.combine(nxt, dt.time(9, 30), NY))
 
 
 # ── the page's number formats ─────────────────────────────────────────────────

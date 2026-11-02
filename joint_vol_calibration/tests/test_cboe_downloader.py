@@ -670,6 +670,35 @@ def test_the_book_resolver_finds_books_in_the_private_store_and_the_public_tree(
                                                                           "vix_2026-10-26_052654Z.parquet")
 
 
+def test_a_closing_book_does_not_count_as_the_sessions_overnight_book(tmp_path):
+    """FUND_GRADE_PLAN 0.8: a session can have two books worth keeping, the closing
+    book the close slot stores (its quotes the 16:15 ET close's) and the Global
+    Trading Hours book the book slot stores after it. book_captured with a state
+    counts only a capture in that state (a book's own record, or its manifest's),
+    so the first does not stop the second; a record that names no state counts
+    for any, as every capture did before."""
+    data = tmp_path / "data_store"
+    pub, man = cb.public_books_dir(data), cb.manifest_dir(data)
+    pub.mkdir(parents=True)
+    man.mkdir(parents=True)
+    closing = pub / "spx_2026-10-26_220712Z"
+    closing.with_suffix(".parquet").write_bytes(b"book")
+    closing.with_suffix(".json").write_text(json.dumps({"book_state": "closing"}))
+    assert cb.book_captured("SPX", "2026-10-26", data, env={}) == str(closing.with_suffix(".parquet"))
+    assert cb.book_captured("SPX", "2026-10-26", data, env={}, book_state="closing") == str(
+        closing.with_suffix(".parquet"))
+    assert cb.book_captured("SPX", "2026-10-26", data, env={}, book_state="gth") is None
+    (man / "spx_2026-10-26_023005Z.json").write_text(json.dumps({"book_state": "gth"}))
+    assert cb.book_captured("SPX", "2026-10-26", data, env={}, book_state="gth") == str(
+        man / "spx_2026-10-26_023005Z.json")
+    (pub / "vix_2026-10-26_220713Z.parquet").write_bytes(b"book")      # no record beside it
+    assert cb.book_captured("VIX", "2026-10-26", data, env={}, book_state="gth") is not None
+    # the state the feed shows at a fetch: its quotes are QUOTE_DELAY old
+    at = datetime(2026, 10, 27, 0, 25, tzinfo=UTC)                    # Mon 20:25 ET (EDT)
+    assert cb.feed_book_state(at, "2026-10-26") == "closing"          # quotes of 20:10 ET
+    assert cb.feed_book_state(at + timedelta(minutes=10), "2026-10-26") == "gth"
+
+
 def test_a_manifest_records_a_private_book_without_its_quotes(serve_chains, tmp_path):
     """The public record of a book moved to the private store: the book's own
     record, both files' SHA-256 and where they are; no quote, no column of the

@@ -5260,9 +5260,15 @@ def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
     """The newest stored Cboe book per underlying: the records beside the raw books
     committed here (data_store/options/cboe/*.json) and the manifests of books
     held in the private data repository (data_store/options/cboe_manifest/*.json,
-    cboe_downloader.write_manifest: the same fields, no quotes)."""
+    cboe_downloader.write_manifest: the same fields, no quotes).
+
+    Each carries "books": every stored book of that underlying's newest session,
+    oldest quote first. A weekday session can have two (FUND_GRADE_PLAN 0.8): the
+    closing book the close slot stores and the overnight book the book slot
+    captures after it; the Overview names both, since the session's surface is
+    built from the first and the newest quote is the second's."""
     base = Path(data_dir or DATA) / "options"
-    newest: dict[str, dict] = {}
+    recs: dict[str, list[dict]] = {}
     files = [f for sub in ("cboe", "cboe_manifest") if (base / sub).is_dir()
              for f in sorted((base / sub).glob("*.json"))]
     for f in files:
@@ -5271,10 +5277,14 @@ def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
         except (OSError, ValueError) as exc:
             raise ValueError(f"options/{f.parent.name}/{f.name}: unreadable record ({exc})") from exc
         und = str(rec.get("underlying") or f.name.split("_")[0]).upper()
-        key = (str(rec.get("session")), str(rec.get("quote_time")))
-        if und not in newest or key > (str(newest[und].get("session")), str(newest[und].get("quote_time"))):
-            newest[und] = {**rec, "file": f.name}
-    return [newest[u] for u in sorted(newest)]
+        recs.setdefault(und, []).append({**rec, "file": f.name})
+    out = []
+    for und in sorted(recs):
+        mine = sorted(recs[und], key=lambda r: (str(r.get("session")), str(r.get("quote_time"))))
+        newest = mine[-1]
+        same = [r for r in mine if str(r.get("session")) == str(newest.get("session"))]
+        out.append({**newest, "books": same})
+    return out
 
 
 def deploy_streak(path: Path | None = None) -> dict | None:
@@ -6763,6 +6773,7 @@ def surface_extras(d: dict, surf: dict) -> None:
     d["chain_key"] = f"surface:{session}"
     d["chain_foot"] = chain_foot(sj)
     d["chain_foot_head"] = chain_foot(sj, f"Chain of {session}")
+    desk_inputs = None
     if (((sj.get("surfaces") or {}).get("svi_cal") or {}).get("params") or {}).get("slices"):
         listed = desk_surface.delta_grid(sj, res, surf.get("vix"))
         cm = desk_surface.constant_maturity(listed)
@@ -7153,6 +7164,12 @@ def surface_extras(d: dict, surf: dict) -> None:
         # every earlier session as well (the cell of a session where a model is
         # not scored is a dash, and the note says why)
         mk = history_model_keys(models, (r["model"] for r in oos_all))
+        # the book each session was built from (its surface.json record): only a
+        # closing book's gap sets the replication against the Cboe close at one instant
+        if desk_inputs is None:
+            desk_inputs = artifacts.load_surface_desk_inputs(DATA)
+        books = {s["session"]: desk_surface.replication_book((s["surface"] or {}).get("inputs"))
+                 for s in desk_inputs}
         d["history_models"] = [{"key": m, "label": model_short(m)} for m in mk]
         d["history_gaps"] = any(oos_by.get((r["session"], m)) is None for r in idx for m in mk)
         # why Heston has no figure on a session, where the job's run records say
@@ -7164,11 +7181,20 @@ def surface_extras(d: dict, surf: dict) -> None:
                                  "vix_rep": _num(r.get("vix_replicated")),
                                  "vix_off": _num(r.get("vix_official")),
                                  "beta": _num(r.get("atm_over_vix_official")),
+                                 "book": books.get(r["session"]),
                                  # the out-of-sample median |z| of the scorecard, as every headline
                                  "oos": {m: oos_by.get((r["session"], m)) for m in mk}} for r in idx]
-        d["vix_gap_range"] = session_range(
-            (h["vix_rep"] - h["vix_off"]) for h in d["surface_history"]
-            if h["vix_rep"] is not None and h["vix_off"] is not None)
+        for h in d["surface_history"]:
+            h["gap"] = (h["vix_rep"] - h["vix_off"]
+                        if h["vix_rep"] is not None and h["vix_off"] is not None else None)
+            h["book_label"] = desk_surface.BOOK_LABELS.get(h["book"] or "")
+        # FUND_GRADE_PLAN 0.8: the gap's median and range by book, and the tile's range
+        # over the sessions of this session's own book, so a range never mixes a
+        # same-instant gap with one that holds the overnight move
+        d["vix_gap_by_book"] = desk_surface.gap_by_book(d["surface_history"])
+        own = books.get(session)
+        same = [h["gap"] for h in d["surface_history"] if own is None or h["book"] == own]
+        d["vix_gap_range"] = session_range(same, what=desk_surface.BOOK_SESSIONS.get(own or "", "sessions"))
 
 
 def _clean_keep(d: dict) -> dict:

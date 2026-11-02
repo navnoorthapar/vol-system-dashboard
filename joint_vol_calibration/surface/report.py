@@ -110,7 +110,18 @@ SCHEMA_VERSION = 1
 #      recorded as calculation_time_basis; that is Cboe's own timing rule, so
 #      it is no longer a listed departure, and its comparison with the Cboe
 #      print (cboe_close_ny) is a gap note
-REPORT_VERSION = 5
+#   6  plan 0.8: a session with a stored closing book (the close slot's, its
+#      quotes the ones standing at the close the official VIX-family closes are
+#      computed at) is built from it, not from its later overnight book, so its
+#      replication gap is a same-instant comparison; a session built from an
+#      overnight (Global Trading Hours) book says in its timing note that the
+#      gap mixes the replication's error with the overnight move, how many
+#      hours after the print the book was quoted, and why no closing book was
+#      used (none stored, or it failed the gates: inputs.closing_books counts
+#      the session's stored closing books; none stored because the close slot
+#      did not store the one it fetched: inputs.closing_book_refusal, the
+#      reason its run record gives)
+REPORT_VERSION = 6
 SURFACE_DIR = DATA_DIR / "surface"
 
 
@@ -432,6 +443,21 @@ def _timing_note(sq: sqm.SessionQuotes, calc: datetime, basis: str) -> str | Non
     the session's print at its data cutoff, 16:15 ET or 13:15 on an early
     close (None for a chain with no quote time: that is a departure,
     _timing_deviation)."""
+    if basis == CALC_BOOK_QUOTE_TIME and sq.inputs.get("book_state") == "gth":
+        cutoff = db.close_data_cutoff(sq.session)
+        hours = (calc - datetime.combine(date.fromisoformat(sq.session), cutoff)).total_seconds() / 3600.0
+        refusal = str(sq.inputs.get("closing_book_refusal") or "").rstrip(".")
+        why = (" (the session's closing book did not pass the quote-state gates)"
+               if sq.inputs.get("closing_books") else
+               # the close slot fetched it and its run record says why it was not stored
+               f" (the job did not store the session's closing book: {refusal})" if refusal else
+               " (no closing book of the session is stored: Cboe's delayed feed shows it only "
+               "until Global Trading Hours open at 20:15 ET)")
+        return (f"The book is the overnight (Global Trading Hours) book{why}, quoted at "
+                f"{calc:%Y-%m-%d %H:%M} ET, {hours:.1f} hours after the {cutoff:%H:%M} ET print of "
+                f"{sq.session}{_early(sq.session)} it is compared with: the gap mixes the "
+                "replication's error with the market's move overnight. The replication is timed "
+                "at the book's quote time, as Cboe times a calculation on the quotes standing then.")
     if basis == CALC_BOOK_QUOTE_TIME:
         return (f"The replication is timed at the book's quote time, {calc:%Y-%m-%d %H:%M} ET, as "
                 "Cboe times a calculation on the quotes standing then; the Cboe close it is "
@@ -695,6 +721,12 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                 "quote_time": sq.diagnostics.get("quote_time"),
                 "fetched_at": src.get("fetched_at"),
                 "book_state": src.get("book_state"),
+                # how many closing books of the session are stored (0 for a session
+                # built from its overnight book: none, so the timing note says why)
+                "closing_books": src.get("closing_books"),
+                # with none stored, why the close slot did not store the one it
+                # fetched, as its run record says (None: no record says so)
+                "closing_book_refusal": src.get("closing_book_refusal"),
                 "near_atm_two_sided_share": sq.diagnostics.get("near_atm_two_sided_share"),
                 "t_origin": sq.diagnostics.get("t_origin"),
                 "t_origin_basis": sq.diagnostics.get("t_origin_basis"),

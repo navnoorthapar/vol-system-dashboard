@@ -1976,6 +1976,69 @@ def test_a_chain_the_backtest_excludes_has_no_surface_beta_and_a_true_minus(dash
     assert note is None or "β estimator" not in note.group(1)
 
 
+def test_the_vix_gap_is_given_by_the_book_each_session_was_built_from(dash, pages):
+    """FUND_GRADE_PLAN 0.8: the history listed every session's VIX replication gap,
+    and the VIX tile ranged over all of them, whether the replication was set
+    against the 16:15 ET close at the instant it is computed (a Cboe closing book),
+    hours after it (the overnight book) or at no recorded instant (a Yahoo chain).
+    Each history row now names its book from the session's surface.json record, a
+    table gives the gap's sessions, median and range per book, and the tile ranges
+    over the sessions of this session's book only. Expected values are derived from
+    the stored artifacts, whatever sessions the bot has added."""
+    import html as _html
+
+    ds = dash.desk_surface
+    index = json.loads((SHIPPED / "surface" / "index.json").read_text())["sessions"]
+    books, gaps = {}, {}
+    for r in index:
+        sj = SHIPPED / "surface" / r["session"] / "surface.json"
+        if sj.exists():
+            books[r["session"]] = ds.replication_book(json.loads(sj.read_text()).get("inputs"))
+        if r.get("vix_replicated") is not None and r.get("vix_official") is not None:
+            gaps[r["session"]] = r["vix_replicated"] - r["vix_official"]
+    html = pages["/surface"]
+
+    def cells(table_id):
+        tbl = re.search(rf'<table[^>]*id="{table_id}".*?</table>', html, re.DOTALL)
+        assert tbl, table_id
+        return [[_html.unescape(re.sub(r"<[^>]+>", "", c)).strip()
+                 for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.DOTALL)]
+                for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl.group(0), re.DOTALL)
+                if "<td" in tr]
+
+    hist = {row[0]: row for row in cells("surface-history-table")}
+    assert set(hist) == {r["session"] for r in index}
+    col = _table_heads(html, "surface-history-table").index("Book")
+    for session, row in hist.items():
+        assert row[col] == ds.BOOK_LABELS.get(books.get(session) or "", "—"), session
+    want = ds.gap_by_book([{"book": books.get(s), "gap": g} for s, g in gaps.items()])
+    got = cells("vix-gap-by-book")
+    assert [r[0] for r in got] == [w["label"] for w in want]
+    for row, w in zip(got, want):
+        assert row[1] == f"{w['n']:,}"
+        assert row[2] == dash.signed(w["median"], ".2f")
+        assert row[3] == ("—" if w["lo"] is None else
+                          f"{dash.signed(w['lo'], '.2f')} to {dash.signed(w['hi'], '.2f')}")
+    # the note below explains the books in the table and no other (the live page had only
+    # Yahoo-chain rows under a note about closing and overnight books)
+    note = re.search(r'<p class="note" id="vix-gap-by-book-note">(.*?)</p>', html, re.DOTALL)
+    text = _html.unescape(re.sub(r"\s+", " ", note.group(1)))
+    in_table = {w["book"] for w in want}
+    for book, phrase in (("closing", "A closing book is set against the Cboe close"),
+                         ("overnight", "An overnight book was quoted hours after the close"),
+                         ("yahoo", "A Yahoo chain records no quote time"),
+                         ("other", "Another Cboe book was quoted")):
+        assert (phrase in text) is (book in in_table), book
+    assert ("No session here was built from a closing book" in text) is ("closing" not in in_table)
+    # the tile: the range over the sessions of the page's own book
+    newest = max(s for s in hist)
+    own = books.get(newest)
+    same = [g for s, g in gaps.items() if own is None or books.get(s) == own]
+    tile = _visible_text(html)
+    if len(same) > 1:
+        assert f"gap, {len(same)} {ds.BOOK_SESSIONS.get(own or '', 'sessions')}: " in tile
+
+
 def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
     """'β = 0.82, estimated from five real 2026 SPX chains (0.80–0.84)': the five
     were 4 DB chains and a live capture, the range was typed in, and the later
@@ -3162,17 +3225,35 @@ def test_overview_keeps_research_prototypes_off_the_first_screen(dash, pages):
     assert "none feeds a number on this page" in idx
 
 
+def _pipeline_books_text(text: str) -> str:
+    """The Overview pipeline panel's "Cboe option books" cell, from the page's text."""
+    m = re.search(r"Cboe option books (.*?) Accepted joint fits", text)
+    assert m, "no Cboe option books row"
+    return m.group(1)
+
+
 def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
     """Cboe book captures, accepted fits, artifacts and the forward ledger as
-    the stored records state them."""
+    the stored records state them. The books row names every book of each
+    underlying's newest session (FUND_GRADE_PLAN 0.8: a weekday session can
+    have a closing and an overnight book), each with its own counts."""
     pl = dash.pipeline_state(dash.artifacts.load_diagnostics_summary(dash.DATA))
     text = _visible_text(pages["/"])
     caps = [f for sub in ("cboe", "cboe_manifest") if (SHIPPED / "options" / sub).is_dir()
             for f in sorted((SHIPPED / "options" / sub).glob("*.json"))]
-    for rec in (json.loads(f.read_text()) for f in caps):
-        latest = next(c for c in pl["captures"] if c["underlying"] == rec["underlying"])
-        if latest["file"].startswith(f"{rec['underlying'].lower()}_{rec['session']}"):
-            assert f"{rec['underlying']} {rec['session']}: {rec['rows']:,} lines" in text
+    recs: dict = {}
+    for f in caps:
+        rec = json.loads(f.read_text())
+        recs.setdefault(rec["underlying"], []).append({**rec, "file": f.name})
+    row = _pipeline_books_text(text)
+    for und, mine in recs.items():
+        newest = max(str(r["session"]) for r in mine)
+        shown = sorted((r for r in mine if r["session"] == newest), key=lambda r: str(r["quote_time"]))
+        page = next(c for c in pl["captures"] if c["underlying"] == und)
+        assert [b["file"] for b in page["books"]] == [r["file"] for r in shown]
+        seg = row[row.index(f"{und} {newest}: "):]
+        for r in shown:
+            assert f"{r['rows']:,} lines ({r['two_sided_rows']:,} two-sided" in seg
     assert f"{pl['fits']} (model_version 2), newest {pl['fits_newest']}" in text
     assert f"{len(pl['surface_sessions'])} sessions" in text
     if pl["forward"]["state"] != "ok":
@@ -3201,6 +3282,41 @@ def test_pipeline_panel_reads_books_held_in_the_private_store(dash, tmp_path):
     (opts / "cboe_manifest" / "spx_2026-10-28_023000Z.json").write_text("{not json")
     with pytest.raises(ValueError, match=r"options/cboe_manifest/spx_2026-10-28_023000Z\.json"):
         dash.latest_cboe_captures(tmp_path)
+
+
+def test_overview_names_both_books_of_a_session_with_a_closing_and_an_overnight_book(
+        dash, tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.8: on a weekday the close slot stores the session's
+    closing book and the book slot its overnight book after it. The pipeline
+    panel named only the newest book per underlying, so the closing book the
+    session's surface is built from went unmentioned, and the presentation gate,
+    which checked every record of the session against the page, failed on such
+    a session and blocked the deploy. It names both, oldest quote first, each
+    with its counts and its book."""
+    opts = tmp_path / "options" / "cboe"
+    opts.mkdir(parents=True)
+    s = "2026-11-02"                                   # synthetic records: any weekday session
+    recs = {"spx_2026-10-30_084019Z": ("SPX", "2026-10-30", "2026-10-30T23:49:50Z", "closing", 27760, 27269),
+            f"spx_{s}_000705Z": ("SPX", s, "2026-11-02T23:52:05Z", "closing", 27753, 27262),
+            f"spx_{s}_073204Z": ("SPX", s, "2026-11-03T07:16:06Z", "gth", 28734, 27614),
+            f"vix_{s}_000706Z": ("VIX", s, "2026-11-02T23:52:06Z", "closing", 1519, 1394),
+            f"vix_{s}_073206Z": ("VIX", s, "2026-11-03T07:16:04Z", "gth", 1520, 1378)}
+    for stem, (und, sess, qt, state, rows, two) in recs.items():
+        (opts / f"{stem}.json").write_text(json.dumps(
+            {"underlying": und, "session": sess, "quote_time": qt, "book_state": state, "rows": rows,
+             "two_sided_rows": two, "expiries": 45}))
+    got = {c["underlying"]: c for c in dash.latest_cboe_captures(tmp_path)}
+    assert [b["file"] for b in got["SPX"]["books"]] == [f"spx_{s}_000705Z.json", f"spx_{s}_073204Z.json"]
+    assert got["SPX"]["file"] == f"spx_{s}_073204Z.json"            # the newest is still the newest
+
+    orig = dash.latest_cboe_captures
+    monkeypatch.setattr(dash, "latest_cboe_captures", lambda data_dir=None: orig(tmp_path))
+    row = _pipeline_books_text(_visible_text(dash.app.test_client().get("/").get_data(as_text=True)))
+    assert row == (f"SPX {s}: 27,753 lines (27,262 two-sided, 45 expiries), quotes 2026-11-02 23:52:05 UTC "
+                   "(closing book) and 28,734 lines (27,614 two-sided, 45 expiries), quotes 2026-11-03 "
+                   f"07:16:06 UTC (overnight book); VIX {s}: 1,519 lines (1,394 two-sided, 45 expiries), "
+                   "quotes 2026-11-02 23:52:06 UTC (closing book) and 1,520 lines (1,378 two-sided, 45 "
+                   "expiries), quotes 2026-11-03 07:16:04 UTC (overnight book)")
 
 
 def test_overview_pipeline_panel_prints_the_deploy_streak(dash, tmp_path, monkeypatch):
@@ -3853,12 +3969,13 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
         # (the bot's 2026-10-28 session: −0.180998 against −0.180999)
         assert [m[0] for m in mids] == pytest.approx([float(k) for k in q["k"]], abs=1e-6), s["name"]
         # a quote where the model has no IV (NaN in the residual table: a deep wing the
-        # model cannot price) is a gap in the series, not a point
+        # model cannot price, as the simulated 2026-11-02 Heston fit on four deep
+        # out-of-the-money puts of one-week expiries) is a gap in the series, not a point
         want = [float(v) * 100 if np.isfinite(v) else None for v in q["model_iv"]]
         got = [p[1] for p in s["data"]]
         assert [g is None for g in got] == [w is None for w in want], s["name"]
         priced = [w for w in want if w is not None]
-        assert [g for g in got if g is not None] == pytest.approx(priced, abs=1e-4)
+        assert [g for g in got if g is not None] == pytest.approx(priced, abs=1e-4), s["name"]
         assert [v for p in by[(e, "ba")]["data"] for v in p[1:]] == pytest.approx(
             [v for b, a in zip(q["bid_iv"], q["ask_iv"]) for v in (b * 100, a * 100)], abs=1e-5)
 
