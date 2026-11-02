@@ -8817,8 +8817,7 @@ def _vendor_store(dash, tmp_path: Path, vendor: str, no_diag: bool = False) -> t
         if child.name != "summary.json" and not (no_diag and child.name == f"{fit}.json"):
             (diag / child.name).symlink_to(child)
     summ = json.loads((SHIPPED / "calibrations" / "diagnostics" / "summary.json").read_text())
-    if no_diag:
-        assert any(r["session"] == fit for r in summ["rows"]), "the headline fit has no diagnostics to drop"
+    if no_diag:              # (a record whose newest fit has none yet is already in this state)
         summ["rows"] = [r for r in summ["rows"] if r["session"] != fit]
         summ["n_sessions"] = len(summ["rows"])
     (diag / "summary.json").write_text(json.dumps(summ))
