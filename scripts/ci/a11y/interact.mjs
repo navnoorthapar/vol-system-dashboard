@@ -318,7 +318,10 @@ async function checkLayout() {
             last = Math.max(last, el.getBoundingClientRect().bottom);
           });
           if (last === -Infinity) return;
-          const blank = p.getBoundingClientRect().bottom - last;
+          // a panel's feet (its chain's source line, where it is cited) are content too: the
+          // blank is what lies between the body's last content and the first of them
+          const foot = [...p.children].find(c => c.classList.contains('panel-foot') && vis(c));
+          const blank = (foot ? foot.getBoundingClientRect().top : p.getBoundingClientRect().bottom) - last;
           if (blank > maxBlank) blanks.push(`#${p.id} ends ${Math.round(blank)} px below its content`);
         });
         return { holes, blanks };

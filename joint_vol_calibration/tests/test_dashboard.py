@@ -9187,8 +9187,10 @@ _LAYOUT_JS = """([maxUnused, maxBlank, exempt]) => {
           || el.classList.contains('grow-col')) return;
       last = Math.max(last, el.getBoundingClientRect().bottom);
     });
-    if (last !== -Infinity && p.getBoundingClientRect().bottom - last > maxBlank)
-      blanks.push(p.id + ' ' + Math.round(p.getBoundingClientRect().bottom - last));
+    // a panel's feet (its chain's source line, where it is cited) are content too
+    const foot = [...p.children].find(c => c.classList.contains('panel-foot') && vis(c));
+    const end = foot ? foot.getBoundingClientRect().top : p.getBoundingClientRect().bottom;
+    if (last !== -Infinity && end - last > maxBlank) blanks.push(p.id + ' ' + Math.round(end - last));
   });
   return {holes, blanks};
 }"""
@@ -9204,7 +9206,8 @@ def test_browser_grid_rows_are_full_and_panels_end_with_their_content(site_brows
     the blank below the replication panel's closed disclosure (135 px at 1440)
     and the scenario grid's (111 px at 1920). Nor is a .grow-col box itself: it
     stretches to its panel, so only what it holds is content (counting it hid a
-    440 px smile in a 1,446 px panel)."""
+    440 px smile in a 1,446 px panel). A panel's feet (the chain's source line,
+    tier 0.2, and "Cited on") are content: the blank is measured to the first."""
     ctx, page = _page(site_browser, width, 900)
     try:
         for name in ("index.html", "surface.html", "calibration.html", "risk.html", "research.html",
