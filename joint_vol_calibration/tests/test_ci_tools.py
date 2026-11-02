@@ -180,6 +180,27 @@ def sim(monkeypatch):
     return _load("scripts/ci/simulate_next_session.py", "simulate_under_test", monkeypatch)
 
 
+# bot_alert.py's mistakes the forced-failure check must catch (each a change of the
+# repository's script): the 0.4 review's, run through the alert's own command line
+_FAILED_SET = 'FAILED = frozenset({"failure", "timed_out", "startup_failure"})'
+ALERT_MUTANTS = {
+    "alerts on a third failure": ("ALERT_AFTER = 2 ", "ALERT_AFTER = 3 "),
+    "alerts on one failure": ("ALERT_AFTER = 2 ", "ALERT_AFTER = 1 "),
+    "a success does not end the streak": ("        if c in SUCCEEDED:\n            break",
+                                          "        if c in SUCCEEDED:\n            continue"),
+    "a cancelled run counts as failed": (_FAILED_SET, _FAILED_SET.replace('"startup_failure"',
+                                                                          '"startup_failure", "cancelled"')),
+    "a second open issue": ("    if open_issues:\n", "    if False:\n"),
+    "main() drops the event": ("        res = alert(args.run_id, args.event,",
+                               "        res = alert(args.run_id, 'workflow_dispatch',"),
+    "main() alerts on nothing": ("    try:\n        res = alert(",
+                                 "    return 0\n    try:\n        res = alert("),
+    "the title loses the streak": ('title = title or f"Daily bot: {streak} scheduled runs failed in a row"',
+                                   'title = title or "Daily bot failed"'),
+    "a manual run reads the history": ('    if event != "schedule" and not all_events:', "    if False:"),
+}
+
+
 class TestSimulatedSession:
     def test_the_book_is_priced_off_the_headline_inside_the_box(self, sim):
         """PROD-8: the synthetic book was priced by the committed headline's own
@@ -325,63 +346,96 @@ class TestSimulatedSession:
 
     def test_a_forced_failure_fails_the_run_and_the_alert_opens_the_issue(self, tmp_path):
         """FUND_GRADE_PLAN 0.4: the failure alert was tested only on a fake history
-        (TestBotAlert), never after a run of the bot that failed. --force-fail runs
-        the close slot of the simulated next session in a copy of this checkout with
-        Yahoo's SPX download raising: the run must exit 1 on that outage with a
-        complete run record, and the copy's bot_alert.py, on a fake history (its gh
-        runner injected), must open the one bot-failure issue when the scheduled run
-        before also failed and do nothing when it succeeded. About 15 seconds."""
+        (TestBotAlert), never after a run of the bot that failed. --force-fail runs both
+        scheduled slots of the simulated next session in a copy of this checkout with
+        Yahoo's SPX download raising: each must exit 1 on that outage with a complete run
+        record, the book run (the one with the freeze step) must not be publishable, and
+        the copy's bot_alert.py, run through its command line with a fake gh first on
+        PATH answering from the two runs' own records, must open the one bot-failure
+        issue, comment on one already open, leave it alone when a success came between,
+        and not read GitHub on a manual run. About two minutes."""
         r = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "simulate_next_session.py"),
                             "--force-fail", "--out", str(tmp_path)], capture_output=True, text=True,
                            timeout=900, check=False)
         assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
         report = (tmp_path / "report.md").read_text()
-        assert "| bot run (forced failure: Yahoo's SPX download raises) | 1 |" in report
+        assert "| bot runs (forced failure: Yahoo's SPX download raises in both slots) | 1 |" in report
+        assert "close exit 1, book exit 1, publishable False" in report
         assert "simulated outage (--force-fail)" in report
-        assert "created issue" in report
-        assert "(streak 2, label bot-failure)" in report
-        assert "| failure alert (the run before succeeded) | 0 | None | none (streak 1) |" in report
+        assert ("| failure alert (two failed in a row) | 0 | None | created issue "
+                "https://github.invalid/issues/1 (streak 2; 4 gh calls) |") in report
+        assert "| failure alert (an issue already open) | 0 | None | commented issue 7 (streak 2;" in report
+        assert "| failure alert (a success between) | 0 | None | none (streak 1; 1 gh calls) |" in report
+        assert "| failure alert (a manual run) | 0 | None | none (streak None; 0 gh calls) |" in report
         assert "PROBLEM" not in report
         st = json.loads((tmp_path / "status.json").read_text())
         assert st["exit_code"] == 1
         assert st["simulated"]["force_fail"] is True
+        assert "freeze" in st["steps"]
         assert not (tmp_path / "tree").exists()                       # removed when it passes
 
+    @staticmethod
+    def _failed_runs(sim, root: Path) -> tuple[dict, dict]:
+        """Two scheduled runs failed on the forced outage, as the slots record them: the
+        close run, then the book run (with the freeze step, not publishable)."""
+        (root / "data_store" / "runs").mkdir(parents=True)
+        why = f"SPX OHLCV download failed: {sim.OUTAGE}"
+        sts = {}
+        for slot, utc, steps in (("close", "2026-11-02T23:07:00+00:00", ["market", "labels"]),
+                                 ("book", "2026-11-03T03:30:00+00:00",
+                                  ["market", "capture", "calibrate", "freeze"])):
+            sts[slot] = {"run_utc": utc, "exit_code": 1, "publishable": False, "errors": [why],
+                         "publish_blockers": [why], "steps": steps}
+            (root / "data_store" / "runs" / f"run_{utc[:10]}_{slot}.json").write_text(json.dumps(
+                {"slot": slot, "run_utc": utc, "complete": True, "exit_code": 1, "calibration": None}))
+        return sts["close"], sts["book"]
+
     def test_the_forced_failure_check_fails_when_the_run_or_the_alert_does_not(self, sim, tmp_path):
-        """The checks behind --force-fail, on a hand-made failed run: they pass with
-        the repository's bot_alert.py and fail when the run did not fail, when it
-        failed on something else, without its run record, or when the alert would
-        wait for a third failure or open an issue after one."""
+        """The checks behind --force-fail, on hand-made failed runs: they pass with the
+        repository's bot_alert.py and fail when the book run did not fail, failed on
+        something else, could be published, or has no run record."""
         import shutil
         (tmp_path / "scripts" / "ci").mkdir(parents=True)
-        script = tmp_path / "scripts" / "ci" / "bot_alert.py"
-        shutil.copy(ROOT / "scripts" / "ci" / "bot_alert.py", script)
-        (tmp_path / "data_store" / "runs").mkdir(parents=True)
-        run_utc = "2026-11-02T23:07:00+00:00"
-        st = {"run_utc": run_utc, "exit_code": 1, "publishable": False,
-              "errors": [f"SPX OHLCV download failed: {sim.OUTAGE}"]}
-        assert len(sim.force_fail_problems(1, st, tmp_path)[0]) == 1          # no run record
-        (tmp_path / "data_store" / "runs" / "run_x_close.json").write_text(json.dumps(
-            {"slot": "close", "run_utc": run_utc, "complete": True, "exit_code": 1, "calibration": None}))
-        problems, rows = sim.force_fail_problems(1, st, tmp_path)
+        shutil.copy(ROOT / "scripts" / "ci" / "bot_alert.py", tmp_path / "scripts" / "ci" / "bot_alert.py")
+        close, book = self._failed_runs(sim, tmp_path)
+        work = tmp_path / "alert"
+        problems, rows = sim.force_fail_problems(1, book, tmp_path, close, work)
         assert problems == []
         assert [r[3] for r in rows] == [
-            "created issue https://github.invalid/issues/1 (streak 2, label bot-failure)", "none (streak 1)"]
-        assert sim.force_fail_problems(0, {**st, "exit_code": 0}, tmp_path)[0][0].startswith(
-            "the forced failure did not fail the run")
-        assert sim.force_fail_problems(1, {**st, "errors": ["freeze failed"]}, tmp_path)[0][0].startswith(
-            "the run failed, but not on the forced outage")
-        src = script.read_text()
+            "created issue https://github.invalid/issues/1 (streak 2; 4 gh calls)",
+            "commented issue 7 (streak 2; 3 gh calls)", "none (streak 1; 1 gh calls)",
+            "none (streak None; 0 gh calls)"]
+        # the issue names both failed runs, and the fake gh, not the real one, was called
+        log = work / "two_failed_in_a_row" / "gh_calls.jsonl"
+        calls = [json.loads(ln) for ln in log.read_text().splitlines() if ln]
+        body = calls[-1][calls[-1].index("--body") + 1]
+        assert "actions/runs/9000000" in body
+        assert "actions/runs/9000001" in body
+        assert sim.force_fail_problems(0, {**book, "exit_code": 0}, tmp_path, close, work)[0][0].startswith(
+            "the forced failure did not fail the book run")
+        assert sim.force_fail_problems(1, {**book, "errors": ["freeze failed"]}, tmp_path, close, work)[0][
+            0].startswith("the book run did not fail on the forced outage")
+        published = sim.force_fail_problems(1, {**book, "publishable": True}, tmp_path, close, work)[0]
+        assert published[0].startswith("the failed book run is publishable")
+        (tmp_path / "data_store" / "runs" / "run_2026-11-03_book.json").unlink()
+        assert sim.force_fail_problems(1, book, tmp_path, close, work)[0][0].startswith(
+            "0 book run record(s)")
 
-        def edit(new):                 # same size and second as the cached bytecode: drop it
-            script.write_text(new)
-            shutil.rmtree(script.parent / "__pycache__", ignore_errors=True)
-        edit(src.replace("ALERT_AFTER = 2 ", "ALERT_AFTER = 3 "))
-        assert sim.force_fail_problems(1, st, tmp_path)[0][0].startswith(
-            "two failed scheduled runs in a row did not open one issue")
-        edit(src.replace("ALERT_AFTER = 2 ", "ALERT_AFTER = 1 "))
-        assert any(x.startswith("one failed run opened or touched an issue")
-                   for x in sim.force_fail_problems(1, st, tmp_path)[0])
+    @pytest.mark.parametrize("mutant", list(ALERT_MUTANTS))
+    def test_the_forced_failure_check_catches_a_wrong_alert(self, sim, tmp_path, mutant):
+        """Each mistake of bot_alert.py in ALERT_MUTANTS, in a copy of the script,
+        makes the forced-failure check report a problem. Two of the review's are left
+        out as they change nothing gh can show: counting manual runs (the history is
+        read with --event schedule, so none is listed) and counting the run itself (it
+        is in progress while its last step runs)."""
+        (tmp_path / "scripts" / "ci").mkdir(parents=True)
+        src = (ROOT / "scripts" / "ci" / "bot_alert.py").read_text()
+        old, new = ALERT_MUTANTS[mutant]
+        assert src.count(old) == 1, mutant
+        (tmp_path / "scripts" / "ci" / "bot_alert.py").write_text(src.replace(old, new))
+        close, book = self._failed_runs(sim, tmp_path)
+        problems, _ = sim.force_fail_problems(1, book, tmp_path, close, tmp_path / "alert")
+        assert problems, mutant
 
     def test_a_replayed_book_has_the_state_its_quote_time_gives(self, sim):
         """The simulated 2026-10-30 session (a Friday) failed the data gate: the replay
