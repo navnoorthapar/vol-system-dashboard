@@ -154,6 +154,36 @@ def session_captures(session: str, underlying: str = "SPX") -> list:
     return sorted(out, key=_fetched, reverse=True)
 
 
+def closing_book_refusal(session: str) -> str | None:
+    """Why the job did not store ``session``'s closing SPX book, as its run
+    records say (data_store/runs/run_*.json, scripts/cloud_refresh.py
+    run_record): the reason of the newest run of the closebook step alone (the
+    close slot's steps: "closebook" without "capture") whose capture is of
+    ``session`` and whose SPX capture was "rejected" (it failed the quote-state
+    gate, was empty or was another session's book) or "failed". None when no
+    such run says so: the close slot stored the book, did not run, or ran once
+    the feed showed the Global Trading Hours book ("skipped"). data_store/ is
+    the parent of database.OPTIONS_DIR."""
+    import json
+
+    runs = Path(db.OPTIONS_DIR).parent / "runs"
+    found = []
+    for p in sorted(runs.glob("run_*.json")) if runs.is_dir() else []:
+        try:
+            rec = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("schema") != "run_ledger/1":
+            continue
+        steps = rec.get("steps") or []
+        capt = rec.get("capture") or {}
+        spx = (capt.get("captures") or {}).get("SPX") or {}
+        if ("closebook" in steps and "capture" not in steps and str(capt.get("session")) == session
+                and spx.get("status") in ("rejected", "failed") and spx.get("reason")):
+            found.append((str(rec.get("run_utc")), str(spx["reason"])))
+    return max(found)[1] if found else None
+
+
 def captured_sessions(underlying: str = "SPX") -> list:
     """Every session with a stored Cboe capture of ``underlying``, newest first."""
     names = (p.name for p in _book_files(f"{underlying.lower()}_*.parquet"))
@@ -289,7 +319,8 @@ def select_session_chain(session: str, spot: float, r_clean, *,
             "raw_sha256": side.get("sha256"), "book_state": side.get("book_state"),
             "fetched_at": side.get("fetched_at"), "capture_rows": side.get("rows"),
             "capture_two_sided_rows": side.get("two_sided_rows"), "refused": refused,
-            "closing_books": n_closing}
+            "closing_books": n_closing,
+            "closing_book_refusal": None if n_closing else closing_book_refusal(session)}
     if source == "cboe":
         raise ValueError(f"no stored Cboe book of {session} passes the quote-state gates"
                          + (f": {'; '.join(refused)}" if refused else ""))
@@ -307,7 +338,8 @@ def select_session_chain(session: str, spot: float, r_clean, *,
         "source_reason": f"{why}; the session's Yahoo chain (the calibration's download) is the fallback",
         "chain": f"data_store/options/spx_{session}.parquet", "chain_sha256": file_sha256(path),
         "raw_sha256": None, "book_state": None, "fetched_at": None, "refused": refused,
-        "closing_books": n_closing}
+        "closing_books": n_closing,
+        "closing_book_refusal": None if n_closing else closing_book_refusal(session)}
 
 
 def read_stored_chain(session: str, underlying: str = "SPX") -> pd.DataFrame:

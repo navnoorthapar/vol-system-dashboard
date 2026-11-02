@@ -2029,6 +2029,7 @@ OVERNIGHT_NOTE_VERSION = 6          # the report_version that writes it
 OVERNIGHT_WHY_NONE = ("(no closing book of the session is stored: Cboe's delayed feed shows it only until "
                       "Global Trading Hours open at 20:15 ET)")
 OVERNIGHT_WHY_FAILED = "(the session's closing book did not pass the quote-state gates)"
+OVERNIGHT_WHY_REFUSED = "(the job did not store the session's closing book: {})"
 
 
 def overnight_note(a: Audit, c: Ctx, lis: list[Tag]) -> None:
@@ -2036,7 +2037,9 @@ def overnight_note(a: Audit, c: Ctx, lis: list[Tag]) -> None:
     when the book was quoted and how many hours after the session's Cboe close, rebuilt
     from surface.json's record of the chain (its quote time) and this audit's calendar
     (16:15 ET, 13:15 on an NYSE early close). From report_version 6, which wrote it, the
-    note is there exactly when this audit's clock rules make the chain an overnight book."""
+    note is there exactly when this audit's clock rules make the chain an overnight book, and
+    its reason for not using a closing book follows the stored books and the close slot's
+    run records."""
     mine = [li for li in lis if text_of(li).startswith(OVERNIGHT_NOTE)]
     version = c.vx.get("report_version")
     if not mine and not (isinstance(version, int) and version >= OVERNIGHT_NOTE_VERSION):
@@ -2057,13 +2060,21 @@ def overnight_note(a: Audit, c: Ctx, lis: list[Tag]) -> None:
     m = re.search(r"ET, (\S+) hours after", text_of(li))
     a.num(P_VIX, "overnight-book note: hours from the Cboe close to the book's quote time", m.group(1) if m
           else None, (at - close).total_seconds() / 3600.0)
-    # why no closing book was used: none of the session is stored, or it failed the gates
+    # why no closing book was used: it failed the gates, or none of the session is stored,
+    # because the close slot did not store the one it fetched (its run record's reason) or
+    # it had none to fetch
     stored = M.closing_books(c.store, c.session)
+    refusal = None if stored else M.closing_book_refusal(c.store, c.session)
     if "closing_books" in inp:
         a.equal(P_VIX, "surface.json closing_books = the session's stored closing books (this audit's clock)",
                 inp.get("closing_books"), stored)
+    if "closing_book_refusal" in inp:
+        a.equal(P_VIX, "surface.json closing_book_refusal = the close slot's run record (data_store/runs)",
+                inp.get("closing_book_refusal"), refusal)
     a.text(P_VIX, "overnight-book note: why no closing book was used (the stored records)", li,
-           OVERNIGHT_WHY_FAILED if stored else OVERNIGHT_WHY_NONE, contains=True)
+           OVERNIGHT_WHY_FAILED if stored else
+           OVERNIGHT_WHY_REFUSED.format(refusal.rstrip(".")) if refusal else OVERNIGHT_WHY_NONE,
+           contains=True)
 
 
 def near_next_notes(a: Audit, c: Ctx, lis: list[Tag]) -> None:

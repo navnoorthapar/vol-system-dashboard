@@ -756,6 +756,30 @@ def closing_books(store: Store, session: str) -> int:
     return n
 
 
+def closing_book_refusal(store: Store, session: str) -> str | None:
+    """Why the job did not store ``session``'s closing SPX book, from its run records
+    (data_store/runs/run_*.json, schema run_ledger/1): the newest run (by run_utc) of the
+    close slot's step alone ("closebook" in its steps, "capture" not) whose capture is of
+    ``session`` and whose SPX capture is "rejected" or "failed", its recorded reason; None
+    when no record says so."""
+    runs = store.root / "runs"
+    found: list[tuple[str, str]] = []
+    for path in sorted(runs.glob("run_*.json")) if runs.is_dir() else []:
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("schema") != "run_ledger/1":
+            continue
+        steps = rec.get("steps") or []
+        capt = rec.get("capture") or {}
+        spx = (capt.get("captures") or {}).get("SPX") or {}
+        if ("closebook" in steps and "capture" not in steps and str(capt.get("session")) == session
+                and spx.get("status") in ("rejected", "failed") and spx.get("reason")):
+            found.append((str(rec.get("run_utc")), str(spx["reason"])))
+    return max(found)[1] if found else None
+
+
 def fit_left_the_closing_book(downloaded: str | None, session: str) -> bool | None:
     """Whether a chain downloaded at ``downloaded`` (UTC) holds quotes from after the
     session's closing book gave way to the next session's Global Trading Hours book

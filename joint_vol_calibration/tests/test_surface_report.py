@@ -593,6 +593,60 @@ def test_a_sessions_closing_book_is_preferred_to_its_later_overnight_book(tmp_pa
     assert out["surface"]["inputs"]["closing_books"] == 1
 
 
+def test_a_session_whose_closing_book_the_close_slot_did_not_store_says_why(tmp_path, monkeypatch):
+    """Minor 2 of the 0.8 check: the close slot does not store a closing book that
+    fails the quote-state gate (an emptied or one-sided book), and records why in its
+    run record. The session is then built from its overnight book, and the note said
+    no closing book is stored because the delayed feed shows it only until Global
+    Trading Hours open: a timing reason, where the record says the book was caught and
+    refused. The note now gives the reason of the newest run of the close slot's step
+    alone (closebook without capture) that did not store the session's SPX book, and
+    surface.json records it for the audit. A book slot's refusal, a close slot that
+    found the feed already on the overnight book ("skipped") and another session's
+    record leave the timing reason."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    gth = "2026-10-19T02:30:00Z"            # Sun 22:30 ET: GTH for Monday, after Friday SESSION
+    _capture_store(tmp_path, monkeypatch, gth, book_state="gth")
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    why = ("not a live book (12% of near-ATM lines two-sided): 400 near-ATM lines, the quote-state gate "
+           "needs 80% two-sided")
+
+    def record(name, run_utc, steps, session, status, reason):
+        (runs / f"run_{name}.json").write_text(json.dumps({
+            "schema": "run_ledger/1", "run_utc": run_utc, "steps": steps,
+            "capture": {"session": session, "status": "failed", "captures": {
+                "SPX": {"status": status, "reason": reason},
+                "VIX": {"status": "captured", "file": f"vix_{session}_220705Z.parquet"}}}}))
+
+    close = ["market", "labels", "closebook"]
+    record("1", "2026-10-16T22:07:05+00:00", close, SESSION, "rejected", why)
+    record("2", "2026-10-17T00:30:00+00:00", close, SESSION, "skipped", "the feed's SPX book is the gth book")
+    record("3", "2026-10-19T02:30:00+00:00", ["market", "capture", "calibrate", "freeze"], SESSION,
+           "rejected", "empty chain")
+    record("4", "2026-10-15T22:07:05+00:00", close, "2026-10-15", "rejected", "empty chain")
+    sq = sqm.load_session_quotes(SESSION)
+    assert sq.inputs["book_state"] == "gth"
+    assert sq.inputs["closing_books"] == 0
+    assert sq.inputs["closing_book_refusal"] == why
+    out = report.run_session(SESSION, models=["essvi"])
+    assert out["surface"]["inputs"]["closing_book_refusal"] == why
+    notes = out["vix_replication"]["gap_notes"]
+    lead = "The book is the overnight (Global Trading Hours) book "
+    assert sum(n.startswith(f"{lead}(the job did not store the session's closing book: {why}), quoted at ")
+               for n in notes) == 1
+    assert not any("Cboe's delayed feed shows it only" in n for n in notes)
+    # no record says the close slot refused the book: the timing reason, as before
+    (runs / "run_1.json").unlink()
+    sq = sqm.load_session_quotes(SESSION)
+    assert sq.inputs["closing_book_refusal"] is None
+    notes = report.run_session(SESSION, models=["essvi"])["vix_replication"]["gap_notes"]
+    assert sum(n.startswith(f"{lead}(no closing book of the session is stored: Cboe's delayed feed shows it "
+                            "only until Global Trading Hours open at 20:15 ET), quoted at ")
+               for n in notes) == 1
+
+
 def test_a_closing_book_in_the_private_store_is_found(tmp_path, monkeypatch):
     """FUND_GRADE_PLAN 0.8 with the private book store (DATA_SOURCES.md): the close
     slot's run moves its closing book to the private repository when it ends, so the

@@ -1013,6 +1013,73 @@ class TestRecomputeAudit:
             {"underlying": "SPX", "session": session, "quote_time": "2026-10-29T21:52:05Z"}))
         assert failed(1) == []
 
+    def test_it_rebuilds_the_close_slots_reason_for_storing_no_closing_book(self, monkeypatch, tmp_path):
+        """Minor 2 of the 0.8 check: a session whose closing book the close slot fetched
+        and refused (the quote-state gate) is built from its overnight book, and the note
+        said no closing book is stored because of the feed's hours, while the run record
+        says the book was caught and refused; the audit, counting stored books only,
+        agreed. The note now gives the run record's reason, and the audit rebuilds it from
+        data_store/runs itself: the newest run of the close slot's step alone that did not
+        store the session's SPX book. It checks surface.json's record of it too."""
+        import html
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+
+        from joint_vol_calibration.surface import report as R
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        M = importlib.import_module("recompute.surface_math")
+        root = tmp_path / "data_store"
+        (root / "options" / "cboe").mkdir(parents=True)
+        (root / "runs").mkdir()
+        store = rc.data.Store(root)
+        session, quoted = "2026-10-29", "2026-10-30T08:36:08Z"   # Fri 04:36 ET: the overnight book
+        why = "not a live book (31% of near-ATM lines two-sided): 52 near-ATM lines"
+
+        def record(name, run_utc, steps, status, reason, sess=session):
+            (root / "runs" / f"run_{name}.json").write_text(json.dumps({
+                "schema": "run_ledger/1", "run_utc": run_utc, "steps": steps,
+                "capture": {"session": sess, "captures": {"SPX": {"status": status, "reason": reason}}}}))
+
+        close = ["market", "labels", "closebook"]
+        record("a", "2026-10-29T22:07:05+00:00", close, "rejected", why)
+        record("b", "2026-10-30T02:30:00+00:00", ["market", "capture", "calibrate", "freeze"], "rejected",
+               "empty chain")                                       # the book slot's: not the close slot
+        record("c", "2026-10-29T23:00:00+00:00", close, "skipped", "the feed shows the gth book")
+        record("d", "2026-10-28T22:07:05+00:00", close, "failed", "OSError: x", sess="2026-10-28")
+        assert M.closing_book_refusal(store, session) == why
+        assert M.closing_book_refusal(store, "2026-10-28") == "OSError: x"
+        assert M.closing_book_refusal(store, "2026-10-27") is None
+
+        def failed(refusal, note=None):
+            inputs = {"source": "cboe", "quote_time": quoted, "book_state": "gth", "closing_books": 0,
+                      "closing_book_refusal": refusal}
+            if note is None:                                         # the note the producer writes
+                sq = types.SimpleNamespace(session=session, inputs=inputs,
+                                           clean_diagnostics={"quote_time": quoted})
+                note = R._timing_note(sq, *R._calc_time_ny(sq))
+            ctx = types.SimpleNamespace(vx={"report_version": R.REPORT_VERSION}, session=session,
+                                        sj={"inputs": inputs}, store=store)
+            a = rc.core.Audit("t", BeautifulSoup(f"<ul><li>{html.escape(str(note))}</li></ul>", "lxml"))
+            S.overnight_note(a, ctx, a.soup.select("li"))
+            return [c.label for c in a.checks if not c.ok]
+
+        reason = "overnight-book note: why no closing book was used (the stored records)"
+        record_ = "surface.json closing_book_refusal = the close slot's run record (data_store/runs)"
+        assert failed(why) == []
+        # the timing reason where the record says the book was refused
+        timing = ("The book is the overnight (Global Trading Hours) book " + S.OVERNIGHT_WHY_NONE
+                  + ", quoted at 2026-10-30 04:36 ET, 12.4 hours after the 16:15 ET print of 2026-10-29 "
+                  "it is compared with: the gap mixes the replication's error with the market's move "
+                  "overnight.")
+        assert failed(why, timing) == [reason]
+        assert failed(None) == [record_, reason]                     # surface.json lost the reason
+        (root / "runs" / "run_a.json").unlink()                      # no record of the refusal
+        assert failed(None) == []
+        assert failed(None, timing) == []
+
     def test_it_rebuilds_the_heston_rows_fit_time_clause_from_the_fits_record(self, monkeypatch, tmp_path):
         """FUND_GRADE_PLAN 0.8: a session scored on its closing book whose Heston fit was
         made on a chain downloaded after that book gave way says so in the Heston row,
