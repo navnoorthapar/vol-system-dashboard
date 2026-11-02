@@ -279,6 +279,32 @@ def file_sha256(path: Path) -> str | None:
     return h.hexdigest()
 
 
+def unreadable_closing_book(session: str, readable: set) -> None:
+    """Raise FileNotFoundError when a manifest (data_store/options/cboe_manifest,
+    the public record of a book held in the private store) records a closing
+    SPX book of ``session`` that is not among the books this run can read
+    (``readable``: their parquet file names): the private store was not checked
+    out, or its clone failed. Building the session from its other books would
+    put the overnight book where the record holds the closing one, and the
+    surface would be committed and never rebuilt, so the session is not built
+    (it fails closed; a later run with the store builds it)."""
+    import json
+
+    from joint_vol_calibration.data import cboe_downloader as cd
+
+    for mp in sorted(cd.manifest_dir(Path(db.OPTIONS_DIR).parent).glob(f"spx_{session}_*.json")):
+        try:
+            rec = json.loads(mp.read_text())
+        except (OSError, ValueError):
+            continue
+        if (isinstance(rec, dict) and rec.get("book_state") == CLOSING_BOOK
+                and f"{mp.stem}.parquet" not in readable):
+            raise FileNotFoundError(
+                f"the closing book {mp.stem} of {session} is held in the private store (its manifest "
+                f"options/cboe_manifest/{mp.name}) and this run cannot read it: not building the session "
+                "from another book")
+
+
 def select_session_chain(session: str, spot: float, r_clean, *,
                          source: str = "auto") -> tuple:
     """(raw, clean, inputs): the chain ``session``'s surface is built from.
@@ -307,6 +333,8 @@ def select_session_chain(session: str, spot: float, r_clean, *,
     caps = sorted(session_captures(session) if source != "yahoo" else [],
                   key=lambda c: c[1].get("book_state") != CLOSING_BOOK)
     n_closing = sum(c[1].get("book_state") == CLOSING_BOOK for c in caps)
+    if source != "yahoo":
+        unreadable_closing_book(session, {p.name for p, _ in caps})
     for path, side in caps:
         label = f"options/cboe/{path.name}"
         try:

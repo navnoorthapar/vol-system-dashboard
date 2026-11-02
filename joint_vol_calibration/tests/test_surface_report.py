@@ -714,6 +714,42 @@ def test_a_closing_book_is_one_whose_underlying_last_traded_by_the_close(tmp_pat
     assert any("(the session's closing book did not pass the quote-state gates)" in n for n in notes)
 
 
+def test_a_closing_book_held_privately_that_this_run_cannot_read_builds_nothing(tmp_path, monkeypatch):
+    """w5 review, minor 2: with the private book store, a failed clone at the start of
+    a book slot left CBOE_BOOKS_DIR empty, and the session's surface was built from its
+    overnight book although its manifest records the closing book held privately; a
+    later run with the store does not rebuild a surface that exists. Such a session now
+    fails closed: it is not built from another book, and why is the refusal the
+    backfill logs. An overnight book's manifest does not stop it."""
+    from joint_vol_calibration.data import cboe_downloader as cd
+    from joint_vol_calibration.surface import quotes as sqm
+
+    gth = "2026-10-19T02:30:00Z"            # Sun 22:30 ET: GTH for Monday, after Friday SESSION
+    path, _ = _capture_store(tmp_path, monkeypatch, gth, book_state="gth")
+    closing = _second_capture(path, f"spx_{SESSION}_221000Z", "2026-10-16T21:55:00Z", "closing",
+                              "2026-10-16T22:10:00Z")
+    man = cd.manifest_dir(tmp_path)
+    man.mkdir(parents=True)
+    side = json.loads(closing.with_suffix(".json").read_text())
+    (man / f"{closing.stem}.json").write_text(json.dumps({"schema": cd.MANIFEST_SCHEMA, "stem": closing.stem,
+                                                          **side}))
+    private = tmp_path / "private" / "options" / "cboe"
+    private.mkdir(parents=True)
+    for f in (closing, closing.with_suffix(".json")):
+        f.rename(private / f.name)
+    monkeypatch.delenv(cd.BOOKS_DIR_ENV, raising=False)       # the clone failed: no private store
+    held = f"the closing book {closing.stem} of {SESSION} is held in the private store"
+    with pytest.raises(FileNotFoundError, match=held):
+        sqm.load_session_quotes(SESSION)
+    assert sqm.cboe_book_refusal(SESSION).startswith(f"the closing book {closing.stem} of {SESSION}")
+    monkeypatch.setenv(cd.BOOKS_DIR_ENV, str(private))       # the store is there: the closing book
+    assert sqm.load_session_quotes(SESSION).inputs["book_state"] == "closing"
+    # a manifest of an overnight book this run cannot read leaves the session's own books
+    (man / f"{closing.stem}.json").write_text(json.dumps({**side, "book_state": "gth"}))
+    monkeypatch.delenv(cd.BOOKS_DIR_ENV)
+    assert sqm.load_session_quotes(SESSION).inputs["book_state"] == "gth"
+
+
 def test_a_closing_book_in_the_private_store_is_found(tmp_path, monkeypatch):
     """FUND_GRADE_PLAN 0.8 with the private book store (DATA_SOURCES.md): the close
     slot's run moves its closing book to the private repository when it ends, so the
