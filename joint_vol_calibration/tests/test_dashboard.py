@@ -10689,20 +10689,57 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
     assert n >= 3 * len(specs[0][1]["quotes"]["groups"]) * len(specs[0][1]["quotes"]["models"])
 
 
-def test_quote_inspector_footnote_names_the_chain_and_its_quote_time(dash, pages):
-    """The tooltip's footnote is the chain's own source and quote time (surface.json),
-    'Yahoo close, no quote time' for a Yahoo snapshot without one. Each smile's chain
-    is its page's: the newest surface session's on Surface, the headline fit's on
-    Calibration (a newer session without a fit has another book and quote time)."""
-    for route, spec in _smile_specs(pages):
-        sj = json.loads((_smile_chain(dash, route) / "surface.json").read_text())
+def _check_quote_footnotes(dash, pages: dict, chain_dirs: dict[str, Path]) -> int:
+    """Each smile's quote-inspector footnote against the record of its chain
+    (``chain_dirs``: the surface session directory each route's smiles are drawn from):
+    quote_source_note of its surface.json. A Yahoo chain without a quote time is a
+    download named by its fetch time when the record holds one (every bot chain since
+    QUANT-01), and 'Yahoo close, no quote time' only when it holds none (the C23 close
+    snapshots). Returns the number of smiles checked."""
+    n = 0
+    for route, spec in [("/surface", _raw_specs(pages["/surface"])["chart-slices"])] + [
+            ("/calibration", s) for cid, s in _raw_specs(pages["/calibration"]).items()
+            if cid.startswith("chart-smile-") and s.get("quotes")]:
+        sj = json.loads((chain_dirs[route] / "surface.json").read_text())
         want = dash.quote_source_note(sj)
-        inp = sj.get("inputs") or {}
+        inp, uni = sj.get("inputs") or {}, sj.get("universe") or {}
         if str(inp.get("source")).lower() in ("yfinance", "yahoo") and not inp.get("quote_time"):
-            assert want == "Yahoo close, no quote time"
+            fetched = inp.get("fetched_at") or uni.get("fetched_at")
+            if fetched:
+                at = pd.Timestamp(str(fetched)).tz_convert("UTC")
+                assert want.startswith(f"Yahoo download, fetched {at:%Y-%m-%d %H:%M} UTC; "
+                                       "Yahoo reports no quote times"), (route, want)
+            else:
+                assert want == "Yahoo close, no quote time", (route, want)
         assert spec["quotes"]["source"] == want, route
+        n += 1
+    return n
+
+
+def test_quote_inspector_footnote_names_the_chain_and_its_quote_time(dash, pages):
+    """The tooltip's footnote is the chain's own source and quote time (surface.json):
+    a Yahoo download's fetch time, 'Yahoo close, no quote time' only for a Yahoo chain
+    that records none. Each smile's chain is its page's: the newest surface session's on
+    Surface, the headline fit's on Calibration (a newer session without a fit has another
+    book and quote time). The badge test's views run it on a Yahoo-built newest session
+    too (test_quote_inspector_footnote_names_the_chain_in_every_chain_view)."""
+    assert _check_quote_footnotes(dash, pages, {r: _smile_chain(dash, r)
+                                                for r in ("/surface", "/calibration")})
     assert dash.quote_source_note({"inputs": {"source": "cboe", "quote_time": "2026-10-16T15:45:00"}}) \
         == "Cboe, quotes at 2026-10-16 15:45:00"
+
+
+def test_quote_inspector_footnote_names_the_chain_in_every_chain_view(dash, chain_view):
+    """The footnote check above, on the pages of the badge test's views: the newest
+    surface built from a Yahoo download (the bot's state when both book slots fail to
+    get a Cboe book), from Cboe books, and with the newest fit's diagnostics missing.
+    It expected 'Yahoo close, no quote time' of every Yahoo chain without a quote time,
+    so the presentation gate failed whenever the newest surface was a Yahoo download,
+    which the page names by its fetch time."""
+    data = chain_view["data"]
+    dirs = {"/surface": data / "surface" / dash.artifacts.surface_sessions(data)[-1],
+            "/calibration": data / "surface" / chain_view["fit"]}
+    assert _check_quote_footnotes(dash, chain_view["pages"], dirs)
 
 
 def test_smile_series_hold_no_raw_series_name_in_their_legend(pages):
