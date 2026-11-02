@@ -1265,15 +1265,24 @@ class TestRecomputeAudit:
             ov.check_pipeline_books(a, rc.data.Store(root), a.soup.select_one("td"))
             return [c.label for c in a.checks if not c.ok]
 
-        closing = "7 lines (6 two-sided, 2 expiries), quotes 2026-11-02 23:52:05 UTC (closing book)"
-        overnight = "8 lines (7 two-sided, 2 expiries), quotes 2026-11-03 07:16:06 UTC (overnight book)"
+        # each book names its chain (tier 0.2): Cboe, its quote time, the share of its lines
+        # two-sided (6 of 7; the manifest's book, held privately, by its record: 7 of 8)
+        closing = ("7 lines (6 two-sided, 2 expiries), Cboe, quotes at 2026-11-02 23:52 UTC, 85.7% of its "
+                   "lines two-sided (closing book)")
+        overnight = ("8 lines (7 two-sided, 2 expiries), Cboe, quotes at 2026-11-03 07:16 UTC, 87.5% of its "
+                     "lines two-sided (overnight book)")
+        counts = "Cboe option books (counts from the stored quotes; each book's chain)"
         assert failed(f"SPX {s}: {closing} and {overnight}") == []
         assert failed(f"SPX {s}: {overnight}") == [            # the closing book left out
-            "Cboe option books (counts from the stored quotes)",
-            "Cboe option books (counts from the stored quotes): dates",
-            f"SPX {s}: every book of the session named", "SPX book 1: named by its recorded state (closing)"]
+            counts, f"{counts}: dates", f"SPX {s}: every book of the session named",
+            "SPX book 1: named by its recorded state (closing)", "SPX book 1: its chain (tier 0.2)"]
         assert "SPX book 2: named by its recorded state (gth)" in failed(
             f"SPX {s}: {closing} and {overnight.replace('(overnight book)', '(closing book)')}")
+        # a book that names another share of its lines two-sided, or no chain at all
+        assert "SPX book 2: its chain (tier 0.2)" in failed(f"SPX {s}: {closing} and "
+                                                            f"{overnight.replace('87.5%', '97.5%')}")
+        bare = closing.replace(", Cboe, quotes at 2026-11-02 23:52 UTC, 85.7% of its lines two-sided", "")
+        assert "SPX book 1: its chain (tier 0.2)" in failed(f"SPX {s}: {bare} and {overnight}")
 
     def test_it_leaves_a_model_the_scorecard_did_not_score_off_the_page(self, monkeypatch):
         """A session's surface is built whatever its Heston fit did (CITSEC-05); with no
