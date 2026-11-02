@@ -13,7 +13,7 @@
 flask>=3.0,<4
 numpy>=2.0,<3
 pandas>=3.0,<4
-pyarrow>=17.0
+pyarrow>=26.0.0
 scipy>=1.11,<2
 scikit-learn>=1.6,<2
 # Same `xgboost` module; on Linux the -cpu build skips the ~350 MB NCCL wheel.
@@ -21,7 +21,7 @@ xgboost>=3.0,<4; sys_platform != "linux"
 xgboost-cpu>=3.0,<4; sys_platform == "linux"
 hmmlearn>=0.3,<0.4
 matplotlib>=3.7,<4
-requests>=2.31,<3
+requests>=2.34.2,<3
 yfinance>=0.2.54,<2
 # Needed at runtime: the dashboard's backtest page unpickles TradeRecord, whose
 # import chain reaches models/nn_pricer.py (imports torch at module level).
