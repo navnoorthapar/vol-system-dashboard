@@ -29,6 +29,7 @@ import pandas as pd
 from bs4 import Tag
 
 from . import overview_math as om
+from . import surface_math as SM
 from .core import DATE, Audit, norm, numbers_in, rounds_to, text_of
 from .data import Store, book_short, chain_stamp, chain_words, fit_chain_inputs, sessions_between
 
@@ -715,6 +716,39 @@ def check_findings(a: Audit, store: Store, f: Facts) -> None:
                 if isinstance(p_, str) and p_.startswith((" Chain: ", " Fit chain: ")):
                     says(a, P_FIND, f"{href}: its chains", li, p_.strip(), True)
     check_finding_words(a, f)
+    check_replication_book(a, store)
+
+
+# FUND_GRADE_PLAN 0.8: the book the VIX replication's gap was taken on, as the finding
+# names it (no number in it): only a closing book's gap is the replication's own error
+BOOK_BUILT = {
+    SM.BOOK_CLOSING: ("Built from the session’s closing book, whose quotes are the ones standing when the "
+                      "Cboe close is computed."),
+    SM.BOOK_OVERNIGHT: ("Built from the session’s overnight book, quoted hours after the close, so the gap "
+                        "also holds the market’s move overnight."),
+    SM.BOOK_YAHOO_OVERNIGHT: ("Built from a Yahoo download fetched in the next session’s overnight "
+                              "hours; Yahoo records no quote time, so the gap may hold the market’s move "
+                              "overnight."),
+    SM.BOOK_YAHOO: ("Built from a Yahoo chain that records no quote time and was not fetched overnight, so "
+                    "when its quotes stood is not known."),
+    SM.BOOK_OTHER: "Built from a Cboe book quoted neither at the close nor overnight.",
+}
+
+
+def check_replication_book(a: Audit, store: Store) -> None:
+    """The VIX replication finding names the book of the session the Surface page shows
+    (the newest surface session), classified by this audit's clock (SM.replication_book
+    on its surface.json record: a Cboe book by its quote time, a Yahoo chain by when it
+    was downloaded), and no other book."""
+    li = by_text(a.one("#find-list-works"), "li", "VIX replicated from the stored chain")
+    if li is None:
+        return
+    shown = store.surface_sessions()[-1]
+    path = f"surface/{shown}/surface.json"
+    sj = store.json(path) if (store.root / path).exists() else {}
+    book = SM.replication_book(sj.get("inputs"), shown, sj.get("universe"))
+    for b, phrase in BOOK_BUILT.items():
+        says(a, P_FIND, f"VIX replication: the book of {shown}", li, phrase, b == book)
 
 
 def check_finding_words(a: Audit, f: Facts) -> None:

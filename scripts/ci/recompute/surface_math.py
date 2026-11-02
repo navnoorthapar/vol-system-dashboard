@@ -712,32 +712,56 @@ def replication_instant(inputs: dict, session: str) -> tuple[str, str] | None:
 
 # which book a session's replication sets against the Cboe close, as the page names it
 BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER = "closing", "overnight", "yahoo", "other"
-BOOK_ORDER = (BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER)
+BOOK_YAHOO_OVERNIGHT = "yahoo_overnight"
+BOOK_ORDER = (BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER)
 GTH_CLOSE = dt.time(9, 15)
 
 
-def replication_book(inputs: dict | None, session: str) -> str | None:
+def _next_session(day: dt.date) -> dt.date:
+    nxt = day + dt.timedelta(days=1)
+    while not is_session(nxt):
+        nxt += dt.timedelta(days=1)
+    return nxt
+
+
+def overnight_at(at: dt.datetime, session: str) -> bool:
+    """``at`` (tz-aware) falls in the Global Trading Hours of the session after
+    ``session``: 20:15 ET the evening before it to 09:15 ET on it."""
+    nxt = _next_session(dt.date.fromisoformat(session))
+    at = at.astimezone(NY)
+    return dt.datetime.combine(nxt - dt.timedelta(days=1), GTH_OPEN, NY) <= at < dt.datetime.combine(
+        nxt, GTH_CLOSE, NY)
+
+
+def _instant(text: Any) -> dt.datetime:
+    at = dt.datetime.fromisoformat(str(text))
+    return at if at.tzinfo is not None else at.replace(tzinfo=dt.UTC)
+
+
+def replication_book(inputs: dict | None, session: str, universe: dict | None = None) -> str | None:
     """The book a session was built from, from surface.json's record of its chain and
     this audit's own clock rules: a Cboe book quoted after the session's close and
     outside the next session's Global Trading Hours (20:15 ET the evening before it to
     09:15) is its closing book; one quoted inside them its overnight book; any other
-    Cboe instant (the session's own hours, the 09:15-09:30 pause) 'other'; a chain of
-    another source a Yahoo chain. None without a recorded source."""
-    inp = inputs or {}
-    src, qt = inp.get("source"), inp.get("quote_time")
+    Cboe instant (the session's own hours, the 09:15-09:30 pause) 'other'. A chain of
+    another source records no quote time, so it goes by when it was downloaded (the
+    quote_time a chain stored before QUANT-01 carried was that instant, else its
+    fetched_at; ``universe`` is read where ``inputs`` holds neither): inside those
+    hours an overnight download, else (or with no instant recorded) a Yahoo chain.
+    None without a recorded source."""
+    inp, uni = inputs or {}, universe or {}
+    src, qt = inp.get("source") or uni.get("source"), inp.get("quote_time")
     if src is None:
         return None
     if src != "cboe":
-        return BOOK_YAHOO
+        got = qt or uni.get("quote_time") or inp.get("fetched_at") or uni.get("fetched_at")
+        return BOOK_YAHOO_OVERNIGHT if got and overnight_at(_instant(got), session) else BOOK_YAHOO
     if not qt:
         return BOOK_OTHER
-    at = dt.datetime.fromisoformat(str(qt)).astimezone(NY)
+    at = _instant(qt).astimezone(NY)
     day = dt.date.fromisoformat(session)
-    nxt = day + dt.timedelta(days=1)
-    while not is_session(nxt):
-        nxt += dt.timedelta(days=1)
-    if dt.datetime.combine(nxt - dt.timedelta(days=1), GTH_OPEN, NY) <= at < dt.datetime.combine(
-            nxt, GTH_CLOSE, NY):
+    nxt = _next_session(day)
+    if overnight_at(at, session):
         return BOOK_OVERNIGHT
     after_close = at >= dt.datetime.combine(day, cboe_close_time(session), NY)
     return BOOK_CLOSING if after_close and at < dt.datetime.combine(nxt, GTH_CLOSE, NY) else BOOK_OTHER

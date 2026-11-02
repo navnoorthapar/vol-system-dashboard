@@ -305,7 +305,8 @@ class Ctx:
 
     def book(self, s: M.Session | None) -> str | None:
         """The book a session was built from (M.replication_book on its surface.json record)."""
-        return M.replication_book((s.sj or {}).get("inputs"), s.name) if s is not None else None
+        return (M.replication_book((s.sj or {}).get("inputs"), s.name, (s.sj or {}).get("universe"))
+                if s is not None else None)
 
     def vix_gap(self, s: M.Session) -> float | None:
         """VIX replicated from the session's chain − the DB's Cboe close of that session."""
@@ -1835,8 +1836,10 @@ CALC_WORDS = {"book_quote_time": "the book’s quote time",
               "closing_book_close": "the close its closing book’s quotes were left at"}
 # how the page names each book (M.replication_book), and its sessions counted
 BOOK_LABELS = {M.BOOK_CLOSING: "Closing book", M.BOOK_OVERNIGHT: "Overnight book",
-               M.BOOK_YAHOO: "Yahoo chain", M.BOOK_OTHER: "Other Cboe book"}
+               M.BOOK_YAHOO_OVERNIGHT: "Yahoo overnight download", M.BOOK_YAHOO: "Yahoo chain",
+               M.BOOK_OTHER: "Other Cboe book"}
 BOOK_SESSIONS = {M.BOOK_CLOSING: "closing-book sessions", M.BOOK_OVERNIGHT: "overnight-book sessions",
+                 M.BOOK_YAHOO_OVERNIGHT: "Yahoo overnight-download sessions",
                  M.BOOK_YAHOO: "Yahoo-chain sessions", M.BOOK_OTHER: "other Cboe-book sessions"}
 
 
@@ -2298,7 +2301,9 @@ def history_models(c: Ctx) -> list[str]:
 GAP_NOTE_CLOSING = "A closing book is set against the Cboe close"
 GAP_NOTE_NO_CLOSING = "No session here was built from a closing book"
 GAP_NOTE_OVERNIGHT = "An overnight book was quoted hours after the close"
-GAP_NOTE_YAHOO = "A Yahoo chain records no quote time"
+GAP_NOTE_YAHOO_OVERNIGHT = ("A Yahoo overnight download records no quote time and was fetched in the next "
+                            "session’s overnight hours")
+GAP_NOTE_YAHOO = "A Yahoo chain records no quote time and was not fetched overnight"
 GAP_NOTE_OTHER = "Another Cboe book was quoted"
 
 
@@ -2337,6 +2342,7 @@ def gap_by_book(a: Audit, c: Ctx, sessions: list[M.Session | None]) -> None:
     for phrase, shown in ((GAP_NOTE_CLOSING, M.BOOK_CLOSING in books),
                           (GAP_NOTE_NO_CLOSING, M.BOOK_CLOSING not in books),
                           (GAP_NOTE_OVERNIGHT, M.BOOK_OVERNIGHT in books),
+                          (GAP_NOTE_YAHOO_OVERNIGHT, M.BOOK_YAHOO_OVERNIGHT in books),
                           (GAP_NOTE_YAHOO, M.BOOK_YAHOO in books), (GAP_NOTE_OTHER, M.BOOK_OTHER in books)):
         a.equal(P_HIST, f"gap-by-book note: {'says' if shown else 'does not say'} {phrase!r}",
                 phrase in text_of(note), shown)

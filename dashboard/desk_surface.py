@@ -484,31 +484,71 @@ def vix_calc_time_words(vix_rep: Mapping | None) -> str | None:
 
 
 # The book a session's surface, and so its VIX replication, was built from, as
-# the page names it (FUND_GRADE_PLAN 0.8): a Cboe closing book's quotes stand at
-# the close the Cboe print is computed at, so its gap is the replication's own;
-# an overnight (Global Trading Hours) book was quoted hours after that print, so
-# its gap also holds the overnight move; a Yahoo chain records no quote time.
+# the page names it (FUND_GRADE_PLAN 0.8): a Cboe closing book's quotes are the
+# ones standing when the Cboe close is computed, so its gap is the replication's
+# own; an overnight (Global Trading Hours) book was quoted hours after that
+# print, so its gap also holds the overnight move. A Yahoo chain records no
+# quote time, so it is classified by when it was downloaded, the way a Cboe book
+# is by its quote time (cboe_downloader.book_state_at): one fetched in the next
+# session's overnight hours (the bot's book slots) is an overnight download,
+# whose gap may hold the overnight move too, never a close snapshot; any other
+# (fetched at another instant, or with no fetch time recorded, as the C23
+# chains) is a Yahoo chain.
 BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER = "closing", "overnight", "yahoo", "other"
+BOOK_YAHOO_OVERNIGHT = "yahoo_overnight"
 BOOK_LABELS = {BOOK_CLOSING: "Closing book", BOOK_OVERNIGHT: "Overnight book",
-               BOOK_YAHOO: "Yahoo chain", BOOK_OTHER: "Other Cboe book"}
+               BOOK_YAHOO_OVERNIGHT: "Yahoo overnight download", BOOK_YAHOO: "Yahoo chain",
+               BOOK_OTHER: "Other Cboe book"}
 # the sessions of one book, counted ('4 overnight-book sessions')
 BOOK_SESSIONS = {BOOK_CLOSING: "closing-book sessions", BOOK_OVERNIGHT: "overnight-book sessions",
+                 BOOK_YAHOO_OVERNIGHT: "Yahoo overnight-download sessions",
                  BOOK_YAHOO: "Yahoo-chain sessions", BOOK_OTHER: "other Cboe-book sessions"}
+# the sentence naming the book a replication gap was taken on (the Overview's
+# finding, Model Risk's replication check); no number in it, so a page's numbers
+# are the gap's own
+BOOK_BUILT = {
+    BOOK_CLOSING: ("Built from the session’s closing book, whose quotes are the ones standing when the "
+                   "Cboe close is computed"),
+    BOOK_OVERNIGHT: ("Built from the session’s overnight book, quoted hours after the close, so the gap "
+                     "also holds the market’s move overnight"),
+    BOOK_YAHOO_OVERNIGHT: ("Built from a Yahoo download fetched in the next session’s overnight hours; Yahoo "
+                           "records no quote time, so the gap may hold the market’s move overnight"),
+    BOOK_YAHOO: ("Built from a Yahoo chain that records no quote time and was not fetched overnight, so "
+                 "when its quotes stood is not known"),
+    BOOK_OTHER: "Built from a Cboe book quoted neither at the close nor overnight",
+}
 # surface.json inputs.book_state (cboe_downloader.book_state_at) -> the page's book
 _BOOK_OF_STATE = {"closing": BOOK_CLOSING, "gth": BOOK_OVERNIGHT}
 
 
-def replication_book(inputs: Mapping | None) -> str | None:
+def yahoo_fetch_instant(inputs: Mapping | None, universe: Mapping | None = None) -> str | None:
+    """When a Yahoo chain was downloaded, from its surface.json ``inputs`` (and
+    ``universe``), as chain_provenance names it: the quote_time a chain stored
+    before QUANT-01 carried, which was the download instant, else its fetched_at.
+    None for a Cboe book, for a record naming no source and for a chain that
+    records neither."""
+    inp, uni = inputs or {}, universe or {}
+    src = inp.get("source") or uni.get("source")
+    if not src or src == "cboe":
+        return None
+    got = inp.get("quote_time") or uni.get("quote_time") or inp.get("fetched_at") or uni.get("fetched_at")
+    return str(got) if got else None
+
+
+def replication_book(inputs: Mapping | None, fetch_state: str | None = None) -> str | None:
     """Which book (BOOK_*) a session was built from, read from its surface.json
     ``inputs``: a Cboe book by the state its capture recorded (closing,
     overnight, or another instant: 'other'); a chain of any other source is a
-    Yahoo chain. None when the record names no source."""
+    Yahoo chain, an overnight download when ``fetch_state``, the book state of
+    its fetch instant (yahoo_fetch_instant, classified as a Cboe book's quote
+    time is: cboe_downloader.book_state_at), is 'gth'. None when the record
+    names no source."""
     inp = inputs or {}
     src = inp.get("source")
     if not src:
         return None
     if src != "cboe":
-        return BOOK_YAHOO
+        return BOOK_YAHOO_OVERNIGHT if fetch_state == "gth" else BOOK_YAHOO
     return _BOOK_OF_STATE.get(str(inp.get("book_state")), BOOK_OTHER)
 
 

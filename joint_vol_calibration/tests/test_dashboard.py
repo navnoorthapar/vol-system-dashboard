@@ -1976,6 +1976,58 @@ def test_a_chain_the_backtest_excludes_has_no_surface_beta_and_a_true_minus(dash
     assert note is None or "β estimator" not in note.group(1)
 
 
+def _book_by_clock(sj: dict, session: str) -> str | None:
+    """The book a surface session was built from, by its surface.json record and the
+    Global Trading Hours window of the session after it (option_chain.gth_window): a
+    Cboe book by the state its capture recorded; a Yahoo chain, which records no quote
+    time, by its download instant (a pre-QUANT-01 chain's quote time, else fetched_at):
+    an overnight download inside that window, else a Yahoo chain."""
+    from joint_vol_calibration.data import option_chain as oc
+
+    inp, uni = sj.get("inputs") or {}, sj.get("universe") or {}
+    src = inp.get("source") or uni.get("source")
+    if not src:
+        return None
+    if src == "cboe":
+        return {"closing": "closing", "gth": "overnight"}.get(str(inp.get("book_state")), "other")
+    at = inp.get("quote_time") or uni.get("quote_time") or inp.get("fetched_at") or uni.get("fetched_at")
+    if not at:
+        return "yahoo"
+    lo, hi = oc.gth_window(oc.next_session(session))
+    return "yahoo_overnight" if lo <= pd.Timestamp(str(at)).to_pydatetime() < hi else "yahoo"
+
+
+def test_a_yahoo_chain_is_named_by_when_it_was_downloaded(dash):
+    """w5 review, major 3: a Yahoo chain records no quote time, so every one was a
+    'Yahoo chain', and the Surface page's by-book table and tile put the bot's
+    download of 2026-11-02, fetched at 03:30 UTC in the next session's overnight hours,
+    with the C23 close snapshots. A Yahoo chain is now classified by its download
+    instant as a Cboe book is by its quote time: inside the next session's Global
+    Trading Hours an overnight download (its gap may hold the overnight move), else a
+    Yahoo chain. Checked on cases of each and on every stored surface session."""
+    ds = dash.desk_surface
+    yahoo = {"source": "yfinance", "quote_time": None, "t_origin_basis": "session close 16:00 ET"}
+    night, other = ds.BOOK_YAHOO_OVERNIGHT, ds.BOOK_YAHOO
+    cases = [({"inputs": {**yahoo, "fetched_at": "2026-11-03T03:30:03Z"}}, "2026-11-02", night),
+             ({"inputs": {**yahoo, "fetched_at": "2026-11-02T22:00:00Z"}}, "2026-11-02", other),
+             ({"inputs": {**yahoo, "fetched_at": "2026-10-31T08:50:33Z"}}, "2026-10-30", other),
+             ({"inputs": {**yahoo, "fetched_at": "2026-11-02T02:01:00Z"}}, "2026-10-30", night),
+             ({"inputs": {"source": "yfinance", "quote_time": "2026-10-27T05:26:50Z"}}, "2026-10-26",
+              ds.BOOK_YAHOO_OVERNIGHT),
+             ({"inputs": yahoo, "universe": {"fetched_at": "2026-11-03T03:30:03Z"}}, "2026-11-02",
+              ds.BOOK_YAHOO_OVERNIGHT),
+             ({"inputs": yahoo}, "2026-11-02", ds.BOOK_YAHOO),
+             ({"inputs": {"source": "cboe", "book_state": "closing", "fetched_at": "2026-11-03T03:30:03Z"}},
+              "2026-11-02", ds.BOOK_CLOSING),
+             ({"inputs": {}}, "2026-11-02", None)]
+    for sj, session, want in cases:
+        assert dash.surface_book(sj, session) == want, (sj, session)
+        assert _book_by_clock(sj, session) == want, (sj, session)
+    for session in dash.artifacts.surface_sessions(SHIPPED):
+        sj = json.loads((SHIPPED / "surface" / session / "surface.json").read_text())
+        assert dash.surface_book(sj, session) == _book_by_clock(sj, session), session
+
+
 def test_the_vix_gap_is_given_by_the_book_each_session_was_built_from(dash, pages):
     """FUND_GRADE_PLAN 0.8: the history listed every session's VIX replication gap,
     and the VIX tile ranged over all of them, whether the replication was set
@@ -1993,7 +2045,7 @@ def test_the_vix_gap_is_given_by_the_book_each_session_was_built_from(dash, page
     for r in index:
         sj = SHIPPED / "surface" / r["session"] / "surface.json"
         if sj.exists():
-            books[r["session"]] = ds.replication_book(json.loads(sj.read_text()).get("inputs"))
+            books[r["session"]] = _book_by_clock(json.loads(sj.read_text()), r["session"])
         if r.get("vix_replicated") is not None and r.get("vix_official") is not None:
             gaps[r["session"]] = r["vix_replicated"] - r["vix_official"]
     html = pages["/surface"]
@@ -2032,7 +2084,9 @@ def test_the_vix_gap_is_given_by_the_book_each_session_was_built_from(dash, page
     in_table = {w["book"] for w in want}
     for book, phrase in (("closing", "A closing book is set against the Cboe close"),
                          ("overnight", "An overnight book was quoted hours after the close"),
-                         ("yahoo", "A Yahoo chain records no quote time"),
+                         ("yahoo_overnight", ("A Yahoo overnight download records no quote time and was "
+                                              "fetched in the next session’s overnight hours")),
+                         ("yahoo", "A Yahoo chain records no quote time and was not fetched overnight"),
                          ("other", "Another Cboe book was quoted")):
         assert (phrase in text) is (book in in_table), book
     assert ("No session here was built from a closing book" in text) is ("closing" not in in_table)
@@ -7210,7 +7264,7 @@ def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(d
     if gap is not None:
         assert f"by the Cboe formula, {tail}." in works
     mr = _visible_text(pages["/model-risk"])
-    assert f"Cboe VIX formula on the stored two-sided chain, {tail}; a gap points" in mr
+    assert f"Cboe VIX formula on the stored two-sided chain, {tail}." in mr
     for html in (pages["/"], pages["/model-risk"]):
         assert "Cboe rules" not in html
         assert "Cboe VIX rules" not in html
@@ -8724,8 +8778,9 @@ def test_the_overview_replication_item_cites_the_session_surface_shows(dash, no_
                   no_fit["/surface"], re.DOTALL)
     n = len(re.findall(r"<li>", m.group(1))) if m else 0
     tail = f", with {dash.plural(n, 'listed departure')} (Surface)" if n else ""
+    built = dash.desk_surface.BOOK_BUILT[_book_by_clock(_chain_of(data, newest), newest)]
     assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
-            f"{newest}, by the Cboe formula{tail}.") in works, works
+            f"{newest}, by the Cboe formula{tail}. {built}.") in works, works
 
 
 def _fit_chain_parts(data: Path, cal: dict, session: str) -> list[str]:
@@ -10177,6 +10232,9 @@ def test_model_risk_history_ends_with_todays_value_and_uses_todays_limits(dash, 
             assert m["history"]["last"] == pytest.approx(m["num"], abs=1e-12), m["check"]
         lim = dash.MONITOR_LIMITS[m["limits_key"]]
         size = abs if m["key"] == "vix_rep_gap" else float
+        if m["key"] == "vix_rep_gap" and m["status"] == "info":   # a gap not on a closing book
+            assert {x["status"] for x in m["history"]["dots"]} == {"info"}
+            continue
         assert [x["status"] for x in m["history"]["dots"]] == [dash._rag(size(x["value"]), lim)
                                                                for x in m["history"]["dots"]]
     oos = next(m for m in d["monitors"] if m["key"] == "oos_rmse")
@@ -10740,6 +10798,134 @@ def test_quote_inspector_footnote_names_the_chain_in_every_chain_view(dash, chai
     dirs = {"/surface": data / "surface" / dash.artifacts.surface_sessions(data)[-1],
             "/calibration": data / "surface" / chain_view["fit"]}
     assert _check_quote_footnotes(dash, chain_view["pages"], dirs)
+
+
+def _gaps_by_session(data: Path) -> dict[str, float]:
+    """Each stored surface session's VIX gap (replicated − Cboe close) as its
+    vix_replication.json stores it."""
+    out = {}
+    for p_ in sorted((data / "surface").glob("*/vix_replication.json")):
+        g = (json.loads(p_.read_text()).get("indices", {}).get("VIX") or {}).get("gap_vs_official")
+        if g is not None:
+            out[p_.parent.name] = float(g)
+    return out
+
+
+def test_the_overview_replication_finding_names_the_book_its_gap_was_taken_on(dash, chain_view):
+    """w5 review, major 3: the Overview's 'VIX replicated from the stored chain' finding
+    gave the gap without saying whether it was taken on a closing book (quotes standing
+    when the Cboe close is computed: the replication's own error), an overnight book or an
+    overnight Yahoo download (which also hold the market's move overnight) or a Yahoo chain
+    with no quote time. It now names the book of the session Surface shows, classified by
+    its record and the calendar (_book_by_clock), and no other, in every chain view."""
+    ds = dash.desk_surface
+    data, newest = chain_view["data"], chain_view["newest"]
+    works = _tight(" ".join(_visible_text("<body>" + it) for it in _findings(chain_view["pages"]["/"])[0][2]))
+    if newest not in _gaps_by_session(data):
+        assert "VIX replicated from the stored chain" not in works
+        return
+    book = _book_by_clock(_chain_of(data, newest), newest)
+    for b, sentence in ds.BOOK_BUILT.items():
+        assert (f"{sentence}." in works) is (b == book), (b, works)
+
+
+def _replication_row(html: str) -> tuple[str, str]:
+    """(status, row html) of Model Risk's VIX-replication check."""
+    return next((st, body) for i, st, body in _monitor_rows(html) if i == "check-vix-rep-gap")
+
+
+def _check_replication_row(dash, data: Path, html: str) -> dict:
+    """Model Risk's VIX-replication check against the record in ``data``: it names the
+    book of the session Surface shows (_book_by_clock); its history is the sessions of
+    that book alone, each dot its session's signed gap, with today's rank among them;
+    its limits apply to a closing book's gap only: on another book it is informational,
+    with no bullet, and its dots are not coloured by the limits. Returns what it read."""
+    ds = dash.desk_surface
+    newest = dash.artifacts.surface_sessions(data)[-1]
+    gaps = _gaps_by_session(data)
+    book = _book_by_clock(_chain_of(data, newest), newest)
+    st, body = _replication_row(html)
+    text = _tight(_visible_text("<body>" + body))
+    for b, sentence in ds.BOOK_BUILT.items():
+        assert (f"{sentence}." in text) is (b == book), (b, text)
+    assert f"History and rank: {ds.BOOK_SESSIONS[book]} only." in text
+    same = [s_ for s_ in sorted(gaps) if _book_by_clock(_chain_of(data, s_), s_) == book]
+    dots = re.findall(r'<circle class="h-(\w+)"[^>]*data-chain="surface:([\d-]+)"', body)
+    gap = gaps.get(newest)
+    lim = dash.MONITOR_LIMITS["vix_rep_gap"]
+    closing = book == ds.BOOK_CLOSING
+    if gap is None:
+        assert st == "na"
+    else:
+        assert st == (dash._rag(abs(gap), lim) if closing else "info"), (book, st)
+        assert ('class="bullet"' in body) is closing
+        assert ("limits apply to a closing book’s gap only" in text) is not closing
+        assert ("The limits apply to a closing book’s gap only, so this gap is informational." in text) \
+            is not closing
+    if len(same) < 2:
+        assert dots == [], (book, dots)
+    else:
+        assert [s_ for _, s_ in dots] == same, (book, dots)
+        assert [c for c, _ in dots] == [dash._rag(abs(gaps[s_]), lim) if closing else "info" for s_ in same]
+        ranked = dash.desk_monitor.history_view([(s_, gaps[s_]) for s_ in same], lim, two_sided=True)
+        assert ranked["range"] in text
+        if gap is not None:
+            assert f"rank today: {ranked['rank']}" in text
+    return {"book": book, "same": same, "status": st, "dots": dots}
+
+
+def test_model_risk_ranks_a_vix_gap_among_the_sessions_of_its_book(dash, chain_view):
+    """w5 review, major 3: Model Risk's VIX-replication check (V2) ranked and ranged
+    today's gap over every stored session and applied one set of limits whatever book
+    each gap was taken on: '4th of 11' over −0.78 to +1.25, an overnight book's +1.25
+    marked 'watch' as 'a thin or stale strip', when an overnight gap also holds the
+    market's move overnight. It now names its book, ranks and ranges over the sessions of
+    that book only, and applies its limits to a closing book's gap only, in every chain
+    view (_check_replication_row)."""
+    got = _check_replication_row(dash, chain_view["data"], chain_view["pages"]["/model-risk"])
+    if chain_view["vendor"] == "yahoo":
+        assert got["status"] in ("info", "na")
+
+
+def test_model_risk_colours_closing_book_gaps_by_its_limits(dash, tmp_path):
+    """The closing-book side of the check above: with the session before the newest
+    relabelled a closing book (_as_vendor), the history holds the two closing-book
+    sessions alone, coloured by the limits and ranked between them; the overnight books
+    and Yahoo chains stored between them are left out."""
+    sessions = dash.artifacts.surface_sessions(SHIPPED)
+    newest = sessions[-1]
+    sj = json.loads((SHIPPED / "surface" / newest / "surface.json").read_text())
+    if _book_by_clock(sj, newest) != "closing":
+        pytest.skip(f"the newest surface session {newest} is not a closing book")
+    gaps = _gaps_by_session(SHIPPED)
+    earlier = [s_ for s_ in sessions[:-1] if s_ in gaps and s_ < newest]
+    if not earlier:
+        pytest.skip("no earlier surface session replicates the VIX")
+    other = earlier[-1]
+    data = tmp_path / "data_store"
+    data.mkdir()
+    for child in SHIPPED.iterdir():
+        if child.name != "surface":
+            (data / child.name).symlink_to(child)
+    (data / "surface").mkdir()
+    for child in (SHIPPED / "surface").iterdir():
+        if child.name != other:
+            (data / "surface" / child.name).symlink_to(child)
+    shutil.copytree(SHIPPED / "surface" / other, data / "surface" / other)
+    rec = _as_vendor(json.loads((SHIPPED / "surface" / other / "surface.json").read_text()), "cboe", other)
+    (data / "surface" / other / "surface.json").write_text(json.dumps(rec))
+    (tmp_path / "db").mkdir()
+    with pytest.MonkeyPatch.context() as mp, contextlib.ExitStack() as stack:
+        mp.setattr(dash, "DATA", data)
+        stack.enter_context(dash.record_db(scratch_dir=tmp_path / "db"))
+        mp.setattr(dash, "_CHROME_CACHE", {})
+        r = dash.app.test_client().get("/model-risk")
+        assert r.status_code == 200
+        html = r.get_data(as_text=True)
+    got = _check_replication_row(dash, data, html)
+    assert got["book"] == "closing"
+    assert got["same"] == [other, newest]
+    assert [s_ for _, s_ in got["dots"]] == [other, newest]
 
 
 def test_smile_series_hold_no_raw_series_name_in_their_legend(pages):
@@ -12848,8 +13034,9 @@ def test_model_risk_vix_gap_history_keeps_the_sign(dash):
             gaps[p.parent.name] = float(g)
     for dot in h["dots"]:
         assert dot["value"] == pytest.approx(gaps[dot["session"]], abs=1e-12)
-        assert dot["status"] == dash.desk_monitor.rag(abs(dot["value"]), dash.MONITOR_LIMITS["vix_rep_gap"])
-    if any(v < 0 for v in gaps.values()):
+        assert dot["status"] == ("info" if row["status"] == "info" else dash.desk_monitor.rag(
+            abs(dot["value"]), dash.MONITOR_LIMITS["vix_rep_gap"]))
+    if any(dot["value"] < 0 for dot in h["dots"]):
         assert "−" in h["range"]
     if row["num"] is not None:                    # None: today's session does not replicate the VIX
         assert row["num"] == pytest.approx(abs(row["num"]))      # today's limit check: the size

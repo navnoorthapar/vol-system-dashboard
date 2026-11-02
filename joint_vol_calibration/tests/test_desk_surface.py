@@ -665,3 +665,33 @@ def test_each_session_names_the_book_its_vix_gap_was_measured_on():
         assert g["sessions"] == sorted(r["session"] for r in rows
                                        if r["book"] == g["book"] and r["gap"] is not None)
     assert ds.gap_by_book([]) == []
+
+
+def test_a_yahoo_download_fetched_overnight_is_its_own_book():
+    """w5 review, major 3: a Yahoo chain records no quote time, and the bot downloads
+    it in the next session's overnight hours, so its gap may hold the market's move
+    overnight as an overnight Cboe book's does; the Surface page put it in one 'Yahoo
+    chain' row with the C23 close snapshots. A Yahoo chain is now classified by when
+    it was downloaded, as a Cboe book is by its quote time: given the book state of
+    its fetch instant, 'gth' makes it an overnight download, any other state (or none)
+    a Yahoo chain. A Cboe book still goes by its recorded state, whatever is passed."""
+    assert ds.replication_book({"source": "yfinance"}, "gth") == ds.BOOK_YAHOO_OVERNIGHT
+    for state in ("closing", "intraday", "pre_open", None):
+        assert ds.replication_book({"source": "yfinance"}, state) == ds.BOOK_YAHOO, state
+    assert ds.replication_book({"source": "cboe", "book_state": "closing"}, "gth") == ds.BOOK_CLOSING
+    # the instant it goes by: a pre-QUANT-01 chain's quote time (the download instant),
+    # else its fetch time, from inputs or universe; none for a Cboe book
+    assert ds.yahoo_fetch_instant({"source": "yfinance", "fetched_at": "2026-11-03T03:30:03Z"}) \
+        == "2026-11-03T03:30:03Z"
+    assert ds.yahoo_fetch_instant({"source": "yfinance", "quote_time": "2026-10-27T05:26:50Z"}) \
+        == "2026-10-27T05:26:50Z"
+    assert ds.yahoo_fetch_instant({"source": "yfinance"}, {"fetched_at": "2026-10-31T08:50:33Z"}) \
+        == "2026-10-31T08:50:33Z"
+    assert ds.yahoo_fetch_instant({"source": "yfinance"}) is None
+    assert ds.yahoo_fetch_instant({"source": "cboe", "fetched_at": "2026-10-31T08:40:19Z"}) is None
+    # every book is labelled, counted and named in a sentence that holds no number
+    assert set(ds.BOOK_LABELS) == set(ds.BOOK_SESSIONS) == set(ds.BOOK_BUILT)
+    assert ds.BOOK_LABELS[ds.BOOK_YAHOO_OVERNIGHT] == "Yahoo overnight download"
+    for book, text in ds.BOOK_BUILT.items():
+        assert text.startswith("Built from "), book
+        assert not any(ch.isdigit() for ch in text), book

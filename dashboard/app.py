@@ -5144,10 +5144,14 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
         vix = indices.get("VIX") or {}
         gap = _num(vix.get("gap_vs_official"))
         if gap is not None:
+            # the book it was built from: a closing book's gap is the replication's own, an
+            # overnight one's also holds the market's move overnight (FUND_GRADE_PLAN 0.8)
+            built = desk_surface.BOOK_BUILT.get(surface_book(rep.get("surface"), rep.get("session")) or "")
             works.append(item(
                 "VIX replicated from the stored chain", "surface.html#vix-replication",
                 f"{signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
-                f"{rep['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}.",
+                f"{rep['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."
+                + (f" {built}." if built else ""),
                 f"surface:{rep['session']}"))
     arc = p2.get("archive") or {}
     if arc.get("n_legacy") is not None:
@@ -6242,6 +6246,24 @@ def chain_source(surface_json: dict) -> list[str] | None:
 # source and quote time where it is shown (in its panel, row or sentence), not
 # only in the page's badge: a panel linked to on its own, a Model Risk row or an
 # Overview line was read without it. test_dashboard.py enumerates them.
+def surface_book(surface_json: Mapping | None, session: str | None) -> str | None:
+    """The book (desk_surface.BOOK_*) a stored session's surface, and so its VIX
+    replication, was built from, by its surface.json record: a Cboe book by the
+    state its capture recorded; a Yahoo chain by the instant it was downloaded
+    (desk_surface.yahoo_fetch_instant), classified as a Cboe book's quote time is
+    (cboe_downloader.book_state_at), so a download fetched in the next session's
+    overnight hours is an overnight download, not a close snapshot. None when the
+    record names no source."""
+    sj = surface_json or {}
+    inp, uni = sj.get("inputs") or {}, sj.get("universe") or {}
+    at = desk_surface.yahoo_fetch_instant(inp, uni)
+    state = None
+    if at and session:
+        from joint_vol_calibration.data import cboe_downloader as cd
+        state = cd.book_state_at(pd.Timestamp(at).to_pydatetime(), session)
+    return desk_surface.replication_book({**inp, "source": inp.get("source") or uni.get("source")}, state)
+
+
 def chain_stamp(surface_json: dict | None) -> str | None:
     """'Cboe, quotes at 2026-10-30 23:49 UTC, 100.0% two-sided near the money',
     'Yahoo Finance download, fetched 2026-10-30 08:51 UTC, two-sided share not
@@ -7230,8 +7252,7 @@ def surface_extras(d: dict, surf: dict) -> None:
         # closing book's gap sets the replication against the Cboe close at one instant
         if desk_inputs is None:
             desk_inputs = artifacts.load_surface_desk_inputs(DATA)
-        books = {s["session"]: desk_surface.replication_book((s["surface"] or {}).get("inputs"))
-                 for s in desk_inputs}
+        books = {s["session"]: surface_book(s["surface"], s["session"]) for s in desk_inputs}
         d["history_models"] = [{"key": m, "label": model_short(m)} for m in mk]
         d["history_gaps"] = any(oos_by.get((r["session"], m)) is None for r in idx for m in mk)
         # why Heston has no figure on a session, where the job's run records say
@@ -7706,7 +7727,8 @@ def fit_check_values(cal: dict) -> dict:
 
 def surface_check_values(surf: dict) -> dict:
     """The surface-report checks of one stored session (scorecard, VIX replication,
-    the static-arbitrage screen): today's row and each session's dot."""
+    the static-arbitrage screen): today's row and each session's dot; ``book``, the
+    book its replication was built from (surface_book)."""
     hkey = heston_model_key(surf["models"])
     row = next((r for r in surf.get("scorecard_rows") or [] if r["model"] == hkey), None)
     st_ = row["oos"] if row else (artifacts.residual_stats(surf["residuals"], hkey) if hkey else {})
@@ -7716,6 +7738,7 @@ def surface_check_values(surf: dict) -> dict:
     n_ex, n_q = _num(arb.get("n_quotes_in_executable_violation")), _num(arb.get("n_quotes"))
     return {"median_abs_hs": _num(st_.get("median_abs_hs")), "inside_pct": _num(st_.get("inside_spread_pct")),
             "n_hs": _num(st_.get("n")), "scorecard": bool(row), "rep_gap": gap,
+            "book": surface_book(surf.get("surface"), surf.get("session")),
             "vix_rep_gap": abs(gap) if gap is not None else None,
             "arb_exec_share": n_ex / n_q * 100.0 if (n_ex is not None and n_q) else None,
             "n_ex": n_ex, "n_q": n_q}
@@ -7839,9 +7862,13 @@ def load_model_risk() -> dict[str, Any]:
     # chain (tier 0.2, required): the data-chain key of the chain today's value is read
     # off, its note naming it; 'parts' when only the history's dots carry one; 'none'
     # when the check reads no quote chain. History points carry their own keys.
+    # limits_apply=False: the check's limits do not apply to today's value (its status,
+    # limits text and reason are given), so no bullet and its history's dots are not
+    # coloured by them
     def add(mid, check, value, text, limits_key, artifact, note, *, chain, status=None, limits_text=None,
-            key=None, history=None, digits=".2f", two_sided=False):
+            key=None, history=None, digits=".2f", two_sided=False, limits_apply=True):
         lim = MONITOR_LIMITS.get(limits_key)
+        applied = lim if limits_apply else None
         st = status if status is not None else _rag(value, lim) if lim else "na"
         page, anchor = CHECK_EVIDENCE.get(key or limits_key, (None, None))
         mon.append({"model": mid, "check": check, "short": CHECK_SHORT.get(key or limits_key, check),
@@ -7852,8 +7879,8 @@ def load_model_risk() -> dict[str, Any]:
                     "limits_key": limits_key or None,
                     "id": "check-" + desk_monitor.slug(key or limits_key or check),
                     "href": f"{page}#{anchor}" if page else None, "page": page, "anchor": anchor,
-                    "bullet": desk_monitor.bullet(value, lim, digits) if lim else None,
-                    "history": (desk_monitor.history_view(history, lim, digits, two_sided=two_sided)
+                    "bullet": desk_monitor.bullet(value, applied, digits) if applied else None,
+                    "history": (desk_monitor.history_view(history, applied, digits, two_sided=two_sided)
                                 if (lim and history) else None)})
     # the gated fits: today's values and each session's, from one function of the pickle
     gated: list[tuple[str, dict]] = []
@@ -8024,12 +8051,33 @@ def load_model_risk() -> dict[str, Any]:
         vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
         book = chain_stamp(surf.get("surface"))
         on_book = f" Chain: {book}." if book else ""
+        # FUND_GRADE_PLAN 0.8: a closing book's gap is the replication's own error, and the
+        # limits are set for it; an overnight book's or an overnight download's also holds
+        # the market's move overnight, so on another book the gap is informational. The
+        # history and today's rank are over the sessions of today's book only, as the
+        # Surface tile's range is, so a gap at the close is never ranked against one that
+        # holds an overnight move.
+        rep_book = today["book"]
+        closing = rep_book == desk_surface.BOOK_CLOSING
+        built = desk_surface.BOOK_BUILT.get(rep_book or "")
+        rep_hist = surf_hist("rep_gap")
+        if rep_hist is not None and rep_book is not None:
+            of_book = {s_ for s_, v in shist if v["book"] == rep_book}
+            rep_hist = [p_ for p_ in rep_hist if p_[0] in of_book]
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",
             today["vix_rep_gap"], signed(today["rep_gap"], ".2f") if today["rep_gap"] is not None else "—",
             "vix_rep_gap", sart + "vix_replication.json",
-            f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}; "
-            "a gap points at a thin or stale strip." + on_book,
-            history=surf_hist("rep_gap"), two_sided=True, chain=surf_key)
+            f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}."
+            + (f" {built}." if built else "")
+            + (" Its gap is the replication’s own error: a thin or stale strip, or a listed departure."
+               if closing else
+               " The limits apply to a closing book’s gap only, so this gap is informational.")
+            + (f" History and rank: {desk_surface.BOOK_SESSIONS[rep_book]} only." if rep_book else "")
+            + on_book,
+            history=rep_hist, two_sided=True, chain=surf_key,
+            **({} if closing or today["rep_gap"] is None else
+               {"status": "info", "limits_apply": False,
+                "limits_text": "limits apply to a closing book’s gap only"}))
         cert = (((surf.get("surface") or {}).get("surfaces") or {}).get("svi_cal") or {}).get(
             "arbitrage_free_certified")
         add(INV_SURFACE, "SVI-cal surface carries its butterfly and calendar certificates", None,

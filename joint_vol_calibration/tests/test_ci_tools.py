@@ -1557,9 +1557,67 @@ class TestRecomputeAudit:
                                   "2026-10-27") == M.BOOK_CLOSING            # Tue 20:10 ET
         assert M.replication_book({"source": "cboe", "quote_time": "2026-10-28T00:20:00Z"},
                                   "2026-10-27") == M.BOOK_OVERNIGHT          # Tue 20:20 ET
-        assert M.replication_book({"source": "yfinance", "quote_time": "2026-10-27T05:26:50Z"},
-                                  "2026-10-26") == M.BOOK_YAHOO
         assert M.replication_book({}, "2026-10-26") is None
+
+    def test_it_names_a_yahoo_download_by_when_it_was_fetched(self, monkeypatch):
+        """w5 review, major 3: the Surface page put the bot's Yahoo download of 2026-11-02,
+        fetched at 03:30 UTC in the next session's overnight hours, in one 'Yahoo chain'
+        row with the C23 close snapshots. A Yahoo chain records no quote time, so the
+        audit classifies it by when it was downloaded, by its own calendar, as it does a
+        Cboe book by its quote time: inside the next session's Global Trading Hours an
+        overnight download, any other instant (or none recorded) a Yahoo chain. The
+        instant is a pre-QUANT-01 chain's quote time (the download instant), else its
+        fetch time, from inputs or universe."""
+        import importlib
+        _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        cases = {"2026-11-03T03:30:03Z": M.BOOK_YAHOO_OVERNIGHT,   # Mon 22:30 ET: Tuesday's GTH
+                 "2026-11-02T22:00:00Z": M.BOOK_YAHOO,             # Mon 17:00 ET, after the close
+                 "2026-11-02T18:00:00Z": M.BOOK_YAHOO,             # Mon 13:00 ET, the session itself
+                 "2026-11-03T14:20:00Z": M.BOOK_YAHOO}             # Tue 09:20 ET, the pause
+        for at, want in cases.items():
+            assert M.replication_book({"source": "yfinance", "fetched_at": at}, "2026-11-02") == want, at
+            assert M.replication_book({"source": "yfinance"}, "2026-11-02", {"fetched_at": at}) == want, at
+        # a Friday's: Saturday morning is the weekend, Sunday 21:01 ET Monday's GTH
+        assert M.replication_book({"source": "yfinance", "fetched_at": "2026-10-31T08:50:33Z"},
+                                  "2026-10-30") == M.BOOK_YAHOO
+        assert M.replication_book({"source": "yfinance", "fetched_at": "2026-11-02T02:01:00Z"},
+                                  "2026-10-30") == M.BOOK_YAHOO_OVERNIGHT
+        # a pre-QUANT-01 chain stamped its download instant (Tue 01:26 ET) as its quote time
+        assert M.replication_book({"source": "yfinance", "quote_time": "2026-10-27T05:26:50Z"},
+                                  "2026-10-26") == M.BOOK_YAHOO_OVERNIGHT
+        assert M.replication_book({"source": "yfinance"}, "2026-10-26") == M.BOOK_YAHOO
+
+    def test_it_checks_the_book_the_overviews_replication_finding_names(self, monkeypatch, tmp_path):
+        """w5 review, major 3: the Overview's 'VIX replicated from the stored chain'
+        finding gave the gap without saying whether it was taken on a closing book (the
+        replication's own error) or an overnight one (which also holds the overnight
+        move). The audit classifies the session Surface shows by its own clock and
+        requires that book's sentence in the finding, and no other book's."""
+        import importlib
+
+        from bs4 import BeautifulSoup
+
+        rc = _recompute(monkeypatch)
+        ov = importlib.import_module("recompute.overview")
+        M = importlib.import_module("recompute.surface_math")
+        d = tmp_path / "surface" / "2026-11-02"
+        d.mkdir(parents=True)
+        (d / "residuals.parquet").write_text("")
+        (d / "surface.json").write_text(json.dumps({"inputs": {"source": "yfinance",
+                                                               "fetched_at": "2026-11-03T03:30:03Z"}}))
+        assert set(ov.BOOK_BUILT) == set(M.BOOK_ORDER)
+
+        def failed(sentence: str) -> list[str]:
+            html = ('<ul id="find-list-works"><li class="find-item"><a href="surface.html#vix-replication">'
+                    f"VIX replicated from the stored chain</a>: +1.92 index pts. {sentence}</li></ul>")
+            a = rc.core.Audit("t", BeautifulSoup(html, "lxml"))
+            ov.check_replication_book(a, rc.data.Store(tmp_path))
+            assert len(a.checks) == len(ov.BOOK_BUILT)
+            return [c.label for c in a.checks if not c.ok]
+        assert failed(ov.BOOK_BUILT[M.BOOK_YAHOO_OVERNIGHT]) == []
+        assert failed(ov.BOOK_BUILT[M.BOOK_YAHOO])            # the close-snapshot sentence is wrong here
+        assert failed("")                                     # and naming none is too
 
     def test_its_calendar_times_an_early_closes_closing_book_at_1315(self, monkeypatch):
         """Tier 0.5 review: on an NYSE early close SPX options and the VIX close at
