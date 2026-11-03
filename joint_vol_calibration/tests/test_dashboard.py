@@ -8471,7 +8471,11 @@ def test_the_surface_history_gives_the_run_records_reason_for_a_session_without_
     says the gate rejected the newest session's fit, it names that session and the
     recorded reason."""
     data, newest = no_fit["data"], no_fit["session"]
-    rec = json.loads(next((data / "runs").glob(f"run_{newest.replace('-', '')}T*_book.json")).read_text())
+    # the record _no_fit_store wrote, by its own name: a glob of the session's date also
+    # matches the bot's book-slot records of the session before it, named by the UTC
+    # instant they ran (on the newest session's date), in whatever order the directory lists
+    rec = json.loads((data / "runs" / f"run_{newest.replace('-', '')}T235959Z_book.json").read_text())
+    assert rec["calibration"]["session"] == newest
     why = rec["calibration"]["reason"].rstrip(".")
     note = re.search(r'id="surface-history".*?<p class="note">(.*?)</p>', no_fit["/surface"], re.DOTALL)
     text = _visible_text("<body>" + note.group(1))
