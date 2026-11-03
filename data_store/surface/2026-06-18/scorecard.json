@@ -4616,7 +4616,9 @@
    },
    "description": "Heston at the stored model_version-2 joint SPX/VIX-index fit (DE + L-BFGS-B on 53 z-grid anchors and 4 VIX indices; repo Lewis engine)",
    "fit": {
+    "fit_chain_source": "yahoo",
     "n_anchors_stored": 53,
+    "scored_on_fit_chain": true,
     "source": "joint_cal_2026-06-18.pkl"
    },
    "metrics": {
@@ -5653,7 +5655,7 @@
   "Every model is scored on the same quote universe (the calibrator's cleaned quotes, 7,022) with the same metrics and dense-grid checks. Each model's out_of_sample set is the quotes it was not fitted to, so its size differs by model (essvi 3,725, svi 3,725, svi_cal 3,725, heston_v2 6,969); metrics.common_out_of_sample scores every model on the same 3,695 quotes, those no model was fitted to.",
   "Surfaces are fitted to alternate strikes, so their out-of-sample quotes are the strikes in between (an interpolation test); Heston's in-sample set is its calibration anchors, fitted jointly with the VIX index leg, and its out-of-sample set is every other quote.",
   "svi_cal is the arbitrage-free surface on this session: every slice passes svi.butterfly_certificate (Durrleman g >= 0 on a 1e-4 grid over k in [-3, 2] and a 1/k grid out to |k| = 2,000-3,000, each local minimum refined, and the |k| -> inf limit; minimum g 3.35e-09) and every consecutive pair passes svi.ordering_certificate (total variance ordered to 1e-10 on the same grids, wing slopes and tied-wing intercepts included; minimum w_(i+1) - w_i -8.5e-11). Numerical certificates, not closed-form; fields surface.json surfaces.svi_cal.butterfly_certificate / calendar_ordering. svi has no calendar constraint and its calendar violations are counted in dense_grid.",
-  "Yahoo snapshots carry no quote time: part of every model's spread misses can be stale quotes rather than model error."
+  "Quotes are the session's Yahoo chain, which records no quote time: part of every model's spread misses can be stale quotes rather than model error."
  ],
  "ranking_by_common_oos_median_abs_hs": [
   {
@@ -5715,6 +5717,7 @@
    "oos_rmse_vp": 1.833177331
   }
  ],
+ "report_version": 5,
  "schema_version": 1,
  "session": "2026-06-18"
 }
