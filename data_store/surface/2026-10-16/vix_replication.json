@@ -2,7 +2,7 @@
  "beta": {
   "atm_over_var_swap_30d_svi_cal": 0.7329277749,
   "atm_over_vix_official": 0.7118856356,
-  "atm_over_vix_replicated": 0.7222254963,
+  "atm_over_vix_replicated": 0.7222314709,
   "atm_vol_30d_essvi": 13.93557432,
   "atm_vol_30d_method": "near / next ATM mid IVs of the replicated VIX's own terms, combined with the VIX constant-maturity weights",
   "atm_vol_30d_quotes": 14.23059386,
@@ -11,26 +11,28 @@
   "var_swap_vol_30d_svi_cal_k_-3_to_2": 18.99891354,
   "var_swap_vol_30d_svi_k_-3_to_2": 19.06403038,
   "vix_official": 19.99,
-  "vix_replicated": 19.70380986
+  "vix_replicated": 19.70364686
  },
+ "calculation_time_basis": "chain_t_origin",
  "calculation_time_ny": "2026-10-16T16:00",
+ "calculation_time_source": "the chain's T origin (session close 16:00 ET)",
+ "cboe_close_ny": "2026-10-16T16:15",
  "deviations": [
-  "R is the ^IRX bill rate (cc), not Cboe's CMT spline; dVIX/dR ~ VIX T / 2.",
-  "Calculation time is the chain's T origin; Yahoo snapshots carry no quote time.",
+  "Calculation time is the session's 16:00 ET close: the chain records no quote time (Yahoo). The official close is the 16:15 ET print.",
   "parity_forward replaces the single-strike forward with the cleaned chain's parity-regression F and D (robust to one stale strike).",
   "K0 falls back to the nearest lower strike with both sides quoted when the listed K0 lacks one (two-sided-only storage); flagged per term.",
   "VIX9D/VIX3M/VIX6M use the VIX candidate set and bracket rule at 9/93/184 days (analogues, not Cboe's index-specific series sets).",
-  "SPXW PM lines stand in for the AM SPX monthly on 2026-12-18, 2027-01-15 (the chain stores no SPX-root lines there); their T runs to the 16:00 PM settlement, 6.5 h past the 09:30 SOQ the AM series settles on."
+  "SPXW PM lines stand in for the AM SPX monthly on 2026-12-18, 2027-01-15 (the chain stores no SPX-root lines there); their T runs to the 16:00 PM settlement, 6.5 h past the 09:30 SOQ the AM series settles on.",
+  "VIX bracket 2026-11-13 (28.0 d) / 2026-12-04 (49.0 d) is not Cboe's: Cboe's near and next terms have more than 23 and fewer than 37 days to expiration, and the stored chain lacks the candidate expiry 2026-11-20 (34.7 d); the level interpolates a wider bracket."
  ],
  "gap_notes": [
   "VIX9D is not replicated from the stored chain: no stored Cboe candidate expiries on both sides of 9 days: the nearest pair 2026-10-30 (14.0d) / 2026-11-13 (28.0d) would extrapolate (near weight 1.357, outside [0, 1]), which is not Cboe's interpolation.",
   "The stored chain holds no zero-bid lines (two-sided capture), so Cboe's two-consecutive-zero-bid stop cannot trigger: every stored OTM strike with a bid enters the strip, which can only add variance relative to Cboe's rule on the same book; the stored book's own strike range is the binding limit.",
   "No quote time is stored for this snapshot (Yahoo); the calculation uses 16:00 ET on the session and the official close is the 16:15 ET print (the official index traded 15.72-22.31 that session). Any intraday drift between the snapshot and 16:15 is unmeasured.",
-  "The first Cboe candidate expiry after 30 days (2026-11-20) is not in the stored chain (the bot stores calibration expiries and neighbours), so the bracket is 2026-11-13 (28.0d) - 2026-12-04 (49.0d) instead of a <= 7-day bracket.",
   "near-term 2026-11-13: 110 puts / 84 calls, strip K/F 0.469-1.120",
   "next-term 2026-12-04: 54 puts / 56 calls, strip K/F 0.442-1.170; K0 fell back to the nearest lower strike with both sides quoted",
   "Model variance swaps at 30 days (k in [-3, 2], wings beyond the fitted K/F 0.70-1.30 extrapolated, so each inherits its model's wing bias): SVI-cal 19.00, SVI 19.06, eSSVI 17.81.",
-  "Gap attribution (VIX, SVI-cal surface): replicated - official = -0.29. Strikes beyond the stored strip would add +0.04 under the surface's wing; the stored quotes beyond the fitted K/F 0.70-1.30 are 0.36 index points richer than that wing, so the truncation figure likely understates. Inside the fitted range market and surface differ by +0.20 (these two terms set the replication against the surface; they are not part of the gap). Left unexplained by the chain: +0.24 (official - replicated - truncation; 85% of official - replicated): snapshot timing vs the 16:15 ET print, stale quotes, rate."
+  "Gap attribution (VIX, SVI-cal surface): replicated - official = -0.29. Strikes beyond the stored strip would add +0.04 under the surface's wing; the stored quotes beyond the fitted K/F 0.70-1.30 are 0.36 index points richer than that wing, so the truncation figure likely understates. Inside the fitted range market and surface differ by +0.20 (these two terms set the replication against the surface; they are not part of the gap). Left unexplained by the chain: +0.24 (official - replicated - truncation; 85% of official - replicated): snapshot timing vs the 16:15 ET print, stale quotes."
  ],
  "indices": {
   "VIX": {
@@ -43,6 +45,7 @@
     "near": {
      "F": 7680.472077,
      "K0": 7680.0,
+     "R": 0.04147901649,
      "am_date_pm_proxy": false,
      "days": 28.0,
      "expiry": "2026-11-13",
@@ -61,6 +64,7 @@
     "next": {
      "F": 7680.369967,
      "K0": 7550.0,
+     "R": 0.04147901649,
      "am_date_pm_proxy": false,
      "days": 31.0,
      "expiry": "2026-11-16",
@@ -82,69 +86,93 @@
     "constant_maturity_days": 30,
     "extrapolated": false,
     "forward_source": "cboe_single_strike",
-    "level": 19.70380986,
+    "level": 19.70364686,
     "near": {
-     "F": 7680.551753,
+     "F": 7680.551744,
      "K0": 7680.0,
+     "R": 0.04127099243,
      "am_date_pm_proxy": false,
      "days": 28.0,
      "expiry": "2026-11-13",
      "forward_method": "cboe_single_strike",
-     "highest_K_over_F": 1.119711223,
+     "highest_K_over_F": 1.119711225,
      "k0_fallback": false,
-     "lowest_K_over_F": 0.4687163261,
+     "lowest_K_over_F": 0.4687163266,
      "minutes": 40320,
      "n_calls": 84,
      "n_puts": 110,
      "settlement": "PM",
-     "sigma2": 0.03895117018,
-     "single_term_vol": 19.73605082
+     "sigma2": 0.0389505486,
+     "single_term_vol": 19.73589334
     },
     "near_weight": 0.9047619048,
     "next": {
-     "F": 7692.357562,
+     "F": 7692.357713,
      "K0": 7675.0,
+     "R": 0.04133180602,
      "am_date_pm_proxy": false,
      "days": 49.0,
      "expiry": "2026-12-04",
      "forward_method": "cboe_single_strike",
-     "highest_K_over_F": 1.169992415,
+     "highest_K_over_F": 1.169992392,
      "k0_fallback": true,
-     "lowest_K_over_F": 0.4419971345,
+     "lowest_K_over_F": 0.4419971258,
      "minutes": 70560,
      "n_calls": 56,
      "n_puts": 54,
      "settlement": "PM",
-     "sigma2": 0.03813372668,
-     "single_term_vol": 19.52785874
+     "sigma2": 0.03813297165,
+     "single_term_vol": 19.52766541
     },
     "ok": true
    },
+   "cboe_term_window": {
+    "inside": false,
+    "missing_candidates": [
+     {
+      "days": 34.72916667,
+      "expiry": "2026-11-20",
+      "settlement": "AM"
+     }
+    ],
+    "near": {
+     "days": 28.0,
+     "expiry": "2026-11-13"
+    },
+    "next": {
+     "days": 49.0,
+     "expiry": "2026-12-04"
+    },
+    "window_days": [
+     23.0,
+     37.0
+    ]
+   },
    "gap_attribution": {
     "available": true,
-    "discretisation_pts": 0.01222780662,
-    "far_wing_market_minus_model_pts": 0.3581340622,
-    "fit_inside_range_pts": 0.2010119345,
+    "discretisation_pts": 0.01222779957,
+    "far_wing_market_minus_model_pts": 0.3581232863,
+    "fit_inside_range_pts": 0.2008597184,
     "fit_range_K_over_F": [
      0.7,
      1.3
     ],
-    "gap_pts": -0.2861901395,
+    "gap_pts": -0.286353138,
     "identity": "official - L0 = truncation_pts + residual_pts: only the truncation term explains the gap; far_wing + fit_inside_range + discretisation = L0 - L2c decompose the replication against the surface, not the gap",
     "levels": {
-     "L0_replicated": 19.70380986,
-     "L1_model_outside_fit_range": 19.3456758,
+     "L0_replicated": 19.70364686,
+     "L1_model_outside_fit_range": 19.34552358,
      "L2_model_all_strikes": 19.14466386,
      "L2c_model_continuous_on_strip": 19.13243606,
      "L3_model_continuous_k_-3_to_2": 19.1741115
     },
     "official": 19.99,
-    "residual_pts": 0.2445146951,
-    "residual_share_of_official_minus_replicated": 0.8543784755,
+    "residual_pts": 0.2446776941,
+    "residual_share_of_official_minus_replicated": 0.8544613682,
     "surface": "svi_cal",
-    "truncation_pts": 0.04167544441
+    "truncation_pts": 0.04167544394
    },
-   "gap_vs_official": -0.2861901395,
+   "gap_vs_official": -0.286353138,
    "headline_method": "cboe_rules",
    "official": {
     "close": 19.99,
@@ -165,6 +193,7 @@
     "near": {
      "F": 7680.472077,
      "K0": 7680.0,
+     "R": 0.04147901649,
      "am_date_pm_proxy": false,
      "days": 28.0,
      "expiry": "2026-11-13",
@@ -183,6 +212,7 @@
     "next": {
      "F": 7692.472534,
      "K0": 7675.0,
+     "R": 0.03736557264,
      "am_date_pm_proxy": false,
      "days": 49.0,
      "expiry": "2026-12-04",
@@ -199,7 +229,7 @@
     },
     "ok": true
    },
-   "replicated": 19.70380986
+   "replicated": 19.70364686
   },
   "VIX3M": {
    "any_expiry_parity_forward": {
@@ -211,6 +241,7 @@
     "near": {
      "F": 7731.678337,
      "K0": 7680.0,
+     "R": 0.04714922196,
      "am_date_pm_proxy": true,
      "days": 91.0,
      "expiry": "2027-01-15",
@@ -229,6 +260,7 @@
     "next": {
      "F": 7743.07604,
      "K0": 7740.0,
+     "R": 0.04916272736,
      "am_date_pm_proxy": false,
      "days": 105.0,
      "expiry": "2027-01-29",
@@ -250,69 +282,71 @@
     "constant_maturity_days": 93,
     "extrapolated": false,
     "forward_source": "cboe_single_strike",
-    "level": 20.0749907,
+    "level": 20.07745806,
     "near": {
-     "F": 7731.856133,
+     "F": 7731.846488,
      "K0": 7680.0,
+     "R": 0.04237560445,
      "am_date_pm_proxy": true,
      "days": 91.0,
      "expiry": "2027-01-15",
      "forward_method": "cboe_single_strike",
-     "highest_K_over_F": 1.2933505,
+     "highest_K_over_F": 1.293352114,
      "k0_fallback": true,
-     "lowest_K_over_F": 0.4138721602,
+     "lowest_K_over_F": 0.4138726764,
      "minutes": 131040,
      "n_calls": 46,
      "n_puts": 88,
      "settlement": "PM",
-     "sigma2": 0.0402628575,
-     "single_term_vol": 20.06560677
+     "sigma2": 0.04027196747,
+     "single_term_vol": 20.06787669
     },
     "near_weight": 0.8571428571,
     "next": {
-     "F": 7743.036011,
+     "F": 7743.037065,
      "K0": 7740.0,
+     "R": 0.04268504234,
      "am_date_pm_proxy": false,
      "days": 105.0,
      "expiry": "2027-01-29",
      "forward_method": "cboe_single_strike",
-     "highest_K_over_F": 1.29148308,
+     "highest_K_over_F": 1.291482905,
      "k0_fallback": false,
-     "lowest_K_over_F": 0.3874449241,
+     "lowest_K_over_F": 0.3874448714,
      "minutes": 151200,
      "n_calls": 63,
      "n_puts": 141,
      "settlement": "PM",
-     "sigma2": 0.04049639695,
-     "single_term_vol": 20.12371659
+     "sigma2": 0.04051044898,
+     "single_term_vol": 20.1272077
     },
     "ok": true
    },
    "gap_attribution": {
     "available": true,
-    "discretisation_pts": 0.05314532721,
-    "far_wing_market_minus_model_pts": 0.6445515282,
-    "fit_inside_range_pts": 0.003828333427,
+    "discretisation_pts": 0.0531461951,
+    "far_wing_market_minus_model_pts": 0.6449180474,
+    "fit_inside_range_pts": 0.005928869091,
     "fit_range_K_over_F": [
      0.7,
      1.3
     ],
-    "gap_pts": -0.4250093027,
+    "gap_pts": -0.4225419355,
     "identity": "official - L0 = truncation_pts + residual_pts: only the truncation term explains the gap; far_wing + fit_inside_range + discretisation = L0 - L2c decompose the replication against the surface, not the gap",
     "levels": {
-     "L0_replicated": 20.0749907,
-     "L1_model_outside_fit_range": 19.43043917,
-     "L2_model_all_strikes": 19.42661084,
-     "L2c_model_continuous_on_strip": 19.37346551,
+     "L0_replicated": 20.07745806,
+     "L1_model_outside_fit_range": 19.43254002,
+     "L2_model_all_strikes": 19.42661115,
+     "L2c_model_continuous_on_strip": 19.37346495,
      "L3_model_continuous_k_-3_to_2": 19.49503341
     },
     "official": 20.5,
-    "residual_pts": 0.3034413964,
-    "residual_share_of_official_minus_replicated": 0.7139641285,
+    "residual_pts": 0.3009734736,
+    "residual_share_of_official_minus_replicated": 0.7122925521,
     "surface": "svi_cal",
-    "truncation_pts": 0.1215679063
+    "truncation_pts": 0.1215684619
    },
-   "gap_vs_official": -0.4250093027,
+   "gap_vs_official": -0.4225419355,
    "headline_method": "cboe_rules",
    "official": {
     "close": 20.5,
@@ -328,6 +362,7 @@
     "near": {
      "F": 7731.678337,
      "K0": 7680.0,
+     "R": 0.04714922196,
      "am_date_pm_proxy": true,
      "days": 91.0,
      "expiry": "2027-01-15",
@@ -346,6 +381,7 @@
     "next": {
      "F": 7743.07604,
      "K0": 7740.0,
+     "R": 0.04916272736,
      "am_date_pm_proxy": false,
      "days": 105.0,
      "expiry": "2027-01-29",
@@ -362,7 +398,7 @@
     },
     "ok": true
    },
-   "replicated": 20.0749907
+   "replicated": 20.07745806
   },
   "VIX6M": {
    "any_expiry_parity_forward": {
@@ -374,6 +410,7 @@
     "near": {
      "F": 7804.736106,
      "K0": 7800.0,
+     "R": 0.04708772743,
      "am_date_pm_proxy": false,
      "days": 181.7291667,
      "expiry": "2027-04-16",
@@ -392,6 +429,7 @@
     "next": {
      "F": 7835.161446,
      "K0": 7825.0,
+     "R": 0.04751904843,
      "am_date_pm_proxy": false,
      "days": 216.7291667,
      "expiry": "2027-05-21",
@@ -413,69 +451,71 @@
     "constant_maturity_days": 184,
     "extrapolated": false,
     "forward_source": "cboe_single_strike",
-    "level": 21.5655036,
+    "level": 21.57402348,
     "near": {
-     "F": 7804.74703,
+     "F": 7804.750707,
      "K0": 7800.0,
+     "R": 0.04303411957,
      "am_date_pm_proxy": false,
      "days": 181.7291667,
      "expiry": "2027-04-16",
      "forward_method": "cboe_single_strike",
-     "highest_K_over_F": 1.281271508,
+     "highest_K_over_F": 1.281270905,
      "k0_fallback": false,
-     "lowest_K_over_F": 0.1281271508,
+     "lowest_K_over_F": 0.1281270905,
      "minutes": 261690,
      "n_calls": 51,
      "n_puts": 167,
      "settlement": "AM",
-     "sigma2": 0.04641396255,
-     "single_term_vol": 21.54389996
+     "sigma2": 0.0464499127,
+     "single_term_vol": 21.55224181
     },
     "near_weight": 0.9351190476,
     "next": {
-     "F": 7835.095611,
+     "F": 7835.105462,
      "K0": 7825.0,
+     "R": 0.04312146139,
      "am_date_pm_proxy": false,
      "days": 216.7291667,
      "expiry": "2027-05-21",
      "forward_method": "cboe_single_strike",
-     "highest_K_over_F": 1.531570334,
+     "highest_K_over_F": 1.531568408,
      "k0_fallback": false,
-     "lowest_K_over_F": 0.1276308611,
+     "lowest_K_over_F": 0.1276307007,
      "minutes": 312090,
      "n_calls": 60,
      "n_puts": 154,
      "settlement": "AM",
-     "sigma2": 0.04763262131,
-     "single_term_vol": 21.82489893
+     "sigma2": 0.04767909488,
+     "single_term_vol": 21.83554324
     },
     "ok": true
    },
    "gap_attribution": {
     "available": true,
-    "discretisation_pts": 0.00458937187,
-    "far_wing_market_minus_model_pts": 1.492650201,
-    "fit_inside_range_pts": -0.03266884844,
+    "discretisation_pts": 0.00458939029,
+    "far_wing_market_minus_model_pts": 1.494639042,
+    "fit_inside_range_pts": -0.02613779471,
     "fit_range_K_over_F": [
      0.7,
      1.3
     ],
-    "gap_pts": -0.1044964043,
+    "gap_pts": -0.09597652128,
     "identity": "official - L0 = truncation_pts + residual_pts: only the truncation term explains the gap; far_wing + fit_inside_range + discretisation = L0 - L2c decompose the replication against the surface, not the gap",
     "levels": {
-     "L0_replicated": 21.5655036,
-     "L1_model_outside_fit_range": 20.07285339,
-     "L2_model_all_strikes": 20.10552224,
-     "L2c_model_continuous_on_strip": 20.10093287,
+     "L0_replicated": 21.57402348,
+     "L1_model_outside_fit_range": 20.07938444,
+     "L2_model_all_strikes": 20.10552223,
+     "L2c_model_continuous_on_strip": 20.10093284,
      "L3_model_continuous_k_-3_to_2": 20.10903278
     },
     "official": 21.67,
-    "residual_pts": 0.09639649689,
-    "residual_share_of_official_minus_replicated": 0.9224862569,
+    "residual_pts": 0.08787658359,
+    "residual_share_of_official_minus_replicated": 0.9156050087,
     "surface": "svi_cal",
-    "truncation_pts": 0.00809990744
+    "truncation_pts": 0.008099937681
    },
-   "gap_vs_official": -0.1044964043,
+   "gap_vs_official": -0.09597652128,
    "headline_method": "cboe_rules",
    "official": {
     "close": 21.67,
@@ -491,6 +531,7 @@
     "near": {
      "F": 7804.736106,
      "K0": 7800.0,
+     "R": 0.04708772743,
      "am_date_pm_proxy": false,
      "days": 181.7291667,
      "expiry": "2027-04-16",
@@ -509,6 +550,7 @@
     "next": {
      "F": 7835.161446,
      "K0": 7825.0,
+     "R": 0.04751904843,
      "am_date_pm_proxy": false,
      "days": 216.7291667,
      "expiry": "2027-05-21",
@@ -525,7 +567,7 @@
     },
     "ok": true
    },
-   "replicated": 21.5655036
+   "replicated": 21.57402348
   },
   "VIX9D": {
    "any_expiry_parity_forward": {
@@ -537,6 +579,7 @@
     "near": {
      "F": 7668.702128,
      "K0": 7665.0,
+     "R": 0.04147901649,
      "am_date_pm_proxy": false,
      "days": 13.0,
      "expiry": "2026-10-29",
@@ -555,6 +598,7 @@
     "next": {
      "F": 7670.978101,
      "K0": 7670.0,
+     "R": 0.03487899003,
      "am_date_pm_proxy": false,
      "days": 14.0,
      "expiry": "2026-10-30",
@@ -576,41 +620,43 @@
     "constant_maturity_days": 9,
     "extrapolated": true,
     "forward_source": "cboe_single_strike",
-    "level": 19.87293512,
+    "level": 19.8729213,
     "near": {
-     "F": 7670.651035,
+     "F": 7670.651029,
      "K0": 7670.0,
+     "R": 0.04124417519,
      "am_date_pm_proxy": false,
      "days": 14.0,
      "expiry": "2026-10-30",
      "forward_method": "cboe_single_strike",
-     "highest_K_over_F": 1.089868378,
+     "highest_K_over_F": 1.089868379,
      "k0_fallback": false,
-     "lowest_K_over_F": 0.5736149357,
+     "lowest_K_over_F": 0.5736149361,
      "minutes": 20160,
      "n_calls": 115,
      "n_puts": 310,
      "settlement": "PM",
-     "sigma2": 0.03920799459,
-     "single_term_vol": 19.80100871
+     "sigma2": 0.03920764142,
+     "single_term_vol": 19.80091953
     },
     "near_weight": 1.357142857,
     "next": {
-     "F": 7680.551753,
+     "F": 7680.551744,
      "K0": 7680.0,
+     "R": 0.04127099243,
      "am_date_pm_proxy": false,
      "days": 28.0,
      "expiry": "2026-11-13",
      "forward_method": "cboe_single_strike",
-     "highest_K_over_F": 1.119711223,
+     "highest_K_over_F": 1.119711225,
      "k0_fallback": false,
-     "lowest_K_over_F": 0.4687163261,
+     "lowest_K_over_F": 0.4687163266,
      "minutes": 40320,
      "n_calls": 84,
      "n_puts": 110,
      "settlement": "PM",
-     "sigma2": 0.03895117018,
-     "single_term_vol": 19.73605082
+     "sigma2": 0.0389505486,
+     "single_term_vol": 19.73589334
     },
     "ok": true
    },
@@ -634,6 +680,7 @@
     "near": {
      "F": 7670.978101,
      "K0": 7670.0,
+     "R": 0.03487899003,
      "am_date_pm_proxy": false,
      "days": 14.0,
      "expiry": "2026-10-30",
@@ -652,6 +699,7 @@
     "next": {
      "F": 7680.472077,
      "K0": 7680.0,
+     "R": 0.04147901649,
      "am_date_pm_proxy": false,
      "days": 28.0,
      "expiry": "2026-11-13",
@@ -671,15 +719,32 @@
   }
  },
  "rate": {
-  "R_cc": 0.04147901649,
-  "source": "^IRX 13-week bill (Cboe: CMT cubic spline per expiry)"
+  "cmt_yields_by_days": {
+   "1095": 0.0485,
+   "10950": 0.0543,
+   "182": 0.0435,
+   "1825": 0.0491,
+   "2555": 0.05,
+   "30": 0.0417,
+   "365": 0.0449,
+   "3650": 0.051,
+   "60": 0.0419,
+   "730": 0.0477,
+   "7300": 0.0548,
+   "91": 0.0428
+  },
+  "curve_date": "2026-10-15",
+  "method": "cboe_cmt_bounded_spline",
+  "source": "The session close's curve: the U.S. Treasury par yield curve (CMT) of 2026-10-15, the newest before the session, the one Cboe computes the session's close with, at Cboe's tenors. Each term's rate is Cboe's bounded natural cubic spline at its expiration, in calendar days counted from that curve's date as Cboe's published sample counts them, the bond-equivalent yield taken to an annual percentage yield and then to continuous compounding (Cboe Volatility Index Mathematics Methodology sec. 2.1). A book timed after the close (in Global Trading Hours) keeps this curve and this day count, so each term's rate is the one the Cboe close it is compared with used; each term records the rate it used"
  },
+ "report_version": 5,
  "schema_version": 1,
  "session": "2026-10-16",
  "strip": [
   {
    "F": 7668.702128,
    "K0": 7665.0,
+   "R": 0.04147901649,
    "T_surface": 0.03561643836,
    "atm_over_vs": 0.7240015014,
    "atm_vol_essvi": 14.01800049,
@@ -709,6 +774,7 @@
   {
    "F": 7670.978101,
    "K0": 7670.0,
+   "R": 0.03487899003,
    "T_surface": 0.03835616438,
    "atm_over_vs": 0.7259341781,
    "atm_vol_essvi": 13.63690227,
@@ -738,6 +804,7 @@
   {
    "F": 7671.988035,
    "K0": 7670.0,
+   "R": 0.04147901649,
    "T_surface": 0.04657534247,
    "atm_over_vs": 0.7295269022,
    "atm_vol_essvi": 13.41143496,
@@ -767,6 +834,7 @@
   {
    "F": 7680.472077,
    "K0": 7680.0,
+   "R": 0.04147901649,
    "T_surface": 0.07671232877,
    "atm_over_vs": 0.7222817977,
    "atm_vol_essvi": 14.15132184,
@@ -796,6 +864,7 @@
   {
    "F": 7680.369967,
    "K0": 7550.0,
+   "R": 0.04147901649,
    "T_surface": 0.08493150685,
    "atm_over_vs": 0.7394424267,
    "atm_vol_essvi": 13.83703735,
@@ -825,6 +894,7 @@
   {
    "F": 7680.894349,
    "K0": 7675.0,
+   "R": 0.04147901649,
    "T_surface": 0.08767123288,
    "atm_over_vs": 0.7279652161,
    "atm_vol_essvi": 13.84975957,
@@ -854,6 +924,7 @@
   {
    "F": 7692.472534,
    "K0": 7675.0,
+   "R": 0.03736557264,
    "T_surface": 0.1342465753,
    "atm_over_vs": 0.7221166513,
    "atm_vol_essvi": 14.16815239,
@@ -883,6 +954,7 @@
   {
    "F": 7702.882188,
    "K0": 7700.0,
+   "R": 0.03732771376,
    "T_surface": 0.1726027397,
    "atm_over_vs": 0.718985324,
    "atm_vol_essvi": 14.24482337,
@@ -912,6 +984,7 @@
   {
    "F": 7714.676241,
    "K0": 7710.0,
+   "R": 0.04025279094,
    "T_surface": 0.2082191781,
    "atm_over_vs": 0.7153165753,
    "atm_vol_essvi": 14.18301493,
@@ -941,6 +1014,7 @@
   {
    "F": 7731.678337,
    "K0": 7680.0,
+   "R": 0.04714922196,
    "T_surface": 0.2493150685,
    "atm_over_vs": 0.7165971498,
    "atm_vol_essvi": 14.23400227,
@@ -970,6 +1044,7 @@
   {
    "F": 7743.07604,
    "K0": 7740.0,
+   "R": 0.04916272736,
    "T_surface": 0.2876712329,
    "atm_over_vs": 0.7217741305,
    "atm_vol_essvi": 14.40665545,
@@ -999,6 +1074,7 @@
   {
    "F": 7787.723381,
    "K0": 7785.0,
+   "R": 0.04451254208,
    "T_surface": 0.4547945205,
    "atm_over_vs": 0.7344937926,
    "atm_vol_essvi": 15.02368156,
@@ -1028,6 +1104,7 @@
   {
    "F": 7804.736106,
    "K0": 7800.0,
+   "R": 0.04708772743,
    "T_surface": 0.4978881279,
    "atm_over_vs": 0.7078414178,
    "atm_vol_essvi": 15.20478267,
@@ -1057,6 +1134,7 @@
   {
    "F": 7835.161446,
    "K0": 7825.0,
+   "R": 0.04751904843,
    "T_surface": 0.5937785388,
    "atm_over_vs": 0.7152378943,
    "atm_vol_essvi": 15.64985719,
@@ -1086,6 +1164,7 @@
   {
    "F": 7953.728637,
    "K0": 7950.0,
+   "R": 0.04752975023,
    "T_surface": 0.9561643836,
    "atm_over_vs": 0.7868972792,
    "atm_vol_essvi": 16.54597436,
@@ -1115,6 +1194,7 @@
   {
    "F": 7970.547828,
    "K0": 7950.0,
+   "R": 0.04948072522,
    "T_surface": 0.9965182648,
    "atm_over_vs": 0.7857842697,
    "atm_vol_essvi": 16.62052607,
@@ -1144,6 +1224,7 @@
   {
    "F": 8027.899842,
    "K0": 8000.0,
+   "R": 0.04956336152,
    "T_surface": 1.169121005,
    "atm_over_vs": 0.7400096189,
    "atm_vol_essvi": 16.87563825,

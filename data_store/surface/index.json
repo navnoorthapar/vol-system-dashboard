@@ -217,14 +217,17 @@
     }
    },
    "n_quotes": 7022,
+   "quote_time": null,
+   "report_version": 5,
    "session": "2026-06-18",
+   "source": "yfinance",
    "vix_gap_attribution": {
-    "residual_pts": -0.1114490825,
-    "truncation_pts": 0.02546371337
+    "residual_pts": -0.1109231701,
+    "truncation_pts": 0.02546371185
    },
    "vix_method": "cboe_rules",
    "vix_official": 16.4,
-   "vix_replicated": 16.48598537
+   "vix_replicated": 16.48545946
   },
   {
    "arbitrage_quotes_outside_spread": 85,
@@ -273,14 +276,17 @@
     }
    },
    "n_quotes": 2913,
+   "quote_time": null,
+   "report_version": 5,
    "session": "2026-10-16",
+   "source": "yfinance",
    "vix_gap_attribution": {
-    "residual_pts": 0.2445146951,
-    "truncation_pts": 0.04167544441
+    "residual_pts": 0.2446776941,
+    "truncation_pts": 0.04167544394
    },
    "vix_method": "cboe_rules",
    "vix_official": 19.99,
-   "vix_replicated": 19.70380986
+   "vix_replicated": 19.70364686
   },
   {
    "arbitrage_quotes_outside_spread": 0,
