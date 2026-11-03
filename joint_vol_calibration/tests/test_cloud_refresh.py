@@ -45,56 +45,6 @@ def _load():
 
 # ── Import hygiene ────────────────────────────────────────────────────────────
 
-def test_the_close_slot_refuses_a_closing_book_whose_underlying_traded_after_the_close():
-    """w5 review, minor 3: the close slot stored a book in the 'closing' state (by its
-    quote time) as the session's closing book without reading the underlying's last
-    trade time its capture records. One that last traded after the close is not the
-    regular session's last quotes, and is refused with the reason; one that records no
-    last trade is stored (the surface says it could not be checked)."""
-    from types import SimpleNamespace
-
-    cr = _load()
-    for last, refused in (("2026-10-30T16:14:59", False), (None, False), ("2026-10-30T18:00:00", True)):
-        why = cr._last_trade_refusal(SimpleNamespace(underlying_last_trade_time=last), "2026-10-30")
-        assert (why is not None) is refused, last
-    late = SimpleNamespace(underlying_last_trade_time="2026-10-30T18:00:00")
-    assert cr._last_trade_refusal(late, "2026-10-30") == (
-        "its underlying's last trade, 2026-10-30T18:00:00 ET, is not at or before the session's 16:15 ET "
-        "close, so it is not the closing book")
-
-
-def test_the_ledger_takes_the_closing_book_after_the_yahoo_chain_except_after_a_friday(tmp_path, monkeypatch):
-    """w5 review, minor 5: DATA_SOURCES.md said the forward ledger uses 'a closing book
-    only when the session has no other'. _ledger_books puts it after the Yahoo chain
-    after a Monday-to-Thursday session (the book slot's book is the overnight one) and
-    first after a Friday (the book slot still finds the closing book); the register now
-    says so."""
-    cr = _load()
-    monkeypatch.setattr(cr, "DATA", tmp_path)
-    monkeypatch.delenv(cboe.BOOKS_DIR_ENV, raising=False)
-    books = tmp_path / "options" / "cboe"
-    books.mkdir(parents=True)
-
-    def book(session, stem, state):
-        pd.DataFrame({"strike": [7500.0], "bid": [1.0], "ask": [1.1]}).to_parquet(books / f"{stem}.parquet")
-        (books / f"{stem}.json").write_text(json.dumps({"session": session, "book_state": state,
-                                                        "quote_time": "2026-10-30T00:00:00Z"}))
-    book("2026-10-29", "spx_2026-10-29_220705Z", "closing")      # Thursday: the close slot's
-    book("2026-10-29", "spx_2026-10-29_085136Z", "gth")           # and the book slot's
-    book("2026-10-30", "spx_2026-10-30_220705Z", "closing")      # Friday: the closing book only
-    yahoo = {"raw": pd.DataFrame({"strike": [7500.0]}), "symbol": "^SPX", "fetched_at": "x"}
-
-    def order(session):
-        return [(b["meta"]["source"], b["meta"].get("book_state")) for b in cr._ledger_books(session, yahoo)]
-    assert order("2026-10-29") == [("cboe", "gth"), ("yahoo", None), ("cboe", "closing")]
-    assert order("2026-10-30") == [("cboe", "closing"), ("yahoo", None)]
-    text = " ".join((pathlib.Path(__file__).resolve().parents[2] / "DATA_SOURCES.md").read_text().split())
-    assert "a closing book only when the session has no other" not in text
-    assert "After a Monday-to-Thursday session the closing book comes after that Yahoo chain" in text
-    assert ("after a Friday or a holiday eve, when the book slot still finds the closing book, it keeps "
-            "its place first") in text
-
-
 def test_import_has_no_side_effects(tmp_path, monkeypatch):
     """Pre-C22 the import chdir'ed to the repo root, configured root logging
     and froze TODAY, making other tests order-dependent."""
@@ -847,6 +797,47 @@ def test_the_closebook_step_does_not_store_a_closing_book_that_is_not_live(env, 
     assert rec["capture"]["captures"]["SPX"]["reason"] == spx["reason"]
     assert "::warning title=Cboe capture::" in capsys.readouterr().out
     assert any("SPX rejected (not a live book" in w for w in st["warnings"])
+
+
+def test_the_close_slot_stores_a_vix_closing_book_whatever_its_underlyings_last_trade(tmp_path, monkeypatch):
+    """w5w2 check, F2: the close slot refused a closing-state book whose underlying's
+    last trade was after the 16:15 ET cutoff. Cboe stamps the VIX close one second
+    after it: every VIX capture records the session's 16:15:01 (the 2026-10-30
+    closing book's record, data_store/options/cboe/vix_2026-10-30_084020Z.json,
+    among them), so every VIX closing book was refused, with a false reason in the
+    public run record. The check told nothing apart for SPX either: its overnight
+    books record the session's 16:14:59, as its closing book does (the index does
+    not trade overnight). A book is the closing book by its quote time, as before:
+    the close slot's capture at 2026-10-30 22:30 UTC (Fri 18:30 EDT) of books shaped
+    as that session's records stores both, the VIX one with its 16:15:01."""
+    import dataclasses
+
+    cr = _load()
+    session, at = "2026-10-30", datetime(2026, 10, 30, 22, 30, tzinfo=UTC)
+    spx = dataclasses.replace(_full_spx_capture(session=session),
+                              underlying_last_trade_time="2026-10-30T16:14:59")
+    strikes = 17.0 + 0.5 * np.arange(11)                  # about the VIX's 19.42 close
+    vix = cboe.ChainCapture(
+        underlying="VIX", session=session, quote_time="2026-10-30T23:49:52Z", book_state="closing",
+        frame=pd.DataFrame({"snapshot_date": session, "underlying": "VIX", "root": "VIX",
+                            "expiry": "2026-11-18", "strike": strikes, "right": "C", "bid": 1.0,
+                            "ask": 1.1, "quote_time": "2026-10-30T23:49:52Z", "source": "cboe",
+                            "contract_symbol": [f"VIX261118C{i}" for i in range(len(strikes))]}),
+        fetched_at="2026-10-31T08:40:20Z", payload_timestamp="2026-10-31T00:04:52Z",
+        underlying_last_trade_time="2026-10-30T16:15:01", underlying_price=19.42,
+        url="https://cdn.cboe.com/api/global/delayed_quotes/options/_VIX.json", sha256="c6" * 32,
+        n_bytes=679368)
+    books = {"SPX": spx, "VIX": vix}
+    monkeypatch.setattr(cboe, "capture_option_chain",
+                        lambda und, now=None, **kw: _capture_fetched_at(books[und], at))
+    st = cr.capture_cboe_chains(at, session, out_dir=tmp_path, closing_only=True)
+    assert st["status"] == "captured", st["reason"]
+    for und in ("SPX", "VIX"):
+        c = st["captures"][und]
+        assert (c["status"], c["book_state"]) == ("captured", "closing"), (und, c)
+    side = json.loads(pathlib.Path(st["captures"]["VIX"]["file"]).with_suffix(".json").read_text())
+    assert side["underlying_last_trade_time"] == "2026-10-30T16:15:01"      # kept as recorded data
+    assert "last trade" not in st["reason"]
 
 
 def test_the_ledger_keeps_the_book_slots_books_before_a_weekday_closing_book(env, monkeypatch):

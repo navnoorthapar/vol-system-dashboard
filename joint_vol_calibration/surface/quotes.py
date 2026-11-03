@@ -324,7 +324,6 @@ def select_session_chain(session: str, spot: float, r_clean, *,
     "cboe" (a capture or ValueError), "yahoo" (the stored Yahoo chain only).
     ``inputs`` records which and why."""
     from joint_vol_calibration.backtest import forward_ledger as fl
-    from joint_vol_calibration.data import cboe_downloader as cd
 
     if source not in ("auto", "cboe", "yahoo"):
         raise ValueError(f"source must be 'auto', 'cboe' or 'yahoo', got {source!r}")
@@ -353,23 +352,13 @@ def select_session_chain(session: str, spot: float, r_clean, *,
             refused.append(f"{label}: unreadable ({type(e).__name__}: {e})")
             continue
         why = fl.book_share_refusal(clean) or (None if clean.ok else clean.reason)
-        # a closing-state book (by its quote time) is the closing book only if its
-        # underlying last traded on the session at or before the close (w5 review)
-        check = (cd.closing_book_check(side.get("underlying_last_trade_time"), session)
-                 if side.get("book_state") == CLOSING_BOOK else None)
-        if not why and check and check["result"] == cd.LAST_TRADE_LATE:
-            why = (f"its underlying's last trade, {check['last_trade']} ET, is not at or before the "
-                   f"session's {check['cutoff']} ET close, so it is not the closing book")
         if why:
             refused.append(f"{label}: {why}")
             continue
-        if check:
-            traded = (f"its underlying's last trade {check['last_trade']} ET, at or before that close"
-                      if check["result"] == cd.LAST_TRADE_OK else
-                      "its record holds no underlying last-trade time, so that could not be checked")
+        if side.get("book_state") == CLOSING_BOOK:
             which = (f"the session's closing book (its quotes the ones standing at the "
                      f"{db.close_data_cutoff(session):%H:%M} ET close, when the official VIX-family "
-                     f"closes are computed; {traded})")
+                     "closes are computed)")
         else:
             newest = "the newest" if path == max(caps, key=_fetched)[0] else "an earlier"
             which = (f"{newest} stored Cboe book of the session"
@@ -389,8 +378,6 @@ def select_session_chain(session: str, spot: float, r_clean, *,
             "raw_sha256": side.get("sha256"), "book_state": side.get("book_state"),
             "fetched_at": side.get("fetched_at"), "capture_rows": side.get("rows"),
             "capture_two_sided_rows": side.get("two_sided_rows"), "refused": refused,
-            "underlying_last_trade_time": side.get("underlying_last_trade_time"),
-            "closing_book_check": check,
             "closing_books": n_closing,
             "closing_book_refusal": None if n_closing else closing_book_refusal(session),
             "closing_book_run": None if n_closing else closing_book_run(session)}

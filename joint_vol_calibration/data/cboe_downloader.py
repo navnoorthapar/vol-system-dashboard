@@ -778,39 +778,6 @@ def book_state_at(at: datetime, session: str | None) -> str:
     return "closing"
 
 
-# closing_book_check results
-LAST_TRADE_OK, LAST_TRADE_LATE = "at or before the close", "after the close"
-LAST_TRADE_MISSING = "not recorded"
-
-
-def closing_book_check(underlying_last_trade_time: str | None, session: str) -> dict:
-    """The check a book in the 'closing' state (book_state_at, by its quote
-    time alone) must pass to be called the session's closing book: its
-    underlying's last trade, as the capture records it (Cboe's
-    last_trade_time, New York local time; a UTC offset, if given, is honoured),
-    on the session's own date at or before its data cutoff (16:15 ET, 13:15 on
-    an early close; database.close_data_cutoff), so the quotes are the
-    regular session's last ones. Returns {"last_trade": the time as recorded,
-    "cutoff": "HH:MM", "result": LAST_TRADE_OK | LAST_TRADE_LATE |
-    LAST_TRADE_MISSING}: a capture whose record has no last-trade time (one
-    written before it was recorded, or a payload without it) is not refused,
-    and the record says it could not be checked."""
-    cutoff = db.close_data_cutoff(session)
-    out = {"last_trade": underlying_last_trade_time, "cutoff": f"{cutoff:%H:%M}",
-           "result": LAST_TRADE_MISSING}
-    if not underlying_last_trade_time:
-        return out
-    try:
-        at = datetime.fromisoformat(str(underlying_last_trade_time))
-    except ValueError:
-        return out
-    if at.tzinfo is not None:
-        at = at.astimezone(db.NY_TZ).replace(tzinfo=None)
-    close = datetime.combine(datetime.fromisoformat(str(session)).date(), cutoff)
-    out["result"] = LAST_TRADE_OK if at.date() == close.date() and at <= close else LAST_TRADE_LATE
-    return out
-
-
 def feed_book_state(now: datetime, session: str | None) -> str:
     """The book state (book_state_at) of the quotes the delayed feed shows for
     ``session`` when fetched at ``now``: they are QUOTE_DELAY old. Read off the

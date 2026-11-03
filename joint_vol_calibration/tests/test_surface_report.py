@@ -6,6 +6,7 @@ data_store/surface artifacts with a recomputation.
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -570,8 +571,7 @@ def test_a_sessions_closing_book_is_preferred_to_its_later_overnight_book(tmp_pa
     assert sq.inputs["closing_books"] == 1
     assert sq.inputs["source_reason"].startswith(
         "the session's closing book (its quotes the ones standing at the 16:15 ET close, when the "
-        "official VIX-family closes are computed; its record holds no underlying last-trade time, so that "
-        "could not be checked); it passes the quote-state gates")
+        "official VIX-family closes are computed); it passes the quote-state gates")
     out = report.run_session(SESSION, models=["essvi"])
     vixd = out["vix_replication"]
     assert out["surface"]["inputs"]["chain"] == sq.inputs["chain"]
@@ -669,85 +669,67 @@ def test_a_session_whose_closing_book_the_close_slot_did_not_store_says_why(tmp_
                            "none: it was not kept), quoted at ")
 
 
-def test_a_closing_book_is_one_whose_underlying_last_traded_by_the_close(tmp_path, monkeypatch):
-    """w5 review, minor 3: the session's book in the 'closing' state (by its quote time)
-    was called its closing book, 'its quotes the ones standing at the 16:15 ET close',
-    without checking the underlying's last trade time the capture records. Its last
-    trade must be on the session at or before the close: a later one leaves it refused
-    (the overnight book is used, and the note says the closing book did not pass the
-    gates); the check is recorded in surface.json, and a record without a last-trade
-    time says it could not be checked."""
-    from joint_vol_calibration.data import cboe_downloader as cd
+def test_a_book_is_the_closing_book_by_its_quote_time_not_its_underlyings_last_trade(tmp_path, monkeypatch):
+    """w5w2 check, F2 and F3: 8f6f776 called a closing-state book (by its quote time)
+    the session's closing book only if its underlying's last trade was at or before
+    the 16:15 ET cutoff, refused it otherwise, and cited that last trade in the source
+    reason. The record shows the check cannot work: Cboe stamps the VIX close 16:15:01,
+    and every stored SPX overnight book records the session's 16:14:59, as its closing
+    book does (the index does not trade overnight). The book is named by its quote time
+    alone, as before, whatever last trade its record holds, and no source text cites
+    it; surface.json keeps no last-trade check."""
     from joint_vol_calibration.surface import quotes as sqm
 
     gth = "2026-10-19T02:30:00Z"            # Sun 22:30 ET: GTH for Monday, after Friday SESSION
     path, _ = _capture_store(tmp_path, monkeypatch, gth, book_state="gth")
     closing = _second_capture(path, f"spx_{SESSION}_221000Z", "2026-10-16T21:55:00Z", "closing",
                               "2026-10-16T22:10:00Z")
-    side_path = closing.with_suffix(".json")
 
-    def built(last_trade):
-        side = json.loads(side_path.read_text())
-        side["underlying_last_trade_time"] = last_trade
-        side_path.write_text(json.dumps(side))
-        return sqm.load_session_quotes(SESSION).inputs
+    def last_trade(p, at):
+        side = json.loads(p.with_suffix(".json").read_text())
+        side["underlying_last_trade_time"] = at
+        p.with_suffix(".json").write_text(json.dumps(side))
 
-    inp = built(f"{SESSION}T16:14:59")
-    assert inp["book_state"] == "closing"
-    assert inp["closing_book_check"] == {"last_trade": f"{SESSION}T16:14:59", "cutoff": "16:15",
-                                         "result": cd.LAST_TRADE_OK}
-    assert inp["underlying_last_trade_time"] == f"{SESSION}T16:14:59"
-    reason = inp["source_reason"]
-    assert f"its underlying's last trade {SESSION}T16:14:59 ET, at or before that close" in reason
-    inp = built(None)
-    assert inp["book_state"] == "closing"
-    assert inp["closing_book_check"]["result"] == cd.LAST_TRADE_MISSING
-    reason = inp["source_reason"]
-    assert "its record holds no underlying last-trade time, so that could not be checked" in reason
-    inp = built(f"{SESSION}T17:40:00")
-    assert inp["book_state"] == "gth"
-    assert inp["closing_books"] == 1
-    late = (f"options/cboe/{closing.name}: its underlying's last trade, {SESSION}T17:40:00 ET, is not at "
-            "or before the session's 16:15 ET close")
-    assert any(r.startswith(late) for r in inp["refused"])
-    notes = report.run_session(SESSION, models=["essvi"])["vix_replication"]["gap_notes"]
-    assert any("(the session's closing book did not pass the quote-state gates)" in n for n in notes)
+    last_trade(path, f"{SESSION}T16:14:59")           # the overnight book: the session's last print
+    for at in (f"{SESSION}T16:14:59", f"{SESSION}T16:15:01", f"{SESSION}T17:40:00", None):
+        last_trade(closing, at)
+        inp = sqm.load_session_quotes(SESSION).inputs
+        assert inp["chain"] == f"data_store/options/cboe/{closing.name}", at
+        assert inp["book_state"] == "closing"
+        assert inp["refused"] == []
+        assert not re.search(r"last[ -]trade", inp["source_reason"])
+        assert not {"closing_book_check", "underlying_last_trade_time"} & set(inp)
+    sj = report.run_session(SESSION, models=["essvi"])["surface"]["inputs"]
+    assert not {"closing_book_check", "underlying_last_trade_time"} & set(sj)
+    # without the closing book, the overnight book is the overnight book, its last print
+    # on the session's own date notwithstanding
+    closing.unlink()
+    closing.with_suffix(".json").unlink()
+    inp = sqm.load_session_quotes(SESSION).inputs
+    assert (inp["chain"], inp["book_state"]) == (f"data_store/options/cboe/{path.name}", "gth")
 
 
-def test_surface_json_records_the_closing_book_check_and_the_close_slots_runs(tmp_path, monkeypatch):
-    """w5 review, minors 1 and 3: the surface's choice of book holds the closing
-    book's last-trade check and, with no closing book stored, what the close slot's
-    run records say, and the recompute audit compares surface.json's record of each
-    with the stored books and data_store/runs. surface.json kept neither, so the
-    audit's comparisons never ran and its clock read no last trade (it took every
-    book quoted in the closing hours for the closing book). surface.json now records
-    the check, the last trade it read, and the close slot's runs, as the chain
-    selection gives them."""
-    from joint_vol_calibration.data import cboe_downloader as cd
+def test_surface_json_records_the_close_slots_runs(tmp_path, monkeypatch):
+    """w5 review, minor 1: with no closing book stored, the surface's choice of book
+    holds what the close slot's run records say, and the recompute audit compares
+    surface.json's record of it with data_store/runs. surface.json did not keep it, so
+    the audit's comparison never ran. surface.json now records the close slot's runs,
+    as the chain selection gives them."""
     from joint_vol_calibration.surface import quotes as sqm
 
     gth = "2026-10-19T02:30:00Z"            # Sun 22:30 ET: GTH for Monday, after Friday SESSION
     path, _ = _capture_store(tmp_path, monkeypatch, gth, book_state="gth")
     closing = _second_capture(path, f"spx_{SESSION}_221000Z", "2026-10-16T21:55:00Z", "closing",
                               "2026-10-16T22:10:00Z")
-    side_path = closing.with_suffix(".json")
-    side = json.loads(side_path.read_text())
-    side["underlying_last_trade_time"] = f"{SESSION}T16:14:59"
-    side_path.write_text(json.dumps(side))
-    sq = sqm.load_session_quotes(SESSION)
     inp = report.run_session(SESSION, models=["essvi"])["surface"]["inputs"]
     assert inp["chain"] == f"data_store/options/cboe/{closing.name}"
-    assert inp["underlying_last_trade_time"] == f"{SESSION}T16:14:59"
-    assert inp["closing_book_check"] == sq.inputs["closing_book_check"] == {
-        "last_trade": f"{SESSION}T16:14:59", "cutoff": "16:15", "result": cd.LAST_TRADE_OK}
     assert inp["closing_book_run"] is None                  # a closing book is stored
     # no closing book stored and no close-slot run recorded: the overnight book, and the
     # record of the runs the note's reason rests on
     closing.unlink()
-    side_path.unlink()
+    closing.with_suffix(".json").unlink()
     inp = report.run_session(SESSION, models=["essvi"])["surface"]["inputs"]
     assert inp["chain"] == f"data_store/options/cboe/{path.name}"
-    assert inp["closing_book_check"] is None
     assert inp["closing_book_run"] == sqm.closing_book_run(SESSION) == sqm.CLOSE_RUN_NONE
 
 
