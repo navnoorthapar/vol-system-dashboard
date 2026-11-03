@@ -319,6 +319,52 @@ class TestSimulatedSession:
         assert any("simulate_next_session.py --full" in r for r in runs)
         assert any("simulate_next_session.py --no-fit" in r for r in runs)
 
+    def test_a_session_failed_closed_on_a_privately_held_closing_book_is_deferred(self, sim, tmp_path,
+                                                                                  monkeypatch):
+        """w5w2 check, F5: the backfill fails a stale session closed when a manifest
+        records its closing book in the private store and the run cannot read it
+        (d396da5). CI's simulation has no private store, and counted that failure (and
+        the run's exit 1) as a problem, so once books are held privately every pull
+        request that bumps the report version would fail the simulation job. There the
+        session is deferred and the report says so; with a store configured
+        (CBOE_BOOKS_DIR), or without such a manifest, the failure stands."""
+        s, stem = "2026-10-30", "spx_2026-10-30_084019Z"
+        man = tmp_path / "data_store" / "options" / "cboe_manifest"
+        man.mkdir(parents=True)
+        (man / f"{stem}.json").write_text(json.dumps({"underlying": "SPX", "session": s,
+                                                      "book_state": "closing"}))
+        (tmp_path / "data_store" / "market" / "vix_futures_daily").mkdir(parents=True)
+        (tmp_path / "data_store" / "market" / "vix_futures_daily" / "vix_futures_daily_2026.parquet").touch()
+        err = (f"FileNotFoundError: the closing book {stem} of {s} is held in the private store (its "
+               f"manifest options/cboe_manifest/{stem}.json) and this run cannot read it: not building the "
+               "session from another book")
+        new = "2026-11-02"
+        st = {"simulated": {"session": new, "headline_before": "2026-10-30", "headline_params": {}},
+              "calibration": {"status": "accepted"}, "forward_ledger": {"status": "recorded"},
+              "market": {"vx_futures": {"last": new}}, "publishable": True,
+              "artifact_backfill": {"rebuilt": {s: {"surface": {"ok": False, "error": err}},
+                                                "2026-10-29": {"surface": {"ok": True}}}},
+              "errors": [f"backfill: surface artifact for {s} failed: {err}"]}
+        monkeypatch.delenv("CBOE_BOOKS_DIR", raising=False)        # as in CI: no private store
+        assert sim.outcome_problems(st, tmp_path) == []
+        assert sim.exit_problems(1, st, tmp_path, env={}) == []
+        assert sim.private_book_deferrals(st, tmp_path, env={}) == {(s, "surface"): err}
+        # a store is configured: the failure stands
+        store = {"CBOE_BOOKS_DIR": str(tmp_path / "private")}
+        assert sim.outcome_problems(st, tmp_path, env=store) == [f"artifact {s} surface: {err}"]
+        assert sim.exit_problems(1, st, tmp_path, env=store) != []
+        # another error beside it: the run's exit 1 is a problem
+        other = {**st, "errors": [*st["errors"], "forward ledger for 2026-11-02 not recorded: x"]}
+        assert sim.exit_problems(1, other, tmp_path, env={}) != []
+        # the raw book is in the copy after all: not a privately held book
+        (tmp_path / "data_store" / "options" / "cboe").mkdir()
+        (tmp_path / "data_store" / "options" / "cboe" / f"{stem}.parquet").touch()
+        assert sim.outcome_problems(st, tmp_path, env={}) == [f"artifact {s} surface: {err}"]
+        # the run's report lists the deferred session
+        src = (ROOT / "scripts" / "ci" / "simulate_next_session.py").read_text()
+        assert "backfill deferred (closing book held in the private store)" in src
+        assert "problems += exit_problems(r.returncode, st, tree, env)" in src
+
     def test_each_simulated_slot_must_leave_its_run_record(self, sim, tmp_path):
         """FUND_GRADE_PLAN 0.9: the simulation runs the close and book slots with
         REFRESH_SLOT set, so each must leave one complete record that agrees with

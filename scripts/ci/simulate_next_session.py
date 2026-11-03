@@ -81,6 +81,11 @@ gates: about two minutes, so test_ci_tools.py runs this mode in full.
 
     python scripts/ci/simulate_next_session.py [--out DIR] [--full] [--keep] [--no-fit | --force-fail]
 
+A stale session whose closing book a manifest records in the private store fails
+closed in the bot's backfill when the store cannot be read; no store is configured
+here (CBOE_BOOKS_DIR unset, as in CI), so such a session is deferred, not a failure,
+and the report lists it (private_book_deferrals).
+
 Exit 1 when the simulated run does not accept (with --no-fit: skip) the fit and
 record the session, or when any gate fails; with --force-fail, when the run does
 not fail or the alert does not do what it must. Nothing outside --out is written.
@@ -554,7 +559,64 @@ def book_problems(tree: Path, status_file: Path) -> list[str]:
     return slot_capture_problems(close_st, st, sim.get("book_slot_state"), chain)
 
 
-def outcome_problems(st: dict, tree: Path, no_fit: bool = False) -> list[str]:
+# the backfill's refusal of a session whose manifest records a closing book held in the
+# private store that the run cannot read (surface.quotes.unreadable_closing_book)
+PRIVATE_BOOK_REFUSAL = ("FileNotFoundError: the closing book ", " is held in the private store ",
+                        " and this run cannot read it")
+
+
+def _closing_book_held_privately(tree: Path, session: str) -> bool:
+    """A manifest in the copy (data_store/options/cboe_manifest/) records a closing SPX
+    book of ``session`` whose raw book the copy's public store does not hold."""
+    opts = tree / "data_store" / "options"
+    for mp in sorted((opts / "cboe_manifest").glob(f"spx_{session}_*.json")):
+        try:
+            rec = json.loads(mp.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("book_state") == "closing" and not (
+                opts / "cboe" / f"{mp.stem}.parquet").exists():
+            return True
+    return False
+
+
+def private_book_deferrals(st: dict, tree: Path, env=None) -> dict:
+    """The backfill parts of the simulated book slot (``st``) that failed closed because
+    their session's closing book is held in the private store, which this simulation
+    cannot read: no store is configured here (CBOE_BOOKS_DIR unset, as in CI), the
+    error is the backfill's refusal (PRIVATE_BOOK_REFUSAL) and the copy's manifests
+    record such a book. {(session, part): error}. The bot builds such a session once it
+    reads the store, and fails while it cannot; here it is deferred, as the bot defers a
+    session it has no time for, and the report says so. With CBOE_BOOKS_DIR set the
+    failure stands."""
+    env = os.environ if env is None else env
+    if (env.get("CBOE_BOOKS_DIR") or "").strip():
+        return {}
+    out = {}
+    for sess, arts in ((st.get("artifact_backfill") or {}).get("rebuilt") or {}).items():
+        for part, res in arts.items():
+            err = str(res.get("error") or "")
+            if (not res.get("ok") and err.startswith(PRIVATE_BOOK_REFUSAL[0])
+                    and all(x in err for x in PRIVATE_BOOK_REFUSAL[1:])
+                    and _closing_book_held_privately(tree, sess)):
+                out[(sess, part)] = err
+    return out
+
+
+def exit_problems(code: int, st: dict, tree: Path, env=None) -> list[str]:
+    """The simulated book slot's exit code: a problem unless 0, or unless every error the
+    run recorded is a private_book_deferrals failure (the only cause of its exit 1)."""
+    if code == 0:
+        return []
+    excused = {f"backfill: {part} artifact for {sess} failed: {err}"
+               for (sess, part), err in private_book_deferrals(st, tree, env).items()}
+    errors = [str(e) for e in st.get("errors") or []]
+    if errors and all(e in excused for e in errors):
+        return []
+    return [f"cloud_refresh exited {code}: {st.get('errors')}"]
+
+
+def outcome_problems(st: dict, tree: Path, no_fit: bool = False, env=None) -> list[str]:
     """What the simulated book slot's status (``st``) must show. A new fit: the fit
     accepted, every parameter moved off the headline, the session's artifacts built.
     --no-fit: the fit skipped (Yahoo's book empty) and the headline left as it was,
@@ -562,7 +624,9 @@ def outcome_problems(st: dict, tree: Path, no_fit: bool = False) -> list[str]:
     scorecard that lists Heston as not scored and gives the reason. Both: the forward
     ledger recorded, the session's VX settlements stored, every artifact built and the
     run publishable. The slots' captures are book_problems' (a Friday's book slot finds
-    the close slot's books stored rather than capturing one)."""
+    the close slot's books stored rather than capturing one). A backfill part that
+    failed closed on a closing book held privately (private_book_deferrals) is
+    deferred, not a problem."""
     problems = []
     sim = st.get("simulated", {})
     session = sim.get("session")
@@ -603,8 +667,9 @@ def outcome_problems(st: dict, tree: Path, no_fit: bool = False) -> list[str]:
     arts = {**(st.get("artifacts") or {}),
             **{f"{s} {k}": v for s, a in ((st.get("artifact_backfill") or {}).get("rebuilt") or {}).items()
                for k, v in a.items()}}
+    held = {f"{sess} {part}" for sess, part in private_book_deferrals(st, tree, env)}
     for name, res in arts.items():
-        if not res.get("ok"):
+        if not res.get("ok") and name not in held:
             problems.append(f"artifact {name}: {res.get('error')}")
     if not st.get("publishable"):
         problems.append(f"not publishable: {st.get('publish_blockers')}")
@@ -847,9 +912,8 @@ def main(argv=None) -> int:
                        "Both runs failed as forced; the alert opens, comments on or leaves the issue as it "
                        "must.")
     cal = st.get("calibration") or {}
-    if r.returncode != 0:
-        problems.append(f"cloud_refresh exited {r.returncode}: {st.get('errors')}")
-    problems += outcome_problems(st, tree, no_fit=args.no_fit)
+    problems += exit_problems(r.returncode, st, tree, env)
+    problems += outcome_problems(st, tree, no_fit=args.no_fit, env=env)
     fit = (cal.get("summary") or {}).get("params")
     moves = param_moves(fit, sim["headline_params"]) if fit and sim.get("headline_params") else {}
     close_file = status_file.with_name("status_close.json")
@@ -873,6 +937,12 @@ def main(argv=None) -> int:
              + (f" (SPX RMSE {rmse:.2f} vp; parameters moved "
                 + ", ".join(f"{k} {m:.0%}" for k, m in moves.items()) + ")" if moves and rmse else "")
              + f", artifacts {ok_arts}")]
+    held = sorted({sess for sess, _ in private_book_deferrals(st, tree, env)})
+    if held:
+        why = (f"{', '.join(held)}: a manifest records the session's closing book in the private store, "
+               "which this simulation cannot read (CBOE_BOOKS_DIR unset); the bot builds it once it reads "
+               "the store")
+        rows.append(("backfill deferred (closing book held in the private store)", 0, None, why))
     gates = gate_tests(tree / ".github" / "workflows" / "daily_refresh.yml")
     if "--full" in (argv or sys.argv[1:]) or args.full:
         gates["Full suite"] = ["joint_vol_calibration/tests"]
