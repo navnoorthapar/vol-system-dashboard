@@ -11038,9 +11038,10 @@ def test_model_risk_ranks_a_vix_gap_among_the_sessions_of_its_book(dash, chain_v
 
 def test_model_risk_colours_closing_book_gaps_by_its_limits(dash, tmp_path):
     """The closing-book side of the check above: with the session before the newest
-    relabelled a closing book (_as_vendor), the history holds the two closing-book
-    sessions alone, coloured by the limits and ranked between them; the overnight books
-    and Yahoo chains stored between them are left out."""
+    relabelled a closing book (_as_vendor), the history holds the closing-book sessions
+    alone, those two among them and any other the record holds, coloured by the limits
+    and ranked among them; the overnight books and Yahoo chains are left out
+    (_check_replication_row reads each session's book by the clock)."""
     sessions = dash.artifacts.surface_sessions(SHIPPED)
     newest = sessions[-1]
     sj = json.loads((SHIPPED / "surface" / newest / "surface.json").read_text())
@@ -11073,8 +11074,8 @@ def test_model_risk_colours_closing_book_gaps_by_its_limits(dash, tmp_path):
         html = r.get_data(as_text=True)
     got = _check_replication_row(dash, data, html)
     assert got["book"] == "closing"
-    assert got["same"] == [other, newest]
-    assert [s_ for _, s_ in got["dots"]] == [other, newest]
+    assert other in got["same"] and got["same"][-1] == newest, got["same"]
+    assert [s_ for _, s_ in got["dots"]] == got["same"]
 
 
 def test_smile_series_hold_no_raw_series_name_in_their_legend(pages):
