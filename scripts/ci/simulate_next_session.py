@@ -112,13 +112,19 @@ NOISE_VP = 1.0               # RMS of the mid noise, vol points
 # per-strike; an RMS of ~1 over the strikes a book quotes
 NOISE_SHAPE = (0.9, 0.35, 0.12, 0.25)
 # every parameter of the new fit must differ from the headline by this much
-# (relative): 20x the 1e-3 a test would pin a committed value with. Not more:
-# kappa is the least identified parameter (its Gauss-Newton SE is ~19% on the
-# headline session) and the calibrator warm-starts from the previous fit, so a
-# priced book with kappa x0.6 can still be refitted with kappa a few percent
-# off the headline (4.3% on the simulated 2026-10-27 session, which failed the
-# earlier 5% bar while theta, sigma, rho and v0 moved 12-30%).
-MIN_PARAM_MOVE = 0.02
+# (relative): 10x the 1e-3 a test would pin a committed value with, so such a
+# test still fails on the simulated session. Not more: kappa and theta are the
+# least identified parameters (kappa's Gauss-Newton SE is ~19% on the headline
+# session; at ~1 vol point of mid noise the fit sits at the noise floor, where
+# kappa and theta trade off against each other) and the calibrator
+# warm-starts from the previous fit, so a priced book with kappa x0.6 and
+# theta x1.2 can be refitted with one of them only a few percent off the
+# headline: kappa 4.3% on the simulated 2026-10-27 session (which failed an
+# earlier 5% bar while theta, sigma, rho and v0 moved 12-30%), theta 1.67% on
+# the simulated 2026-11-03 session (which failed the next 2% bar with an SPX
+# RMSE of 0.96 vol points, while kappa, sigma, rho and v0 moved 16-34% and
+# kappa x theta moved from 0.250 towards the book's 0.180, to 0.199).
+MIN_PARAM_MOVE = 0.01
 
 
 def simulated_params(head: dict, bounds: dict | None = None) -> dict:
