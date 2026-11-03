@@ -11074,7 +11074,8 @@ def test_model_risk_colours_closing_book_gaps_by_its_limits(dash, tmp_path):
         html = r.get_data(as_text=True)
     got = _check_replication_row(dash, data, html)
     assert got["book"] == "closing"
-    assert other in got["same"] and got["same"][-1] == newest, got["same"]
+    assert other in got["same"], got["same"]
+    assert got["same"][-1] == newest, got["same"]
     assert [s_ for _, s_ in got["dots"]] == got["same"]
 
 
