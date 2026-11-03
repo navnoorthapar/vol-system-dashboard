@@ -1977,24 +1977,47 @@ def test_a_chain_the_backtest_excludes_has_no_surface_beta_and_a_true_minus(dash
 
 
 def _book_by_clock(sj: dict, session: str) -> str | None:
-    """The book a surface session was built from, by its surface.json record and the
-    Global Trading Hours window of the session after it (option_chain.gth_window): a
-    Cboe book by the state its capture recorded; a Yahoo chain, which records no quote
-    time, by its download instant (a pre-QUANT-01 chain's quote time, else fetched_at):
-    an overnight download inside that window, else a Yahoo chain."""
+    """The book a surface session was built from, derived here from its surface.json
+    record's instants and the NYSE calendar alone, as the recompute audit derives it
+    (surface_math.replication_book), never from the book state the capture recorded,
+    which the pages read (desk_surface.replication_book): so a test that compares a
+    page's book with this one checks the page against the clock. The Global Trading
+    Hours of the session after ``session`` run from 20:15 ET on the calendar evening
+    before it to 09:15 ET on it. A Cboe book by its quote time: inside them the
+    overnight book, from the session's close (16:15 ET; 13:15 on an NYSE early close)
+    until they open its closing book, at any other instant, or with none recorded,
+    'other'. A Yahoo chain, which records no quote time, by its download instant (a
+    pre-QUANT-01 chain's quote time, else fetched_at): inside them an overnight
+    download, else (or with no instant recorded) a Yahoo chain."""
+    import datetime as dt
+
+    from joint_vol_calibration.data import database as db
     from joint_vol_calibration.data import option_chain as oc
 
     inp, uni = sj.get("inputs") or {}, sj.get("universe") or {}
     src = inp.get("source") or uni.get("source")
     if not src:
         return None
+    day, nxt = dt.date.fromisoformat(session), oc.next_session(session)
+    ny = db.NY_TZ
+    gth_open = dt.datetime.combine(nxt - dt.timedelta(days=1), dt.time(20, 15), ny)
+    gth_close = dt.datetime.combine(nxt, dt.time(9, 15), ny)
+    cutoff = dt.time(13, 15) if db.is_early_close(day) else dt.time(16, 15)
+
+    def instant(x: Any) -> dt.datetime:
+        t = pd.Timestamp(str(x))
+        return (t.tz_localize("UTC") if t.tzinfo is None else t).to_pydatetime()
     if src == "cboe":
-        return {"closing": "closing", "gth": "overnight"}.get(str(inp.get("book_state")), "other")
-    at = inp.get("quote_time") or uni.get("quote_time") or inp.get("fetched_at") or uni.get("fetched_at")
-    if not at:
+        if not inp.get("quote_time"):
+            return "other"
+        at = instant(inp["quote_time"])
+        if gth_open <= at < gth_close:
+            return "overnight"
+        return "closing" if dt.datetime.combine(day, cutoff, ny) <= at < gth_open else "other"
+    got = inp.get("quote_time") or uni.get("quote_time") or inp.get("fetched_at") or uni.get("fetched_at")
+    if not got:
         return "yahoo"
-    lo, hi = oc.gth_window(oc.next_session(session))
-    return "yahoo_overnight" if lo <= pd.Timestamp(str(at)).to_pydatetime() < hi else "yahoo"
+    return "yahoo_overnight" if gth_open <= instant(got) < gth_close else "yahoo"
 
 
 def test_a_yahoo_chain_is_named_by_when_it_was_downloaded(dash):
@@ -2017,8 +2040,8 @@ def test_a_yahoo_chain_is_named_by_when_it_was_downloaded(dash):
              ({"inputs": yahoo, "universe": {"fetched_at": "2026-11-03T03:30:03Z"}}, "2026-11-02",
               ds.BOOK_YAHOO_OVERNIGHT),
              ({"inputs": yahoo}, "2026-11-02", ds.BOOK_YAHOO),
-             ({"inputs": {"source": "cboe", "book_state": "closing", "fetched_at": "2026-11-03T03:30:03Z"}},
-              "2026-11-02", ds.BOOK_CLOSING),
+             ({"inputs": {"source": "cboe", "book_state": "closing", "quote_time": "2026-11-02T22:15:00Z",
+                          "fetched_at": "2026-11-02T22:30:00Z"}}, "2026-11-02", ds.BOOK_CLOSING),
              ({"inputs": {}}, "2026-11-02", None)]
     for sj, session, want in cases:
         assert dash.surface_book(sj, session) == want, (sj, session)
@@ -2026,6 +2049,33 @@ def test_a_yahoo_chain_is_named_by_when_it_was_downloaded(dash):
     for session in dash.artifacts.surface_sessions(SHIPPED):
         sj = json.loads((SHIPPED / "surface" / session / "surface.json").read_text())
         assert dash.surface_book(sj, session) == _book_by_clock(sj, session), session
+
+
+def test_the_tests_book_of_a_cboe_session_is_its_quote_times_not_its_recorded_state():
+    """w5w2 check, F7: _book_by_clock, against which the presentation gate checks the
+    book each page names (the Overview's replication finding, Model Risk V2, the Surface
+    by-book table), read a Cboe book's recorded book_state, as the pages do, so it
+    could not catch a page that names a book its quote time contradicts. It now derives
+    the book from the quote time and the calendar, as the recompute audit does: here
+    the recorded state says one book and the quote time another, and the helper follows
+    the quote time, across the 2026-11-01 change to EST, a weekend and an early close."""
+    def cboe(state: str | None, qt: str | None) -> dict:
+        return {"inputs": {"source": "cboe", "book_state": state, "quote_time": qt}}
+    cases = [
+        (cboe("closing", "2026-11-03T03:15:00Z"), "2026-11-02", "overnight"),   # 22:15 EST: GTH
+        (cboe("gth", "2026-11-02T22:15:00Z"), "2026-11-02", "closing"),         # 17:15 EST
+        (cboe("closing", "2026-11-02T21:14:30Z"), "2026-11-02", "other"),       # 16:14:30 EST
+        (cboe("closing", "2026-10-29T21:14:30Z"), "2026-10-29", "closing"),     # 17:14:30 EDT
+        (cboe("gth", "2026-10-30T23:49:50Z"), "2026-10-30", "closing"),         # a Friday evening
+        (cboe("closing", "2026-11-02T01:15:00Z"), "2026-10-30", "overnight"),   # Sunday 20:15 EST
+        (cboe("gth", "2026-11-02T01:14:00Z"), "2026-10-30", "closing"),         # Sunday 20:14 EST
+        (cboe("closing", "2026-11-03T14:20:00Z"), "2026-11-02", "other"),       # the next morning's pause
+        (cboe("intraday", "2026-11-27T18:30:00Z"), "2026-11-27", "closing"),    # 13:30, an early close
+        (cboe("closing", "2026-11-27T18:00:00Z"), "2026-11-27", "other"),       # 13:00, before it
+        (cboe("closing", None), "2026-11-02", "other"),
+    ]
+    for sj, session, want in cases:
+        assert _book_by_clock(sj, session) == want, (sj, session)
 
 
 def test_the_vix_gap_is_given_by_the_book_each_session_was_built_from(dash, pages):
@@ -8967,17 +9017,19 @@ def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(d
 def _as_vendor(sj: dict, vendor: str, session: str) -> dict:
     """``session``'s surface.json recorded as built from ``vendor``'s chain, as the
     producer records each: a Yahoo download of the session's stored chain, fetched the
-    next morning with T from the close; or a Cboe book quoted after the close. Only the
-    source fields change, so the view is the committed surface under the other label."""
+    next morning with T from the close; or a Cboe closing book, fetched by the close slot
+    at 22:30 UTC with quotes 15 minutes older: after the 16:15 ET close and before the
+    overnight session opens at 20:15 ET, under EDT and EST alike (_book_by_clock). Only
+    the source fields change, so the view is the committed surface under the other label."""
     nxt = (pd.Timestamp(session) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     if vendor == "yahoo":
         rec = {"source": "yfinance", "quote_time": None, "fetched_at": f"{nxt}T08:50:33Z",
                "t_origin_basis": "session close 16:00 ET", "book_state": None}
         chain = f"data_store/options/spx_{session}.parquet"
     else:
-        rec = {"source": "cboe", "quote_time": f"{session}T21:14:30Z", "fetched_at": f"{session}T21:29:30Z",
+        rec = {"source": "cboe", "quote_time": f"{session}T22:15:00Z", "fetched_at": f"{session}T22:30:00Z",
                "t_origin_basis": "session close 16:00 ET", "book_state": "closing"}
-        chain = f"data_store/options/cboe/spx_{session}_212930Z.parquet"
+        chain = f"data_store/options/cboe/spx_{session}_223000Z.parquet"
     return {**sj, "inputs": {**(sj.get("inputs") or {}), **rec, "chain": chain},
             "universe": {**(sj.get("universe") or {}), **rec}}
 
@@ -9044,8 +9096,9 @@ def _link_options(data: Path, two_books: bool) -> None:
     them, also holds whichever of a closing and an overnight (Global Trading Hours) book
     it lacks, as a weekday's close slot and the book slot after it store them
     (FUND_GRADE_PLAN 0.8; the Overview's pipeline panel then names both): a record
-    beside the raw books, the closing book quoted at the session's Cboe close, the
-    overnight book three hours after the session's newest book. The bot also publishes
+    beside the raw books, the closing book quoted when the close slot's is (22:15 UTC,
+    after the 16:15 ET close in EDT and EST), the overnight book three hours after the
+    overnight session that trades for the next session opens. The bot also publishes
     a newest session with only its overnight book (the close slot refuses a closing book
     that fails the quote-state gate) and one whose books are held privately (manifests
     only): the view still has both books then."""
@@ -9070,9 +9123,15 @@ def _link_options(data: Path, two_books: bool) -> None:
     base = mine[-1]
     add = []
     if "closing" not in states:
-        add.append(("closing", pd.Timestamp(f"{newest}T21:14:30Z"), -7, -2))
+        # the close slot's book (fetched 22:30 UTC): its closing book by the clock in EDT and EST
+        add.append(("closing", pd.Timestamp(f"{newest}T22:15:00Z"), -7, -2))
     if "gth" not in states:
-        add.append(("gth", pd.Timestamp(base["quote_time"]) + pd.Timedelta(hours=3), 974, 345))
+        # three hours into the overnight session that trades for the next session (from
+        # 20:15 ET the evening before it): a Friday's opens on Sunday evening
+        from joint_vol_calibration.data import option_chain as oc
+        nxt = pd.Timestamp(oc.next_session(newest))
+        opens = (nxt - pd.Timedelta(days=1)).replace(hour=20, minute=15).tz_localize("America/New_York")
+        add.append(("gth", (opens + pd.Timedelta(hours=3)).tz_convert("UTC"), 974, 345))
     for state, qt, more, more_two in add:
         fetched = qt + pd.Timedelta(minutes=15)
         (opts / "cboe" / f"spx_{newest}_{fetched:%H%M%S}Z.json").write_text(json.dumps(
@@ -9090,7 +9149,10 @@ def test_the_badge_tests_cboe_view_holds_both_books_of_the_newest_session_whatev
     with only its overnight book (the close slot stores no closing book that fails the
     quote-state gate) or with its books held privately (options/cboe_manifest) kept one
     book, and the badge test, which requires both there, failed on a state the bot
-    publishes. Each stored book is kept as committed; an older session is left alone."""
+    publishes. Each stored book is kept as committed; an older session is left alone.
+    Each book, stored or added, is its book by its quote time (_book_by_clock): the
+    overnight book added for a Friday, three hours after its closing book, was quoted on
+    Friday evening, before the overnight session opens on Sunday (w5w2 check, F7)."""
     src = tmp_path / "shipped" / "options"
     (src / "cboe").mkdir(parents=True)
     (src / "spx_2026-10-30.parquet").write_bytes(b"")
@@ -9105,7 +9167,7 @@ def test_the_badge_tests_cboe_view_holds_both_books_of_the_newest_session_whatev
     if stored in ("closing", "both"):
         rec("cboe", "2026-10-30", "closing", "2026-10-30T21:52:05Z")
     if stored in ("overnight", "both"):
-        rec("cboe", "2026-10-30", "gth", "2026-10-31T07:16:04Z")
+        rec("cboe", "2026-10-30", "gth", "2026-11-02T03:16:04Z")      # Sunday 22:16 EST
     if stored == "private":
         rec("cboe_manifest", "2026-10-30", "closing", "2026-10-30T21:52:05Z")
     shipped = {p.relative_to(src): p.read_text() for p in src.rglob("*.json")}
@@ -9123,6 +9185,9 @@ def test_the_badge_tests_cboe_view_holds_both_books_of_the_newest_session_whatev
     newest = sorted((r for r in recs if r["session"] == "2026-10-30"), key=lambda r: r["quote_time"])
     assert [r["book_state"] for r in newest] == ["closing", "gth"]
     assert [r["book_state"] for r in recs if r["session"] == "2026-10-29"] == ["gth"]
+    for r in recs:
+        by_clock = _book_by_clock({"inputs": {"source": "cboe", "quote_time": r["quote_time"]}}, r["session"])
+        assert by_clock == {"closing": "closing", "gth": "overnight"}[r["book_state"]], r
     # without two_books the view is the record as committed
     plain = tmp_path / "plain"
     plain.mkdir()
