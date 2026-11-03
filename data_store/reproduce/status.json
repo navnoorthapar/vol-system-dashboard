@@ -1,0 +1,105 @@
+{
+ "schema": "reproduce_status/1",
+ "commit": "4909017938fa7cb184543d374a6a640edf753d26",
+ "run_url": "https://github.com/navnoorthapar/vol-system-dashboard/actions/runs/41482739304",
+ "finished_utc": "2026-11-02T16:36:01+00:00",
+ "full": false,
+ "n_checks": 16,
+ "n_ok": 11,
+ "n_exact": 6,
+ "max_deviation": 13.274624512724209,
+ "max_deviation_artifact": "calibration-2026-10-26: data_store/calibrations/joint_cal_2026-10-26.pkl",
+ "failed": [
+  {
+   "artifact": "calibration-2026-10-26: data_store/calibrations/joint_cal_2026-10-26.pkl",
+   "deviation": 13.274624512724209,
+   "tolerance": 1e-06,
+   "problems": [
+    "n_evals: 295 != 368",
+    "pinned_params: length 1 vs 0",
+    "active_constraints: length 1 vs 0",
+    "oos.n_spx_oos: 2860 != 3049",
+    "oos.spx_oos_rmse_by_expiry: keys missing ['2026-11-06', '2026-11-09', '2026-11-10', '2026-11-24', '2026-11-25', '2026-11-27', '2027-02-19', '2027-11-19'] extra ['2026-10-29', '2026-10-30', '2026-11-02', '2026-11-13', '2026-11-16', '2026-11-17', '2026-12-04', '2027-12-17']",
+    "n_spx_puts: 32 != 31",
+    "n_spx_calls: 21 != 22",
+    "n_spx_wing_puts: 25 != 26",
+    "anchors_by_expiry[0].expiry: '2026-10-30' != '2026-11-09'",
+    "anchors_by_expiry[1].expiry: '2026-11-16' != '2026-11-25'",
+    "anchors_by_expiry[1].n_puts: 6 != 5",
+    "anchors_by_expiry[2].expiry: '2026-12-18' != '2026-12-31'",
+    "anchors_by_expiry[2].n_wing_puts: 4 != 5",
+    "anchors_by_expiry[3].expiry: '2027-01-15' != '2027-01-29'",
+    "anchors_by_expiry[3].n_puts: 5 != 6",
+    "anchors_by_expiry[4].n_puts: 6 != 5",
+    "spx_snapshot_date: '2026-10-16' != '2026-10-26'",
+    "spx_snapshot_session: '2026-10-16' != '2026-10-26'",
+    "carry_by_expiry[0].expiry: '2026-10-29' != '2026-11-06'",
+    "carry_by_expiry[0].method: 'parity_fixed_D' != 'parity_regression'",
+    "carry_by_expiry[0].n_pairs: 71 != 122",
+    "carry_by_expiry[1].expiry: '2026-10-30' != '2026-11-09'",
+    "carry_by_expiry[1].method: 'parity_regression' != 'parity_fixed_D'",
+    "carry_by_expiry[1].n_pairs: 158 != 73",
+    "carry_by_expiry[2].expiry: '2026-11-02' != '2026-11-10'",
+    "carry_by_expiry[2].method: 'parity_fixed_D' != 'parity_regression'",
+    "carry_by_expiry[2].n_pairs: 69 != 74",
+    "carry_by_expiry[3].expiry: '2026-11-13' != '2026-11-24'",
+    "carry_by_expiry[3].method: 'parity_fixed_D' != 'parity_regression'",
+    "carry_by_expiry[3].n_pairs: 82 != 32",
+    "carry_by_expiry[4].expiry: '2026-11-16' != '2026-11-25'",
+    "carry_by_expiry[4].method: 'parity_fixed_D' != 'parity_regression'",
+    "carry_by_expiry[4].n_pairs: 26 != 23",
+    "carry_by_expiry[5].expiry: '2026-11-17' != '2026-11-27'",
+    "carry_by_expiry[5].method: 'parity_fixed_D' != 'parity_regression'",
+    "carry_by_expiry[5].n_pairs: 12 != 74",
+    "carry_by_expiry[6].expiry: '2026-12-04' != '2026-12-18'",
+    "carry_by_expiry[7].expiry: '2026-12-18' != '2026-12-31'",
+    "carry_by_expiry[7].n_pairs: 42 != 200",
+    "carry_by_expiry[8].expiry: '2026-12-31' != '2027-01-15'",
+    "carry_by_expiry[8].n_pairs: 207 != 30",
+    "carry_by_expiry[9].expiry: '2027-01-15' != '2027-01-29'",
+    "carry_by_expiry[9].n_pairs: 24 != 115",
+    "carry_by_expiry[10].expiry: '2027-01-29' != '2027-02-19'",
+    "carry_by_expiry[10].n_pairs: 98 != 6",
+    "carry_by_expiry[11].n_pairs: 154 != 155",
+    "carry_by_expiry[12].n_pairs: 59 != 61",
+    "carry_by_expiry[13].n_pairs: 57 != 60",
+    "carry_by_expiry[14].n_pairs: 113 != 140",
+    "carry_by_expiry[15].n_pairs: 59 != 62",
+    "carry_by_expiry[16].expiry: '2027-12-17' != '2027-11-19'",
+    "carry_by_expiry[16].n_pairs: 31 != 44"
+   ]
+  },
+  {
+   "artifact": "calibration-2026-10-27: data_store/calibrations/joint_cal_2026-10-27.pkl",
+   "deviation": 0.0,
+   "tolerance": 1e-06,
+   "problems": [
+    "not regenerated"
+   ]
+  },
+  {
+   "artifact": "calibration-2026-10-28: data_store/calibrations/joint_cal_2026-10-28.pkl",
+   "deviation": 0.0,
+   "tolerance": 1e-06,
+   "problems": [
+    "not regenerated"
+   ]
+  },
+  {
+   "artifact": "calibration-2026-10-29: data_store/calibrations/joint_cal_2026-10-29.pkl",
+   "deviation": 0.0,
+   "tolerance": 1e-06,
+   "problems": [
+    "not regenerated"
+   ]
+  },
+  {
+   "artifact": "calibration-2026-10-30: data_store/calibrations/joint_cal_2026-10-30.pkl",
+   "deviation": 0.0,
+   "tolerance": 1e-06,
+   "problems": [
+    "not regenerated"
+   ]
+  }
+ ]
+}
