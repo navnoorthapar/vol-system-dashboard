@@ -186,18 +186,28 @@ def _close_slot_runs(session: str) -> list:
             found.append((str(rec.get("run_utc")), {"status": CLOSE_RUN_NO_STEP}))
             continue
         spx = (capt.get("captures") or {}).get("SPX")
-        found.append((str(rec.get("run_utc")), spx if isinstance(spx, dict) else {}))
+        if not isinstance(spx, dict) or not spx:
+            # no SPX record: the capture step's own (skipped as a whole by the clock or
+            # the session check, or crashed: "capture step crashed: ..."; None with none)
+            spx = {"status": capt.get("status"), "reason": capt.get("reason")}
+        found.append((str(rec.get("run_utc")), spx))
     return sorted(found, key=lambda x: x[0])
+
+
+# a close-slot run's SPX outcomes (_close_slot_runs) that are not a refusal
+_NOT_REFUSED = ("captured", "exists", "skipped", "no-step")
 
 
 def closing_book_refusal(session: str) -> str | None:
     """Why the job did not store ``session``'s closing SPX book, as its run
-    records say: the reason of the newest close-slot run (_close_slot_runs)
-    whose SPX capture was "rejected" (it failed the quote-state gate, was
-    empty or was another session's book) or "failed". None when no such run
-    says so (closing_book_run says what the records do hold)."""
-    found = [(t, str(spx["reason"])) for t, spx in _close_slot_runs(session)
-             if spx.get("status") in ("rejected", "failed") and spx.get("reason")]
+    records say: the recorded reason of the newest close-slot run
+    (_close_slot_runs) whose SPX capture neither stored the book nor was
+    "skipped": "rejected" (it failed the quote-state gate, was empty or was
+    another session's book), "failed", or a capture step that crashed. None
+    when no such run is recorded (closing_book_run says what the records do
+    hold)."""
+    found = [(t, str(spx.get("reason") or "its run record gives no reason for it"))
+             for t, spx in _close_slot_runs(session) if spx.get("status") not in _NOT_REFUSED]
     return max(found)[1] if found else None
 
 
@@ -214,7 +224,8 @@ def closing_book_run(session: str) -> str:
     captured it, or found it stored, yet the store holds none: it was not kept,
     as when the move to the private store fails), "skipped" (the runs that ran
     the closebook step stored none because, by the clock or by the quote time of
-    the book they downloaded, the delayed feed showed another book), "no-step"
+    the book they downloaded, the delayed feed showed another book: their
+    record says "skipped"), "no-step"
     (the close slot ran for the session without the closebook step, before it
     captured closing books) or "none" (no run of the close slot is recorded for
     the session: it had not run yet, or did not exist then). Nothing here says
@@ -224,7 +235,7 @@ def closing_book_run(session: str) -> str:
     runs = _close_slot_runs(session)
     if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
         return CLOSE_RUN_CAPTURED
-    if any(spx.get("status") != CLOSE_RUN_NO_STEP for _, spx in runs):
+    if any(spx.get("status") == "skipped" for _, spx in runs):
         return CLOSE_RUN_SKIPPED
     return CLOSE_RUN_NO_STEP if runs else CLOSE_RUN_NONE
 

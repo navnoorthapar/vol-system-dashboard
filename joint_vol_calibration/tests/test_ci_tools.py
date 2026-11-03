@@ -1217,6 +1217,17 @@ class TestRecomputeAudit:
         assert M.closing_book_run(store, session) == "no-step"
         assert failed(None, run="no-step") == []
         assert failed(None, run="none") == [run_, reason]
+        # w5w2 check, F4: a crashed capture step holds no SPX record; it is a refusal with
+        # the step's recorded reason, not "skipped" (the feed showing another book)
+        crashed = "capture step crashed: OSError: x"
+        (root / "runs" / "run_g_close.json").write_text(json.dumps({
+            "schema": "run_ledger/1", "run_utc": "2026-10-29T22:07:05+00:00", "slot": "close",
+            "steps": close, "session": session, "expected_session": session,
+            "capture": {"status": "failed", "reason": crashed, "session": session, "captures": {}}}))
+        assert M.closing_book_refusal(store, session) == crashed
+        assert M.closing_book_run(store, session) == "refused"
+        assert failed(crashed, run="refused") == []
+        assert failed(None, run="skipped") == [record_, run_, reason]
 
     def test_it_rebuilds_the_heston_rows_fit_time_clause_from_the_fits_record(self, monkeypatch, tmp_path):
         """FUND_GRADE_PLAN 0.8: a session scored on its closing book whose Heston fit was

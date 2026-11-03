@@ -705,6 +705,42 @@ def test_a_close_slot_run_without_the_closebook_step_is_its_own_reason(tmp_path,
     assert "no run of the close slot is recorded" not in mine[0]
 
 
+@pytest.mark.parametrize(("capture", "run", "why"), [
+    # cloud_refresh.main's record of a capture step that raised
+    ({"status": "failed", "reason": "capture step crashed: OSError: x", "files": [], "captures": {}},
+     "refused", " (the job did not store the session's closing book: capture step crashed: OSError: x)"),
+    # the clock said the feed shows another book (capture_cboe_chains, before any download)
+    ({"status": "skipped", "reason": "the delayed feed shows the gth book of 2026-10-16", "files": [],
+      "captures": {}},
+     "skipped", (" (the close slot's runs stored no closing book: by the clock, or by the quote time of the "
+                 "book downloaded, the delayed feed showed another book)")),
+    # a run record of the closebook step that holds no capture result
+    (None, "refused", (" (the job did not store the session's closing book: its run record gives no reason "
+                       "for it)")),
+])
+def test_a_close_slot_run_is_skipped_only_when_its_record_says_so(tmp_path, monkeypatch, capture, run, why):
+    """w5w2 check, F4: a close-slot run whose record held no SPX capture was read as
+    'skipped', and the note said the delayed feed showed another book, even for a
+    capture step that crashed (cloud_refresh.main records {status: failed, reason:
+    'capture step crashed: ...', captures: {}}), which that record contradicts. A run
+    is 'skipped' only when its record says so; otherwise the note gives the reason
+    the record holds."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    _capture_store(tmp_path, monkeypatch, "2026-10-19T02:30:00Z", book_state="gth")
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "run_20261016T220705Z_close.json").write_text(json.dumps({
+        "schema": "run_ledger/1", "run_utc": "2026-10-16T22:07:05+00:00", "slot": "close",
+        "steps": ["market", "labels", "closebook"], "session": SESSION, "expected_session": SESSION,
+        "capture": None if capture is None else {**capture, "session": SESSION}}))
+    inp = sqm.load_session_quotes(SESSION).inputs
+    assert inp["closing_book_run"] == run
+    notes = report.run_session(SESSION, models=["essvi"])["vix_replication"]["gap_notes"]
+    lead = "The book is the overnight (Global Trading Hours) book"
+    assert sum(n.startswith(f"{lead}{why}, quoted at ") for n in notes) == 1, notes
+
+
 def test_every_recorded_close_slot_run_is_read_as_a_run_of_its_session(monkeypatch):
     """w5w2 check, F1: every close-slot run record in the committed record
     (data_store/runs/run_*_close.json) is read as a close-slot run of its session,
