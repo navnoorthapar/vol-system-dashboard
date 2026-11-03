@@ -13170,12 +13170,22 @@ def test_the_audit_checks_the_data_file_for_every_reader_and_typed_readout_numbe
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):
     """T11: every dot of the VIX-replication check's history is the signed gap
     (replicated − Cboe close) of its session's vix_replication.json, not |gap|;
-    the limit check still applies to the size."""
+    the limit check still applies to the size. The history is over the stored sessions
+    of the newest surface's book alone (V2 ranks a gap among the sessions of its book),
+    so it is missing exactly when fewer than two of those replicate the VIX."""
     d = dash.load_model_risk()
     row = next(m for m in d["monitors"] if m["key"] == "vix_rep_gap")
     h = row["history"]
     if h is None:
-        pytest.skip("fewer than two stored surface sessions replicate the VIX")
+        stored = dash.artifacts.surface_sessions(SHIPPED)
+        book = _book_by_clock(_chain_of(SHIPPED, stored[-1]), stored[-1])
+        same = [s_ for s_ in _gaps_by_session(SHIPPED)
+                if s_ in stored and _book_by_clock(_chain_of(SHIPPED, s_), s_) == book]
+        assert len(same) < 2, (book, same)
+        pytest.skip(f"Model Risk ranks the VIX gap among the "
+                    f"{dash.desk_surface.BOOK_SESSIONS.get(str(book), 'sessions of one book')} alone, and "
+                    f"{len(same)} of them {'replicates' if len(same) == 1 else 'replicate'} the VIX: "
+                    "a history needs two")
     gaps = {}
     for p in sorted((SHIPPED / "surface").glob("*/vix_replication.json")):
         g = json.loads(p.read_text()).get("indices", {}).get("VIX", {}).get("gap_vs_official")
