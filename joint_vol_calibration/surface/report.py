@@ -124,8 +124,9 @@ SCHEMA_VERSION = 1
 #   7  the overnight note's reason when no closing book is stored states only
 #      what the close slot's run records hold (inputs.closing_book_run): the
 #      slot captured the book but it was not kept, it stored none because the
-#      feed showed another book, or no run of it is recorded for the session
-#      (it did not exist yet); version 6 gave one reason for all three, a
+#      feed showed another book, it ran without capturing books (before it
+#      captured closing books), or no run of it is recorded for the session
+#      (it did not exist yet); version 6 gave one reason for all of them, a
 #      claim about the feed's hours that is not observed
 REPORT_VERSION = 7
 SURFACE_DIR = DATA_DIR / "surface"
@@ -451,6 +452,8 @@ CLOSE_RUN_WHY = {
                              "none: it was not kept)"),
     sqm.CLOSE_RUN_SKIPPED: (" (the close slot's runs stored no closing book: by the clock, or by the quote "
                             "time of the book downloaded, the delayed feed showed another book)"),
+    sqm.CLOSE_RUN_NO_STEP: (" (the close slot ran for the session without capturing books: that was before "
+                            "it captured closing books)"),
     sqm.CLOSE_RUN_NONE: " (no run of the close slot is recorded for the session)",
 }
 

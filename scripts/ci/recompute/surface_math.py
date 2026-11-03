@@ -782,9 +782,11 @@ def closing_books(store: Store, session: str) -> int:
 
 def _close_slot_runs(store: Store, session: str) -> list[tuple[str, dict]]:
     """The close slot's runs of ``session`` from data_store/runs/run_*.json (schema
-    run_ledger/1): runs of the closebook step alone ("closebook" in its steps,
-    "capture" not) whose capture is of ``session``, with each one's SPX capture record
-    ({} when it holds none), oldest first by run_utc."""
+    run_ledger/1): each record whose slot is 'close', or whose steps hold the closebook
+    step, without the book slot's full 'capture' step, and whose session (its capture's,
+    else expected_session) is ``session``, oldest first by run_utc, with each one's SPX
+    capture record ({} when it holds none), or {'status': 'no-step'} for a run without
+    the closebook step (the close slot before it captured closing books)."""
     runs = store.root / "runs"
     found: list[tuple[str, dict]] = []
     for path in sorted(runs.glob("run_*.json")) if runs.is_dir() else []:
@@ -796,46 +798,40 @@ def _close_slot_runs(store: Store, session: str) -> list[tuple[str, dict]]:
             continue
         steps = rec.get("steps") or []
         capt = rec.get("capture") or {}
-        if "closebook" in steps and "capture" not in steps and str(capt.get("session")) == session:
-            spx = (capt.get("captures") or {}).get("SPX")
-            found.append((str(rec.get("run_utc")), spx if isinstance(spx, dict) else {}))
+        if "capture" in steps or not (rec.get("slot") == "close" or "closebook" in steps):
+            continue
+        if str(capt.get("session") or rec.get("expected_session")) != session:
+            continue
+        if "closebook" not in steps:
+            found.append((str(rec.get("run_utc")), {"status": "no-step"}))
+            continue
+        spx = (capt.get("captures") or {}).get("SPX")
+        found.append((str(rec.get("run_utc")), spx if isinstance(spx, dict) else {}))
     return sorted(found, key=lambda x: x[0])
 
 
 def closing_book_run(store: Store, session: str) -> str:
     """What the close slot's run records say of a session whose store holds no closing
     book: 'refused' (a run did not store it and says why), 'captured' (a run captured
-    or found it, yet the store holds none), 'skipped' (its runs stored none) or 'none'
-    (no close-slot run of the session is recorded)."""
+    or found it, yet the store holds none), 'skipped' (the runs that ran the closebook
+    step stored none), 'no-step' (the close slot ran without the closebook step) or
+    'none' (no close-slot run of the session is recorded)."""
     if closing_book_refusal(store, session):
         return "refused"
     runs = _close_slot_runs(store, session)
     if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
         return "captured"
-    return "skipped" if runs else "none"
+    if any(spx.get("status") != "no-step" for _, spx in runs):
+        return "skipped"
+    return "no-step" if runs else "none"
 
 
 def closing_book_refusal(store: Store, session: str) -> str | None:
     """Why the job did not store ``session``'s closing SPX book, from its run records
-    (data_store/runs/run_*.json, schema run_ledger/1): the newest run (by run_utc) of the
-    close slot's step alone ("closebook" in its steps, "capture" not) whose capture is of
-    ``session`` and whose SPX capture is "rejected" or "failed", its recorded reason; None
-    when no record says so."""
-    runs = store.root / "runs"
-    found: list[tuple[str, str]] = []
-    for path in sorted(runs.glob("run_*.json")) if runs.is_dir() else []:
-        try:
-            rec = json.loads(path.read_text())
-        except (OSError, ValueError):
-            continue
-        if not isinstance(rec, dict) or rec.get("schema") != "run_ledger/1":
-            continue
-        steps = rec.get("steps") or []
-        capt = rec.get("capture") or {}
-        spx = (capt.get("captures") or {}).get("SPX") or {}
-        if ("closebook" in steps and "capture" not in steps and str(capt.get("session")) == session
-                and spx.get("status") in ("rejected", "failed") and spx.get("reason")):
-            found.append((str(rec.get("run_utc")), str(spx["reason"])))
+    (_close_slot_runs): the newest close-slot run (by run_utc) whose SPX capture is
+    "rejected" or "failed", its recorded reason; None when no record says so."""
+    found = [(t, str(spx["reason"])) for t, spx in _close_slot_runs(store, session)
+             if spx.get("status") in ("rejected", "failed") and spx.get("reason")]
     return max(found)[1] if found else None
 
 

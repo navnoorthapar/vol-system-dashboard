@@ -155,11 +155,16 @@ def session_captures(session: str, underlying: str = "SPX") -> list:
 
 
 def _close_slot_runs(session: str) -> list:
-    """The runs of the closebook step alone (the close slot's steps: "closebook"
-    without "capture") whose capture is of ``session``, from their run records
-    (data_store/runs/run_*.json, scripts/cloud_refresh.py run_record):
-    [(run_utc, the SPX capture's record or {})], oldest first. data_store/ is
-    the parent of database.OPTIONS_DIR."""
+    """The close slot's runs of ``session``, from their run records
+    (data_store/runs/run_*.json, scripts/cloud_refresh.py run_record, schema
+    run_ledger/1): each record whose slot is "close", or whose steps hold the
+    closebook step (a manual dispatch of it), without the book slot's full
+    "capture" step, and whose session (its capture's, else expected_session) is
+    ``session``: [(run_utc, outcome)], oldest first. The outcome is the run's
+    SPX capture record ({} when it holds none), or {"status": CLOSE_RUN_NO_STEP}
+    for a run without the closebook step: the close slot ran market data and
+    labels only before it captured closing books (as main's workflow did for
+    2026-11-02). data_store/ is the parent of database.OPTIONS_DIR."""
     import json
 
     runs = Path(db.OPTIONS_DIR).parent / "runs"
@@ -173,9 +178,15 @@ def _close_slot_runs(session: str) -> list:
             continue
         steps = rec.get("steps") or []
         capt = rec.get("capture") or {}
-        if "closebook" in steps and "capture" not in steps and str(capt.get("session")) == session:
-            spx = (capt.get("captures") or {}).get("SPX")
-            found.append((str(rec.get("run_utc")), spx if isinstance(spx, dict) else {}))
+        if "capture" in steps or not (rec.get("slot") == "close" or "closebook" in steps):
+            continue
+        if str(capt.get("session") or rec.get("expected_session")) != session:
+            continue
+        if "closebook" not in steps:
+            found.append((str(rec.get("run_utc")), {"status": CLOSE_RUN_NO_STEP}))
+            continue
+        spx = (capt.get("captures") or {}).get("SPX")
+        found.append((str(rec.get("run_utc")), spx if isinstance(spx, dict) else {}))
     return sorted(found, key=lambda x: x[0])
 
 
@@ -192,8 +203,8 @@ def closing_book_refusal(session: str) -> str | None:
 
 # closing_book_run statuses: what the close slot's run records say of a session
 # whose closing book is not stored
-CLOSE_RUN_REFUSED, CLOSE_RUN_CAPTURED, CLOSE_RUN_SKIPPED, CLOSE_RUN_NONE = (
-    "refused", "captured", "skipped", "none")
+CLOSE_RUN_REFUSED, CLOSE_RUN_CAPTURED, CLOSE_RUN_SKIPPED, CLOSE_RUN_NO_STEP, CLOSE_RUN_NONE = (
+    "refused", "captured", "skipped", "no-step", "none")
 
 
 def closing_book_run(session: str) -> str:
@@ -201,18 +212,21 @@ def closing_book_run(session: str) -> str:
     closing SPX book, for a session whose store holds none: "refused" (a run
     did not store it and says why: closing_book_refusal), "captured" (a run
     captured it, or found it stored, yet the store holds none: it was not kept,
-    as when the move to the private store fails), "skipped" (the runs stored
-    none because, by the clock or by the quote time of the book they
-    downloaded, the delayed feed showed another book) or "none" (no run of the
-    close slot is recorded for the session: it had not run yet, or did not
-    exist then). Nothing here says how long the feed shows a closing book:
-    that is not observed."""
+    as when the move to the private store fails), "skipped" (the runs that ran
+    the closebook step stored none because, by the clock or by the quote time of
+    the book they downloaded, the delayed feed showed another book), "no-step"
+    (the close slot ran for the session without the closebook step, before it
+    captured closing books) or "none" (no run of the close slot is recorded for
+    the session: it had not run yet, or did not exist then). Nothing here says
+    how long the feed shows a closing book: that is not observed."""
     if closing_book_refusal(session):
         return CLOSE_RUN_REFUSED
     runs = _close_slot_runs(session)
     if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
         return CLOSE_RUN_CAPTURED
-    return CLOSE_RUN_SKIPPED if runs else CLOSE_RUN_NONE
+    if any(spx.get("status") != CLOSE_RUN_NO_STEP for _, spx in runs):
+        return CLOSE_RUN_SKIPPED
+    return CLOSE_RUN_NO_STEP if runs else CLOSE_RUN_NONE
 
 
 def captured_sessions(underlying: str = "SPX") -> list:

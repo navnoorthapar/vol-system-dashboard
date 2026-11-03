@@ -669,6 +669,63 @@ def test_a_session_whose_closing_book_the_close_slot_did_not_store_says_why(tmp_
                            "none: it was not kept), quoted at ")
 
 
+def test_a_close_slot_run_without_the_closebook_step_is_its_own_reason(tmp_path, monkeypatch):
+    """w5w2 check, F1: the close slot's runs were counted only when their steps held
+    'closebook', so a close-slot run made by main's workflow before this step existed
+    (data_store/runs/run_20261103T032741Z_close.json: slot 'close', session 2026-11-02,
+    steps market and labels, no capture) read as 'no run of the close slot is
+    recorded for the session', false of the record. Close-slot runs are taken by the
+    record's slot and session, and one without the closebook step gives its own
+    reason; a book slot's run of the session still does not count."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    _capture_store(tmp_path, monkeypatch, "2026-10-19T02:30:00Z", book_state="gth")
+    runs = tmp_path / "runs"
+    runs.mkdir()
+
+    def record(name, run_utc, slot, steps):
+        (runs / f"run_{name}_{slot}.json").write_text(json.dumps({
+            "schema": "run_ledger/1", "run_utc": run_utc, "slot": slot, "steps": steps,
+            "session": SESSION, "expected_session": SESSION, "capture": None}))
+
+    record("20261019T023000Z", "2026-10-19T02:30:00+00:00", "book",
+           ["market", "capture", "calibrate", "freeze"])
+    assert sqm.closing_book_run(SESSION) == sqm.CLOSE_RUN_NONE            # the book slot's run only
+    record("20261017T032741Z", "2026-10-17T03:27:41+00:00", "close", ["market", "labels"])
+    assert [t for t, _ in sqm._close_slot_runs(SESSION)] == ["2026-10-17T03:27:41+00:00"]
+    inp = sqm.load_session_quotes(SESSION).inputs
+    assert inp["closing_book_run"] == sqm.CLOSE_RUN_NO_STEP
+    assert inp["closing_book_refusal"] is None
+    notes = report.run_session(SESSION, models=["essvi"])["vix_replication"]["gap_notes"]
+    mine = [n for n in notes if n.startswith("The book is the overnight (Global Trading Hours) book ")]
+    assert len(mine) == 1
+    assert mine[0].startswith("The book is the overnight (Global Trading Hours) book (the close slot ran for "
+                              "the session without capturing books: that was before it captured closing "
+                              "books), quoted at ")
+    assert "no run of the close slot is recorded" not in mine[0]
+
+
+def test_every_recorded_close_slot_run_is_read_as_a_run_of_its_session(monkeypatch):
+    """w5w2 check, F1: every close-slot run record in the committed record
+    (data_store/runs/run_*_close.json) is read as a close-slot run of its session,
+    whatever steps it ran, so no overnight note says no run of the close slot is
+    recorded for a session that has one. (The suite's data_store copy holds no
+    runs; the run records are read where the bot reads them, beside options/.)"""
+    from joint_vol_calibration import config
+    from joint_vol_calibration.data import database as db
+    from joint_vol_calibration.surface import quotes as sqm
+
+    monkeypatch.setattr(db, "OPTIONS_DIR", Path(config.DATA_DIR) / "options")
+    paths = sorted((Path(config.DATA_DIR) / "runs").glob("run_*_close.json"))
+    if not paths:
+        pytest.skip("no close-slot run is recorded")
+    for p in paths:
+        rec = json.loads(p.read_text())
+        session = (rec.get("capture") or {}).get("session") or rec["expected_session"]
+        assert rec["run_utc"] in [t for t, _ in sqm._close_slot_runs(session)], p.name
+        assert sqm.closing_book_run(session) != sqm.CLOSE_RUN_NONE, p.name
+
+
 def test_a_book_is_the_closing_book_by_its_quote_time_not_its_underlyings_last_trade(tmp_path, monkeypatch):
     """w5w2 check, F2 and F3: 8f6f776 called a closing-state book (by its quote time)
     the session's closing book only if its underlying's last trade was at or before

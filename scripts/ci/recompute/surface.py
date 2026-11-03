@@ -2046,6 +2046,8 @@ OVERNIGHT_WHY_RUN = {
                  "not kept)"),
     "skipped": ("(the close slot's runs stored no closing book: by the clock, or by the quote time of the "
                 "book downloaded, the delayed feed showed another book)"),
+    "no-step": ("(the close slot ran for the session without capturing books: that was before it captured "
+                "closing books)"),
     "none": "(no run of the close slot is recorded for the session)",
 }
 OVERNIGHT_WHY_FAILED = "(the session's closing book did not pass the quote-state gates)"

@@ -1207,6 +1207,16 @@ class TestRecomputeAudit:
         record("e", "2026-10-29T22:07:05+00:00", close, "captured", None)   # caught, then not kept
         assert M.closing_book_run(store, session) == "captured"
         assert failed(None, run="captured") == []
+        # w5w2 check, F1: a close-slot run made before the slot captured closing books
+        # (main's workflow: market and labels, no capture) is a close-slot run of its
+        # session, taken by the record's slot, with its own reason
+        (root / "runs" / "run_e.json").unlink()
+        (root / "runs" / "run_f_close.json").write_text(json.dumps({
+            "schema": "run_ledger/1", "run_utc": "2026-10-30T03:27:41+00:00", "slot": "close",
+            "steps": ["market", "labels"], "session": session, "expected_session": session, "capture": None}))
+        assert M.closing_book_run(store, session) == "no-step"
+        assert failed(None, run="no-step") == []
+        assert failed(None, run="none") == [run_, reason]
 
     def test_it_rebuilds_the_heston_rows_fit_time_clause_from_the_fits_record(self, monkeypatch, tmp_path):
         """FUND_GRADE_PLAN 0.8: a session scored on its closing book whose Heston fit was
