@@ -667,6 +667,14 @@ def test_a_session_whose_closing_book_the_close_slot_did_not_store_says_why(tmp_
     assert run == sqm.CLOSE_RUN_CAPTURED
     assert text.startswith(f"{lead}(the close slot captured the session's closing book, but the store holds "
                            "none: it was not kept), quoted at ")
+    # w5w2 check, F7: an earlier run's refusal stood over a later run that captured the
+    # book, so the note gave the earlier reason; a run that stored the book says why the
+    # store holds none, whichever run came first
+    record("6", "2026-10-16T21:30:00+00:00", close, SESSION, "rejected", why)       # before run 5
+    run, text = note_of()
+    assert run == sqm.CLOSE_RUN_CAPTURED
+    assert text.startswith(f"{lead}(the close slot captured the session's closing book, but the store holds "
+                           "none: it was not kept), quoted at ")
 
 
 def test_a_close_slot_run_without_the_closebook_step_is_its_own_reason(tmp_path, monkeypatch):

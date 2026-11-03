@@ -205,9 +205,14 @@ def closing_book_refusal(session: str) -> str | None:
     "skipped": "rejected" (it failed the quote-state gate, was empty or was
     another session's book), "failed", or a capture step that crashed. None
     when no such run is recorded (closing_book_run says what the records do
-    hold)."""
+    hold). None too when a close-slot run stored the book: an earlier or later
+    refusal does not say why the store holds none (closing_book_run's
+    "captured")."""
+    runs = _close_slot_runs(session)
+    if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
+        return None
     found = [(t, str(spx.get("reason") or "its run record gives no reason for it"))
-             for t, spx in _close_slot_runs(session) if spx.get("status") not in _NOT_REFUSED]
+             for t, spx in runs if spx.get("status") not in _NOT_REFUSED]
     return max(found)[1] if found else None
 
 
@@ -219,22 +224,22 @@ CLOSE_RUN_REFUSED, CLOSE_RUN_CAPTURED, CLOSE_RUN_SKIPPED, CLOSE_RUN_NO_STEP, CLO
 
 def closing_book_run(session: str) -> str:
     """What the close slot's run records (_close_slot_runs) say of ``session``'s
-    closing SPX book, for a session whose store holds none: "refused" (a run
-    did not store it and says why: closing_book_refusal), "captured" (a run
-    captured it, or found it stored, yet the store holds none: it was not kept,
-    as when the move to the private store fails), "skipped" (the runs that ran
-    the closebook step stored none because, by the clock or by the quote time of
-    the book they downloaded, the delayed feed showed another book: their
-    record says "skipped"), "no-step"
-    (the close slot ran for the session without the closebook step, before it
-    captured closing books) or "none" (no run of the close slot is recorded for
-    the session: it had not run yet, or did not exist then). Nothing here says
-    how long the feed shows a closing book: that is not observed."""
-    if closing_book_refusal(session):
-        return CLOSE_RUN_REFUSED
+    closing SPX book, for a session whose store holds none, in this order:
+    "captured" (a run captured it, or found it stored, yet the store holds none:
+    it was not kept, as when the move to the private store fails; whatever
+    another run of the session did), "refused" (a run did not store it and says
+    why: closing_book_refusal), "skipped" (a run's record says it skipped the
+    book: by the clock, or by the quote time of the book it downloaded, the
+    delayed feed showed another book), "no-step" (the close slot ran for the
+    session without the closebook step, before it captured closing books) or
+    "none" (no run of the close slot is recorded for the session: it had not
+    run yet, or did not exist then). Nothing here says how long the feed shows
+    a closing book: that is not observed."""
     runs = _close_slot_runs(session)
     if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
         return CLOSE_RUN_CAPTURED
+    if closing_book_refusal(session):
+        return CLOSE_RUN_REFUSED
     if any(spx.get("status") == "skipped" for _, spx in runs):
         return CLOSE_RUN_SKIPPED
     return CLOSE_RUN_NO_STEP if runs else CLOSE_RUN_NONE

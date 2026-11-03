@@ -816,15 +816,16 @@ def _close_slot_runs(store: Store, session: str) -> list[tuple[str, dict]]:
 
 def closing_book_run(store: Store, session: str) -> str:
     """What the close slot's run records say of a session whose store holds no closing
-    book: 'refused' (a run did not store it and says why), 'captured' (a run captured
-    or found it, yet the store holds none), 'skipped' (a run's record says it skipped
-    the book), 'no-step' (the close slot ran without the closebook step) or
-    'none' (no close-slot run of the session is recorded)."""
-    if closing_book_refusal(store, session):
-        return "refused"
+    book, in this order: 'captured' (a run captured or found it, yet the store holds none,
+    whatever another run did), 'refused' (a run did not store it and says why),
+    'skipped' (a run's record says it skipped the book), 'no-step' (the close slot ran
+    without the closebook step) or 'none' (no close-slot run of the session is
+    recorded)."""
     runs = _close_slot_runs(store, session)
     if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
         return "captured"
+    if closing_book_refusal(store, session):
+        return "refused"
     if any(spx.get("status") == "skipped" for _, spx in runs):
         return "skipped"
     return "no-step" if runs else "none"
@@ -834,10 +835,13 @@ def closing_book_refusal(store: Store, session: str) -> str | None:
     """Why the job did not store ``session``'s closing SPX book, from its run records
     (_close_slot_runs): the newest close-slot run (by run_utc) whose SPX capture neither
     stored the book nor was 'skipped' (rejected, failed, or a capture step that crashed),
-    its recorded reason; None when no such run is recorded."""
+    its recorded reason; None when no such run is recorded, or when a close-slot run of
+    the session stored the book (closing_book_run's 'captured')."""
+    runs = _close_slot_runs(store, session)
+    if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
+        return None
     found = [(t, str(spx.get("reason") or "its run record gives no reason for it"))
-             for t, spx in _close_slot_runs(store, session)
-             if spx.get("status") not in ("captured", "exists", "skipped", "no-step")]
+             for t, spx in runs if spx.get("status") not in ("captured", "exists", "skipped", "no-step")]
     return max(found)[1] if found else None
 
 

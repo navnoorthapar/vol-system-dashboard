@@ -1228,6 +1228,13 @@ class TestRecomputeAudit:
         assert M.closing_book_run(store, session) == "refused"
         assert failed(crashed, run="refused") == []
         assert failed(None, run="skipped") == [record_, run_, reason]
+        # w5w2 check, F7: a later run that captured the book stands over the earlier
+        # refusal: the store lost a book a run stored
+        record("h", "2026-10-29T23:30:00+00:00", close, "captured", None)
+        assert M.closing_book_refusal(store, session) is None
+        assert M.closing_book_run(store, session) == "captured"
+        assert failed(None, run="captured") == []
+        assert failed(crashed, run="refused") == [record_, run_, reason]
 
     def test_it_rebuilds_the_heston_rows_fit_time_clause_from_the_fits_record(self, monkeypatch, tmp_path):
         """FUND_GRADE_PLAN 0.8: a session scored on its closing book whose Heston fit was
