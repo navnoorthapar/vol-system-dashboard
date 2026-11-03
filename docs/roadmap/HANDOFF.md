@@ -131,6 +131,12 @@ All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log
 - **Surface page growth (D2, from the w3/surface fixes).** The page compares at most four earlier sessions (the newest, and the newest at least 5, 21 and 63 NYSE sessions back). Six horizons (adding about half a year and a year) would cost about 11 kB each at 45 expiries and need about 456 kB: raise the 450 kB budget, or keep four. The "Every session the surface report covers" table still grows about 300 B a stored session; at 45 expiries the page has about 28 kB of headroom, so with a fourth 45-expiry session compared and a default expiry of ~380 quotes CI's "Surface page weight" step can fail after roughly 25–90 more daily sessions. Cap that table at recent sessions (the full record stays in `data_store/surface/index.json`), or let the budget count its rows.
 - **The 80 kB gzip figure (D2).** `page_budget.py` prints the gzipped size at level 6 and does not gate on it (the server picks the level; the 45-expiry page is about 78 kB at level 6, 76 kB at level 9). Gate it, at which level, or drop the figure.
 - **AM / PM tags (D3).** The tabs and status line show AM / PM only from the residual table's OCC root, which no stored session carries; near-dated third Fridays are PM (SPXW) lines and from April 2027 AM. Have the producer write `root`, or tag from the time of day in T.
+- **Private Cboe store (0.8, owner action).** You chose a private data repository for the raw Cboe books. Until the secrets `CBOE_DATA_REPO` and `CBOE_DATA_TOKEN` are set, the bot commits the books publicly and warns on every run.
+- **Fit source (0.7).** The Heston fit runs on the Yahoo chain and is scored on the session's Cboe book (as built). Fit on the Cboe book too, or keep the two apart.
+- **D3's 100 ms at 4× CPU.** Out of reach while ECharts draws the chart (`setOption` alone takes 70–300 ms at 4×); the switch takes about 40 ms and click-to-chart about 150 ms. Restate the target.
+- **README snapshot (0.10).** `make readme-results` regenerates `docs/results/readme_results.json`; a person reviews each regeneration (as built). Or let the bot regenerate it.
+- **Python Playwright in CI.** The 55 browser tests in `test_dashboard.py` skip in CI and in the bot's gates (only Node Playwright is installed), so they run only by hand. Add Python Playwright to `tests.yml`, or keep them manual.
+- **pip-audit exceptions.** The filelock, pillow and setuptools advisories are allowed until 2026-12-31 (`scripts/ci/pip_audit_allowlist.json`); clearing them needs a reviewed rebuild of the lock files.
 
 ## The fund-grade bar (the stop condition for the UI loop)
 
@@ -221,6 +227,48 @@ python scripts/ci/simulate_next_session.py --full                               
    - re-dispatch. The data it captured is committed before the gates, so nothing is lost.
 
 ## Status log (newest first; every session appends one entry)
+
+- **2026-11-03, fund-grade session 1, continued: wave 2 (the rest of tier 0) shipping.**
+  - **Shipped to main since the last entry:**
+    - PR #19, wave 1;
+    - PR #21, which let the first post-wave-1 deploy through: Model Risk's order test holds for any breach tally, and the simulation job gets 60 minutes.
+    - Runs 150 (2026-10-30) and 151 (2026-11-02 close slot) deployed.
+  - **Wave 2, in one PR from `w5/wave2`:**
+    - w4/gates: 0.2's enumerating badge test, 0.4's forced-failure check, and the certifi bump;
+    - w2/closebook: 0.8, the session's closing Cboe book;
+    - their integration;
+    - an adversarial review's three majors and five minors, fixed:
+      - Research and Model Risk name each stored chain as the fit made on it names it;
+      - the presentation gate passes when the newest surface is a Yahoo download (it failed on main);
+      - every VIX gap names its book, and Model Risk V2 ranks and limits within it;
+      - the overnight note states only what the run records hold;
+      - a closing book needs its underlying's last trade by the close;
+      - a run fails closed on a privately held closing book it cannot read;
+      - β aggregates declare their chains;
+      - DATA_SOURCES' ledger sentence matches the code.
+    - Verification found two more, also fixed:
+      - surface.json now records the closing-book check and the close slot's runs, which the audit reads;
+      - the VX-leg acceptance test reads the record, not the tracked cache. It failed on main's CI.
+  - **Verified on the branch** (`docs/roadmap` aside, at 77e1da1):
+    - the whole suite (2,960 passed, plus the fixed test), with `test_dashboard.py`'s browser tests (443 passed);
+    - lint and typecheck at baseline (ruff 1,293, mypy 368); the pip-audit gate;
+    - the committed record: audit 15,931 of 15,931, page budget ok, a11y 0, interact 0;
+    - the bot's three gates, audit, budget, a11y and interact on three further states:
+      - the newest surface from a Yahoo download;
+      - the books held privately;
+      - every surface rebuilt at report version 7 with two books on the newest session;
+    - the next-session simulation through all three gates.
+  - **Found, not fixed (next PR):** a Yahoo chain downloaded during Cboe's overnight session holds live overnight quotes.
+    - Evidence: the 2026-10-30 chain's forwards are about 21 points over Friday's close. On 10-27 to 10-29, the Yahoo downloads match Cboe's overnight book to within about 1 point.
+    - Since QUANT-01 its T runs from the 16:00 ET close. That is about 5.5 hours early on a weekday book slot, and about 53 hours on the 10-30 weekend fit.
+    - The fix: time such a download from when it was fetched. Fits already made keep their numbers, since the forward ledger recorded their forecasts, and the pages say what was done.
+  - **Also open:**
+    - the weekly reproduction (2026-11-02) has 11 of 16 artifacts within tolerance;
+    - the four-critic review, with its medians in FUND_GRADE_PLAN §6;
+    - extending the recompute audit to Calibration, Research, Risk and Model Risk.
+  - **Learned:**
+    - Run every gate test in every state the bot can publish. The Yahoo-newest failure hid because the test ran only on the committed pages, whose newest surface was a Cboe book.
+    - Check a vendor's timing claim against the data before building on it. QUANT-01 assumed Yahoo serves a close snapshot; in overnight hours it serves the live book.
 
 - **2026-11-01, fund-grade session 1, continued: wave 1 shipping; 0.8 and the tier-0 checks building.**
   - **Shipped to main since the last entry:** PR #18. It unblocked the 2026-10-29 deploy:
