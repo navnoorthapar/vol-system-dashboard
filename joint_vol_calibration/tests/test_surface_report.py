@@ -878,8 +878,10 @@ def test_a_cboe_book_failing_the_quote_state_gates_falls_back_to_yahoo(
 
 def test_committed_cboe_books_are_the_surface_source_of_their_sessions():
     """Every session with a stored Cboe capture that passes the quote-state
-    gates is read from that capture, with its quote time as the T origin of a
-    GTH book (whatever sessions the bot has captured)."""
+    gates is read from a capture: its closing book when one passes (tier 0.8),
+    else its newest that passes, every capture ahead of it in that order named
+    as refused, with its quote time as the T origin of a GTH book (whatever
+    sessions the bot has captured, one book or two)."""
     from joint_vol_calibration.backtest import forward_ledger as fl
     from joint_vol_calibration.data import database as db
     from joint_vol_calibration.data import option_chain as oc
@@ -891,14 +893,20 @@ def test_committed_cboe_books_are_the_surface_source_of_their_sessions():
             sqm.session_spot(s)
         except ValueError:
             continue                                  # the test database lacks the session's close
-        path, side = sqm.session_captures(s)[0]
-        if fl.book_time_refusal(s, side.get("quote_time")):
-            continue
+        caps = sqm.session_captures(s)                # newest first
+        order = ([c for c in caps if c[1].get("book_state") == "closing"]
+                 + [c for c in caps if c[1].get("book_state") != "closing"])
         sq = sqm.load_session_quotes(s)
+        refused = {r.split(": ", 1)[0] for r in sq.inputs.get("refused") or []}
+        for path, side in order:
+            if fl.book_time_refusal(s, side.get("quote_time"), side.get("fetched_at")):
+                assert f"options/cboe/{path.name}" in refused, (s, path.name)
         if sq.inputs["source"] != "cboe":            # refused by the near-ATM gate: said so
             assert "no stored Cboe book passes" in sq.inputs["source_reason"], s
+            assert refused == {f"options/cboe/{p.name}" for p, _ in caps}, s
             continue
-        assert sq.inputs["chain"] == f"data_store/options/cboe/{path.name}"
+        path, side = next(c for c in order if f"options/cboe/{c[0].name}" not in refused)
+        assert sq.inputs["chain"] == f"data_store/options/cboe/{path.name}", s
         assert sq.diagnostics["quote_time"] == side["quote_time"]
         gth = oc.t_origin(side["quote_time"], s) != oc.session_close(s)
         assert sq.diagnostics["t_origin_basis"] == (oc.GTH_BASIS if gth else oc.CLOSE_BASIS)
