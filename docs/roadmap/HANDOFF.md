@@ -123,6 +123,10 @@ All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log
 - **docs/model_validation/README.md line ~171** still says M14 replicates the VIX '(Cboe rules)'; the site now says 'the Cboe formula, with its listed departures' (T3). Align the doc, and note the departures count is 12 on 2026-10-26 (6 deviations + 6 gap notes), not 8.
 - **The Calibration page's census sentence** ('k of k fits pass') was not reworded with the Overview's (T2). Reword it the same way. **Done 2026-10-29 (PR #15).**
 - **B1/B2 (cone and frontier labels)** were fixed in the chart specs with spec-level tests; no pixel-level browser measurement of label rectangles at 390–1920 px was added. Add one to the interact gate.
+- **A closing-book check (0.8, follow-up).** A Cboe book is named the session's closing book by its quote time alone.
+  - The underlying's last trade cannot check it: VIX's close is stamped 16:15:01, and every SPX overnight book records the session's 16:14:59, as its closing book does.
+  - The option lines' own last-trade times could: a closing book should hold no option trade after the 16:15 ET cutoff, and an overnight book holds the overnight session's trades once any are made. They are dropped today: `option_last_trade_time` is kept only with `include_extras`, and the capture's record does not hold it.
+  - To do: record each capture's latest option trade time in its record, read it across the stored books before setting a rule (the vendor may stamp a trade a second late, as it stamps the VIX close), then check it in the close slot and in `quotes.select_session_chain`.
 
 ### E. Owner decisions (ask the owner; do not decide alone)
 - The licence of `data_store/benchmarks/*.csv` (Cboe strategy-index data).
@@ -242,13 +246,19 @@ python scripts/ci/simulate_next_session.py --full                               
       - the presentation gate passes when the newest surface is a Yahoo download (it failed on main);
       - every VIX gap names its book, and Model Risk V2 ranks and limits within it;
       - the overnight note states only what the run records hold;
-      - a closing book needs its underlying's last trade by the close;
+      - a closing book is named by its quote time, as before (a check by the underlying's last trade was tried and dropped: see the final check below);
       - a run fails closed on a privately held closing book it cannot read;
       - β aggregates declare their chains;
       - DATA_SOURCES' ledger sentence matches the code.
     - Verification found two more, also fixed:
-      - surface.json now records the closing-book check and the close slot's runs, which the audit reads;
+      - surface.json now records the close slot's runs, which the audit reads;
       - the VX-leg acceptance test reads the record, not the tracked cache. It failed on main's CI.
+    - A final adversarial check found a blocker, two majors and minor gaps. All are fixed but one major, Research's "same-time VIX" β sentence, which goes with the overnight-Yahoo timing work below:
+      - the close slot refused every VIX closing book: the underlying's last trade cannot name the closing book (Cboe stamps the VIX close 16:15:01, and an SPX overnight book records the session's 16:14:59, as its closing book does), so that check is gone from the close slot, the chain choice and the audit;
+      - the overnight note reads the close slot's runs by the run record's slot and session, so a close-slot run made by main's workflow (no closebook step) is not reported as no run, and has its own reason;
+      - a crashed capture step gives its recorded reason, and a run that captured the closing book stands over another run's refusal;
+      - the next-session simulation defers a session that fails closed on a closing book held privately, so CI does not fail once books are held there;
+      - the presentation gate derives a Cboe session's book from its quote time, as the audit does, not from the recorded state the pages read.
   - **Verified on the branch** (`docs/roadmap` aside, at 77e1da1):
     - the whole suite (2,960 passed, plus the fixed test), with `test_dashboard.py`'s browser tests (443 passed);
     - lint and typecheck at baseline (ruff 1,293, mypy 368); the pip-audit gate;
@@ -269,6 +279,7 @@ python scripts/ci/simulate_next_session.py --full                               
   - **Learned:**
     - Run every gate test in every state the bot can publish. The Yahoo-newest failure hid because the test ran only on the committed pages, whose newest surface was a Cboe book.
     - Check a vendor's timing claim against the data before building on it. QUANT-01 assumed Yahoo serves a close snapshot; in overnight hours it serves the live book.
+    - Read a field in every record that holds it before building a rule on it: the underlying's last trade is the same in a session's closing and overnight books, and main's close-slot runs have no closebook step, so both rules misread real records no test had fed them.
 
 - **2026-11-01, fund-grade session 1, continued: wave 1 shipping; 0.8 and the tier-0 checks building.**
   - **Shipped to main since the last entry:** PR #18. It unblocked the 2026-10-29 deploy:
