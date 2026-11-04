@@ -49,14 +49,17 @@
     }
    },
    "n_quotes": 6674,
+   "quote_time": null,
+   "report_version": 5,
    "session": "2026-03-24",
+   "source": "yfinance",
    "vix_gap_attribution": {
-    "residual_pts": 0.2549458614,
-    "truncation_pts": 0.03554572449
+    "residual_pts": 0.2548623755,
+    "truncation_pts": 0.03554572185
    },
    "vix_method": "cboe_rules",
    "vix_official": 26.95,
-   "vix_replicated": 26.65950841
+   "vix_replicated": 26.6595919
   },
   {
    "arbitrage_quotes_outside_spread": 52,
