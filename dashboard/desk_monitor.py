@@ -95,10 +95,14 @@ def bullet(value: Any, limits: Sequence[float], digits: str = ".2f", width: floa
             "label": f"value {format(v, digits)}; OK ≤ {_g(g)}, watch ≤ {_g(a)}, breach above {_g(a)}"}
 
 
-def history_view(points: Sequence[tuple[str, Any]], limits: Sequence[float], digits: str = ".2f",
+def history_view(points: Sequence[tuple], limits: Sequence[float] | None, digits: str = ".2f",
                  lower_is_better: bool = True, two_sided: bool = False) -> dict | None:
     """One dot per stored session (oldest first), each coloured by today's limits;
     the range, and where the newest (today's) value ranks: 'worst of 5'.
+
+    ``limits`` None: the check's limits do not apply to these values (a VIX
+    replication gap taken on a book other than the closing book); each dot's
+    status is then 'info'.
 
     ``two_sided``: a signed measurement whose limits bound its size (a gap that
     may fall either side of zero). Each dot keeps its sign, in its text, its
@@ -108,12 +112,18 @@ def history_view(points: Sequence[tuple[str, Any]], limits: Sequence[float], dig
     The last point is today's. When today has no value (a check the newest
     session cannot compute, e.g. a VIX the chain does not replicate) the dots of
     the earlier sessions remain, ``last`` is None and nothing is ranked: an
-    earlier session's value is never shown as today's."""
+    earlier session's value is never shown as today's.
+
+    A point may carry a third item, the data-chain key of the chain its value is read
+    off ('surface:2026-10-28'); its dot keeps it as ``chain`` (tier 0.2: the page names
+    each dot's chain)."""
     pts: list[tuple[str, float]] = []
-    for s, raw in points:
+    chains: dict[str, str | None] = {}
+    for s, raw, *rest in points:
         v = _num(raw)
         if v is not None:
             pts.append((str(s), v))
+            chains[str(s)] = rest[0] if rest else None
     today_missing = bool(points) and _num(points[-1][1]) is None
     if len(pts) < 2:
         return None
@@ -124,7 +134,8 @@ def history_view(points: Sequence[tuple[str, Any]], limits: Sequence[float], dig
         return signed(v, digits) if two_sided else _plain(v, digits)
     lo_, hi_ = min(vals), max(vals)
     rng = f"{text(lo_)} to {text(hi_)}" if two_sided else f"{text(lo_)}–{text(hi_)}"
-    dots = [{"session": s, "value": v, "status": rag(size(v), limits), "text": text(v)} for s, v in pts]
+    dots = [{"session": s, "value": v, "status": rag(size(v), limits) if limits is not None else "info",
+             "text": text(v), "chain": chains[s]} for s, v in pts]
     if today_missing:
         return {"dots": dots, "lo": lo_, "hi": hi_, "n": len(vals), "rank": None, "today_missing": True,
                 "range": rng, "last": None, "first_session": pts[0][0], "last_session": pts[-1][0]}

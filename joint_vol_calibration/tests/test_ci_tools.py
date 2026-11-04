@@ -11,6 +11,8 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
   * simulate_next_session.py (CI's simulate job): the simulated session's
     book is priced by parameters moved off the headline fit, with noise, so
     a test pinning a headline-derived value fails there, not in the bot.
+    Its --force-fail mode, run here in full, fails the run and checks that
+    bot_alert.py would open the bot-failure issue after two failures.
   * merge_main_data.py (merging live main's bot data into a branch that
     restated the record): only the re-derivable data files may conflict,
     they resolve to the branch's version, and main's rows are re-derived
@@ -178,6 +180,27 @@ def sim(monkeypatch):
     return _load("scripts/ci/simulate_next_session.py", "simulate_under_test", monkeypatch)
 
 
+# bot_alert.py's mistakes the forced-failure check must catch (each a change of the
+# repository's script): the 0.4 review's, run through the alert's own command line
+_FAILED_SET = 'FAILED = frozenset({"failure", "timed_out", "startup_failure"})'
+ALERT_MUTANTS = {
+    "alerts on a third failure": ("ALERT_AFTER = 2 ", "ALERT_AFTER = 3 "),
+    "alerts on one failure": ("ALERT_AFTER = 2 ", "ALERT_AFTER = 1 "),
+    "a success does not end the streak": ("        if c in SUCCEEDED:\n            break",
+                                          "        if c in SUCCEEDED:\n            continue"),
+    "a cancelled run counts as failed": (_FAILED_SET, _FAILED_SET.replace('"startup_failure"',
+                                                                          '"startup_failure", "cancelled"')),
+    "a second open issue": ("    if open_issues:\n", "    if False:\n"),
+    "main() drops the event": ("        res = alert(args.run_id, args.event,",
+                               "        res = alert(args.run_id, 'workflow_dispatch',"),
+    "main() alerts on nothing": ("    try:\n        res = alert(",
+                                 "    return 0\n    try:\n        res = alert("),
+    "the title loses the streak": ('title = title or f"Daily bot: {streak} scheduled runs failed in a row"',
+                                   'title = title or "Daily bot failed"'),
+    "a manual run reads the history": ('    if event != "schedule" and not all_events:', "    if False:"),
+}
+
+
 class TestSimulatedSession:
     def test_the_book_is_priced_off_the_headline_inside_the_box(self, sim):
         """PROD-8: the synthetic book was priced by the committed headline's own
@@ -296,6 +319,52 @@ class TestSimulatedSession:
         assert any("simulate_next_session.py --full" in r for r in runs)
         assert any("simulate_next_session.py --no-fit" in r for r in runs)
 
+    def test_a_session_failed_closed_on_a_privately_held_closing_book_is_deferred(self, sim, tmp_path,
+                                                                                  monkeypatch):
+        """w5w2 check, F5: the backfill fails a stale session closed when a manifest
+        records its closing book in the private store and the run cannot read it
+        (d396da5). CI's simulation has no private store, and counted that failure (and
+        the run's exit 1) as a problem, so once books are held privately every pull
+        request that bumps the report version would fail the simulation job. There the
+        session is deferred and the report says so; with a store configured
+        (CBOE_BOOKS_DIR), or without such a manifest, the failure stands."""
+        s, stem = "2026-10-30", "spx_2026-10-30_084019Z"
+        man = tmp_path / "data_store" / "options" / "cboe_manifest"
+        man.mkdir(parents=True)
+        (man / f"{stem}.json").write_text(json.dumps({"underlying": "SPX", "session": s,
+                                                      "book_state": "closing"}))
+        (tmp_path / "data_store" / "market" / "vix_futures_daily").mkdir(parents=True)
+        (tmp_path / "data_store" / "market" / "vix_futures_daily" / "vix_futures_daily_2026.parquet").touch()
+        err = (f"FileNotFoundError: the closing book {stem} of {s} is held in the private store (its "
+               f"manifest options/cboe_manifest/{stem}.json) and this run cannot read it: not building the "
+               "session from another book")
+        new = "2026-11-02"
+        st = {"simulated": {"session": new, "headline_before": "2026-10-30", "headline_params": {}},
+              "calibration": {"status": "accepted"}, "forward_ledger": {"status": "recorded"},
+              "market": {"vx_futures": {"last": new}}, "publishable": True,
+              "artifact_backfill": {"rebuilt": {s: {"surface": {"ok": False, "error": err}},
+                                                "2026-10-29": {"surface": {"ok": True}}}},
+              "errors": [f"backfill: surface artifact for {s} failed: {err}"]}
+        monkeypatch.delenv("CBOE_BOOKS_DIR", raising=False)        # as in CI: no private store
+        assert sim.outcome_problems(st, tmp_path) == []
+        assert sim.exit_problems(1, st, tmp_path, env={}) == []
+        assert sim.private_book_deferrals(st, tmp_path, env={}) == {(s, "surface"): err}
+        # a store is configured: the failure stands
+        store = {"CBOE_BOOKS_DIR": str(tmp_path / "private")}
+        assert sim.outcome_problems(st, tmp_path, env=store) == [f"artifact {s} surface: {err}"]
+        assert sim.exit_problems(1, st, tmp_path, env=store) != []
+        # another error beside it: the run's exit 1 is a problem
+        other = {**st, "errors": [*st["errors"], "forward ledger for 2026-11-02 not recorded: x"]}
+        assert sim.exit_problems(1, other, tmp_path, env={}) != []
+        # the raw book is in the copy after all: not a privately held book
+        (tmp_path / "data_store" / "options" / "cboe").mkdir()
+        (tmp_path / "data_store" / "options" / "cboe" / f"{stem}.parquet").touch()
+        assert sim.outcome_problems(st, tmp_path, env={}) == [f"artifact {s} surface: {err}"]
+        # the run's report lists the deferred session
+        src = (ROOT / "scripts" / "ci" / "simulate_next_session.py").read_text()
+        assert "backfill deferred (closing book held in the private store)" in src
+        assert "problems += exit_problems(r.returncode, st, tree, env)" in src
+
     def test_each_simulated_slot_must_leave_its_run_record(self, sim, tmp_path):
         """FUND_GRADE_PLAN 0.9: the simulation runs the close and book slots with
         REFRESH_SLOT set, so each must leave one complete record that agrees with
@@ -315,11 +384,161 @@ class TestSimulatedSession:
         bad = {**book, "calibration": {"status": "rejected"}}
         assert "is not the run's" in sim.run_record_problems(tmp_path, {"book": bad})[0]
         src = inspect.getsource(sim.drive)
-        assert src.index('os.environ["REFRESH_SLOT"] = "close"') < src.index('"market,labels"')
+        assert src.index('os.environ["REFRESH_SLOT"] = "close"') < src.index('slot_steps(')
         assert src.index('os.environ["REFRESH_SLOT"] = "book"') < src.index('"market,capture,calibrate')
         main = inspect.getsource(sim.main)
         assert "run_record_problems(" in main
         assert "check_captures.py" in main
+
+    def test_a_forced_failure_fails_the_run_and_the_alert_opens_the_issue(self, tmp_path):
+        """FUND_GRADE_PLAN 0.4: the failure alert was tested only on a fake history
+        (TestBotAlert), never after a run of the bot that failed. --force-fail runs both
+        scheduled slots of the simulated next session in a copy of this checkout with
+        Yahoo's SPX download raising: each must exit 1 on that outage with a complete run
+        record, the book run (the one with the freeze step) must not be publishable, and
+        the copy's bot_alert.py, run through its command line with a fake gh first on
+        PATH answering from the two runs' own records, must open the one bot-failure
+        issue, comment on one already open, leave it alone when a success came between,
+        and not read GitHub on a manual run. About two minutes."""
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "simulate_next_session.py"),
+                            "--force-fail", "--out", str(tmp_path)], capture_output=True, text=True,
+                           timeout=900, check=False)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        report = (tmp_path / "report.md").read_text()
+        assert "| bot runs (forced failure: Yahoo's SPX download raises in both slots) | 1 |" in report
+        assert "close exit 1, book exit 1, publishable False" in report
+        assert "simulated outage (--force-fail)" in report
+        assert ("| failure alert (two failed in a row) | 0 | None | created issue "
+                "https://github.invalid/issues/1 (streak 2; 4 gh calls) |") in report
+        assert "| failure alert (an issue already open) | 0 | None | commented issue 7 (streak 2;" in report
+        assert "| failure alert (a success between) | 0 | None | none (streak 1; 1 gh calls) |" in report
+        assert "| failure alert (a manual run) | 0 | None | none (streak None; 0 gh calls) |" in report
+        assert "PROBLEM" not in report
+        st = json.loads((tmp_path / "status.json").read_text())
+        assert st["exit_code"] == 1
+        assert st["simulated"]["force_fail"] is True
+        assert "freeze" in st["steps"]
+        assert not (tmp_path / "tree").exists()                       # removed when it passes
+
+    @staticmethod
+    def _failed_runs(sim, root: Path) -> tuple[dict, dict]:
+        """Two scheduled runs failed on the forced outage, as the slots record them: the
+        close run, then the book run (with the freeze step, not publishable)."""
+        (root / "data_store" / "runs").mkdir(parents=True)
+        why = f"SPX OHLCV download failed: {sim.OUTAGE}"
+        sts = {}
+        for slot, utc, steps in (("close", "2026-11-02T23:07:00+00:00", ["market", "labels"]),
+                                 ("book", "2026-11-03T03:30:00+00:00",
+                                  ["market", "capture", "calibrate", "freeze"])):
+            sts[slot] = {"run_utc": utc, "exit_code": 1, "publishable": False, "errors": [why],
+                         "publish_blockers": [why], "steps": steps}
+            (root / "data_store" / "runs" / f"run_{utc[:10]}_{slot}.json").write_text(json.dumps(
+                {"slot": slot, "run_utc": utc, "complete": True, "exit_code": 1, "calibration": None}))
+        return sts["close"], sts["book"]
+
+    def test_the_forced_failure_check_fails_when_the_run_or_the_alert_does_not(self, sim, tmp_path):
+        """The checks behind --force-fail, on hand-made failed runs: they pass with the
+        repository's bot_alert.py and fail when the book run did not fail, failed on
+        something else, could be published, or has no run record."""
+        import shutil
+        (tmp_path / "scripts" / "ci").mkdir(parents=True)
+        shutil.copy(ROOT / "scripts" / "ci" / "bot_alert.py", tmp_path / "scripts" / "ci" / "bot_alert.py")
+        close, book = self._failed_runs(sim, tmp_path)
+        work = tmp_path / "alert"
+        problems, rows = sim.force_fail_problems(1, book, tmp_path, close, work)
+        assert problems == []
+        assert [r[3] for r in rows] == [
+            "created issue https://github.invalid/issues/1 (streak 2; 4 gh calls)",
+            "commented issue 7 (streak 2; 3 gh calls)", "none (streak 1; 1 gh calls)",
+            "none (streak None; 0 gh calls)"]
+        # the issue names both failed runs, and the fake gh, not the real one, was called
+        log = work / "two_failed_in_a_row" / "gh_calls.jsonl"
+        calls = [json.loads(ln) for ln in log.read_text().splitlines() if ln]
+        body = calls[-1][calls[-1].index("--body") + 1]
+        assert "actions/runs/9000000" in body
+        assert "actions/runs/9000001" in body
+        assert sim.force_fail_problems(0, {**book, "exit_code": 0}, tmp_path, close, work)[0][0].startswith(
+            "the forced failure did not fail the book run")
+        assert sim.force_fail_problems(1, {**book, "errors": ["freeze failed"]}, tmp_path, close, work)[0][
+            0].startswith("the book run did not fail on the forced outage")
+        published = sim.force_fail_problems(1, {**book, "publishable": True}, tmp_path, close, work)[0]
+        assert published[0].startswith("the failed book run is publishable")
+        (tmp_path / "data_store" / "runs" / "run_2026-11-03_book.json").unlink()
+        assert sim.force_fail_problems(1, book, tmp_path, close, work)[0][0].startswith(
+            "0 book run record(s)")
+
+    @pytest.mark.parametrize("mutant", list(ALERT_MUTANTS))
+    def test_the_forced_failure_check_catches_a_wrong_alert(self, sim, tmp_path, mutant):
+        """Each mistake of bot_alert.py in ALERT_MUTANTS, in a copy of the script,
+        makes the forced-failure check report a problem. Two of the review's are left
+        out as they change nothing gh can show: counting manual runs (the history is
+        read with --event schedule, so none is listed) and counting the run itself (it
+        is in progress while its last step runs)."""
+        (tmp_path / "scripts" / "ci").mkdir(parents=True)
+        src = (ROOT / "scripts" / "ci" / "bot_alert.py").read_text()
+        old, new = ALERT_MUTANTS[mutant]
+        assert src.count(old) == 1, mutant
+        (tmp_path / "scripts" / "ci" / "bot_alert.py").write_text(src.replace(old, new))
+        close, book = self._failed_runs(sim, tmp_path)
+        problems, _ = sim.force_fail_problems(1, book, tmp_path, close, tmp_path / "alert")
+        assert problems, mutant
+
+    def test_the_close_slot_runs_the_workflows_steps_and_must_store_the_closing_book(self, sim, tmp_path):
+        """FUND_GRADE_PLAN 0.8: the simulation ran the close slot as 'market,labels'
+        written into the driver, so a close-slot step the workflow added was never run
+        before merge. It now reads the close slot's steps from the workflow (with the
+        closebook step) and fails unless the close slot stored the closing books, the
+        book slot captured the overnight ones (after a Friday, when the feed still
+        shows the closing book, found the close slot's stored instead), the forward
+        ledger traded on the book slot's book and the session's surface was built from
+        the closing book. Checked here on the status files and surface.json the
+        simulated slots write (book_problems, which main applies); the driver that
+        writes them runs only in the simulation itself (CI's simulate job)."""
+        steps = sim.slot_steps(ROOT / ".github" / "workflows" / "daily_refresh.yml", "close")
+        assert "closebook" in steps.split(",")
+
+        s, d = "2026-10-29", "/x/data_store/options/cboe"
+        status = tmp_path / "status.json"
+
+        def slot(status_, state, stamp, ledger=None):
+            caps = {u: {"status": status_, "file": f"{d}/{u.lower()}_{s}_{stamp}.parquet",
+                        **({"book_state": state} if status_ == "captured" else {})} for u in ("SPX", "VIX")}
+            return {"capture": {"status": status_, "captures": caps},
+                    **({"forward_ledger": {"book_file": f"options/cboe/{ledger}"}} if ledger else {})}
+
+        def problems(close, book, feed_state, chain):
+            """book_problems on the files the simulated run would leave."""
+            sim_rec = {"session": s, "book_slot_state": feed_state}
+            status.write_text(json.dumps({**book, "simulated": sim_rec}))
+            close_file = status.with_name("status_close.json")
+            close_file.unlink(missing_ok=True)
+            if close is not None:
+                close_file.write_text(json.dumps(close))
+            sj = tmp_path / "tree" / "data_store" / "surface" / s / "surface.json"
+            sj.parent.mkdir(parents=True, exist_ok=True)
+            sj.write_text(json.dumps({"inputs": {"chain": chain}}))
+            return sim.book_problems(tmp_path / "tree", status)
+
+        close = slot("captured", "closing", "220700Z")
+        surface = f"data_store/options/cboe/spx_{s}_220700Z.parquet"
+        # a Monday-Thursday session: the book slot captures the overnight books
+        gth = slot("captured", "gth", "023000Z", ledger=f"spx_{s}_023000Z.parquet")
+        assert problems(close, gth, "gth", surface) == []
+        # after a Friday the feed still shows the closing book: found stored, not fetched again
+        fri = slot("exists", None, "220700Z", ledger=f"spx_{s}_220700Z.parquet")
+        assert problems(close, fri, "closing", surface) == []
+        assert "want the gth books captured" in problems(close, fri, "gth", surface)[0]
+        assert "want the close slot's books found stored" in problems(close, gth, "closing", surface)[0]
+        # the close slot stored nothing (no status file), the ledger or the surface on the wrong book
+        assert "close slot capture" in problems(None, gth, "gth", surface)[0]
+        other = slot("captured", "gth", "023000Z", ledger="spx_x.parquet")
+        assert problems(close, other, "gth", surface) == [
+            ("the forward ledger traded on options/cboe/spx_x.parquet, not the book slot's "
+             f"spx_{s}_023000Z.parquet")]
+        yahoo = f"data_store/options/spx_{s}.parquet"
+        assert problems(close, gth, "gth", yahoo) == [
+            (f"the session's surface was built from {yahoo}, not its closing book "
+             f"spx_{s}_220700Z.parquet")]
 
     def test_a_replayed_book_has_the_state_its_quote_time_gives(self, sim):
         """The simulated 2026-10-30 session (a Friday) failed the data gate: the replay
@@ -344,6 +563,23 @@ class TestSimulatedSession:
             assert list(cap.frame["snapshot_date"]) == [session]
             states[session] = cap.book_state
         assert states == {"2026-10-29": "gth", "2026-10-30": "closing"}
+
+    def test_the_close_slots_replay_is_a_different_listing_from_the_book_slots(self, sim):
+        """The simulated session's closing and overnight books were two replays of one
+        committed file, with the same line counts, so the presentation gate's check of
+        the Overview's books passed on a weekday session here and failed in the bot.
+        The close slot's replay now leaves out the furthest expiry's lines."""
+        import pandas as pd
+
+        from joint_vol_calibration.config import DATA_DIR
+        books = sorted((DATA_DIR / "options" / "cboe").glob("spx_*.parquet"))
+        if not books:
+            pytest.skip("no committed Cboe book")
+        frame = pd.read_parquet(books[-1])
+        closing = sim.closing_listing(frame)
+        assert 0 < len(closing) < len(frame)
+        assert closing["expiry"].nunique() == frame["expiry"].nunique() - 1
+        assert closing["expiry"].max() < frame["expiry"].max()
 
     def test_the_driver_prices_book_and_vix_indices_with_the_moved_parameters(self, sim):
         import inspect
@@ -836,6 +1072,304 @@ class TestRecomputeAudit:
             S.deviations(a, ctx, split, [S.CAUSE_TIMING, S.CAUSE_STALE])
             assert [c.label for c in a.checks if not c.ok] == [], far
 
+    def test_it_rebuilds_the_overnight_books_quote_time_and_hours_after_the_close(
+            self, monkeypatch, tmp_path):
+        """FUND_GRADE_PLAN 0.8: a replication built from an overnight book says when the
+        book was quoted and how many hours after the session's 16:15 ET print. The
+        audit rebuilds both from surface.json's quote time and its own calendar, and,
+        from report_version 6, requires the note exactly on an overnight book. Why no
+        closing book was used (none stored, or it failed the quote-state gates) was
+        copied through; the audit now counts the session's stored closing books by its
+        own clock, checks surface.json's closing_books against that count and the
+        note's reason clause against it."""
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        root = tmp_path / "data_store"
+        (root / "options" / "cboe").mkdir(parents=True)
+        store = rc.data.Store(root)
+        none_stored = ("(no closing book of the session is stored: Cboe's delayed feed shows it only until "
+                       "Global Trading Hours open at 20:15 ET)")
+        failed_gates = "(the session's closing book did not pass the quote-state gates)"
+
+        def note(quoted, hours, why=none_stored):
+            return (f"{S.OVERNIGHT_NOTE} {why}, quoted at {quoted} ET, "
+                    f"{hours} hours after the 16:15 ET print of 2026-10-29 it is compared with: the gap "
+                    "mixes the replication’s error with the market’s move overnight.")
+
+        def failed(notes, quote_time="2026-10-30T08:36:08Z", version=6, closing_books=None):
+            inputs = {"source": "cboe", "quote_time": quote_time, "book_state": "gth",
+                      **({"closing_books": closing_books} if closing_books is not None else {})}
+            ctx = types.SimpleNamespace(vx={"report_version": version}, session="2026-10-29",
+                                        sj={"inputs": inputs}, store=store)
+            html = "".join(f"<li>{n}</li>" for n in notes)
+            a = rc.core.Audit("t", BeautifulSoup(f"<ul>{html}</ul>", "lxml"))
+            S.overnight_note(a, ctx, a.soup.select("li"))
+            return [c.label for c in a.checks if not c.ok]
+
+        # Fri 04:36:08 ET: 12 h 21 min after Thursday's 16:15 ET print
+        assert failed([note("2026-10-30 04:36", "12.4")]) == []
+        assert failed([note("2026-10-30 04:36", "12.3")]) == [
+            "overnight-book note: hours from the Cboe close to the book's quote time"]
+        assert failed([note("2026-10-30 04:46", "12.4")]) == [
+            "overnight-book note: when the book was quoted (surface.json quote time, ET)"]
+        shown = "overnight-book note shown (the chain is an overnight book by this audit's clock)"
+        assert failed([]) == [shown]
+        assert failed([], version=5) == []                  # written before the note existed
+        # Thu 17:52 ET: the closing book, which has no such note
+        assert failed([], quote_time="2026-10-29T21:52:00Z") == []
+        assert failed([note("2026-10-29 17:52", "1.6")], quote_time="2026-10-29T21:52:00Z")[0] == shown
+        # the reason clause and surface.json's count follow the stored records
+        why = "overnight-book note: why no closing book was used (the stored records)"
+        count = "surface.json closing_books = the session's stored closing books (this audit's clock)"
+        assert failed([note("2026-10-30 04:36", "12.4", failed_gates)]) == [why]
+        assert failed([note("2026-10-30 04:36", "12.4")], closing_books=0) == []
+        (root / "options" / "cboe" / "spx_2026-10-29_220705Z.json").write_text(json.dumps(
+            {"underlying": "SPX", "session": "2026-10-29", "quote_time": "2026-10-29T21:52:05Z"}))
+        (root / "options" / "cboe" / "spx_2026-10-29_085136Z.json").write_text(json.dumps(
+            {"underlying": "SPX", "session": "2026-10-29", "quote_time": "2026-10-30T08:36:08Z"}))
+        assert failed([note("2026-10-30 04:36", "12.4", failed_gates)], closing_books=1) == []
+        assert failed([note("2026-10-30 04:36", "12.4")], closing_books=0) == [count, why]
+
+    def test_it_accepts_the_overnight_note_as_the_producer_writes_it(self, monkeypatch, tmp_path):
+        """FUND_GRADE_PLAN 0.8: the audit's two reasons for building a session from its
+        overnight book were written with a typographic apostrophe (Cboe’s, session’s);
+        the producer writes a straight one and the page prints its note as written. So
+        the first session built from an overnight book under report_version 6 (any
+        weekday whose close slot stores no closing book) would fail the audit, and with
+        it the deploy. The audit is now fed the note report._timing_note writes, by the
+        producer's own clock, with no closing book stored and with one stored."""
+        import html
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+
+        from joint_vol_calibration.surface import report as R
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        root = tmp_path / "data_store"
+        (root / "options" / "cboe").mkdir(parents=True)
+        session, quoted = "2026-10-29", "2026-10-30T08:36:08Z"   # Fri 04:36 ET: the overnight book
+
+        def failed(closing_books):
+            inputs = {"source": "cboe", "quote_time": quoted, "book_state": "gth",
+                      "closing_books": closing_books}
+            sq = types.SimpleNamespace(session=session, inputs=inputs,
+                                       clean_diagnostics={"quote_time": quoted})
+            calc, basis = R._calc_time_ny(sq)
+            note = R._timing_note(sq, calc, basis)
+            assert note is not None
+            assert note.startswith(S.OVERNIGHT_NOTE)
+            ctx = types.SimpleNamespace(vx={"report_version": R.REPORT_VERSION}, session=session,
+                                        sj={"inputs": inputs}, store=rc.data.Store(root))
+            a = rc.core.Audit("t", BeautifulSoup(f"<ul><li>{html.escape(note)}</li></ul>", "lxml"))
+            S.overnight_note(a, ctx, a.soup.select("li"))
+            return [c.label for c in a.checks if not c.ok]
+
+        assert failed(0) == []
+        (root / "options" / "cboe" / f"spx_{session}_220705Z.json").write_text(json.dumps(
+            {"underlying": "SPX", "session": session, "quote_time": "2026-10-29T21:52:05Z"}))
+        assert failed(1) == []
+
+    def test_it_rebuilds_the_close_slots_reason_for_storing_no_closing_book(self, monkeypatch, tmp_path):
+        """Minor 2 of the 0.8 check: a session whose closing book the close slot fetched
+        and refused (the quote-state gate) is built from its overnight book, and the note
+        said no closing book is stored because of the feed's hours, while the run record
+        says the book was caught and refused; the audit, counting stored books only,
+        agreed. The note now gives the run record's reason, and the audit rebuilds it from
+        data_store/runs itself: the newest run of the close slot's step alone that did not
+        store the session's SPX book. It checks surface.json's record of it too."""
+        import html
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+
+        from joint_vol_calibration.surface import report as R
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        M = importlib.import_module("recompute.surface_math")
+        root = tmp_path / "data_store"
+        (root / "options" / "cboe").mkdir(parents=True)
+        (root / "runs").mkdir()
+        store = rc.data.Store(root)
+        session, quoted = "2026-10-29", "2026-10-30T08:36:08Z"   # Fri 04:36 ET: the overnight book
+        why = "not a live book (31% of near-ATM lines two-sided): 52 near-ATM lines"
+
+        def record(name, run_utc, steps, status, reason, sess=session):
+            (root / "runs" / f"run_{name}.json").write_text(json.dumps({
+                "schema": "run_ledger/1", "run_utc": run_utc, "steps": steps,
+                "capture": {"session": sess, "captures": {"SPX": {"status": status, "reason": reason}}}}))
+
+        close = ["market", "labels", "closebook"]
+        record("a", "2026-10-29T22:07:05+00:00", close, "rejected", why)
+        record("b", "2026-10-30T02:30:00+00:00", ["market", "capture", "calibrate", "freeze"], "rejected",
+               "empty chain")                                       # the book slot's: not the close slot
+        record("c", "2026-10-29T23:00:00+00:00", close, "skipped", "the feed shows the gth book")
+        record("d", "2026-10-28T22:07:05+00:00", close, "failed", "OSError: x", sess="2026-10-28")
+        assert M.closing_book_refusal(store, session) == why
+        assert M.closing_book_refusal(store, "2026-10-28") == "OSError: x"
+        assert M.closing_book_refusal(store, "2026-10-27") is None
+
+        def failed(refusal, note=None, run=None, version=R.REPORT_VERSION):
+            inputs = {"source": "cboe", "quote_time": quoted, "book_state": "gth", "closing_books": 0,
+                      "closing_book_refusal": refusal, **({"closing_book_run": run} if run else {})}
+            if note is None:                                         # the note the producer writes
+                sq = types.SimpleNamespace(session=session, inputs=inputs,
+                                           clean_diagnostics={"quote_time": quoted})
+                note = R._timing_note(sq, *R._calc_time_ny(sq))
+            ctx = types.SimpleNamespace(vx={"report_version": version}, session=session,
+                                        sj={"inputs": inputs}, store=store)
+            a = rc.core.Audit("t", BeautifulSoup(f"<ul><li>{html.escape(str(note))}</li></ul>", "lxml"))
+            S.overnight_note(a, ctx, a.soup.select("li"))
+            return [c.label for c in a.checks if not c.ok]
+
+        reason = "overnight-book note: why no closing book was used (the stored records)"
+        record_ = "surface.json closing_book_refusal = the close slot's run record (data_store/runs)"
+        assert failed(why) == []
+        # the timing reason where the record says the book was refused
+        timing = ("The book is the overnight (Global Trading Hours) book " + S.OVERNIGHT_WHY_NONE
+                  + ", quoted at 2026-10-30 04:36 ET, 12.4 hours after the 16:15 ET print of 2026-10-29 "
+                  "it is compared with: the gap mixes the replication's error with the market's move "
+                  "overnight.")
+        assert failed(why, timing) == [reason]
+        run_ = "surface.json closing_book_run = the close slot's run records (data_store/runs)"
+        assert failed(None, run="skipped") == [record_, run_, reason]   # surface.json lost the reason
+        (root / "runs" / "run_a.json").unlink()                      # no record of the refusal
+        assert M.closing_book_run(store, session) == "skipped"       # run c: the feed showed another book
+        assert failed(None, run="skipped") == []
+        # w5 review, minor 1: report_version 6's timing reason (a claim about the feed's hours
+        # that is not observed) is that version's; from 7 the reason is the run records'
+        assert failed(None, timing, version=6) == []
+        assert failed(None, timing, run="skipped") == [reason]
+        (root / "runs" / "run_c.json").unlink()
+        assert M.closing_book_run(store, session) == "none"
+        assert failed(None, run="none") == []
+        assert failed(None, run="skipped") == [run_, reason]
+        record("e", "2026-10-29T22:07:05+00:00", close, "captured", None)   # caught, then not kept
+        assert M.closing_book_run(store, session) == "captured"
+        assert failed(None, run="captured") == []
+        # w5w2 check, F1: a close-slot run made before the slot captured closing books
+        # (main's workflow: market and labels, no capture) is a close-slot run of its
+        # session, taken by the record's slot, with its own reason
+        (root / "runs" / "run_e.json").unlink()
+        (root / "runs" / "run_f_close.json").write_text(json.dumps({
+            "schema": "run_ledger/1", "run_utc": "2026-10-30T03:27:41+00:00", "slot": "close",
+            "steps": ["market", "labels"], "session": session, "expected_session": session, "capture": None}))
+        assert M.closing_book_run(store, session) == "no-step"
+        assert failed(None, run="no-step") == []
+        assert failed(None, run="none") == [run_, reason]
+        # w5w2 check, F4: a crashed capture step holds no SPX record; it is a refusal with
+        # the step's recorded reason, not "skipped" (the feed showing another book)
+        crashed = "capture step crashed: OSError: x"
+        (root / "runs" / "run_g_close.json").write_text(json.dumps({
+            "schema": "run_ledger/1", "run_utc": "2026-10-29T22:07:05+00:00", "slot": "close",
+            "steps": close, "session": session, "expected_session": session,
+            "capture": {"status": "failed", "reason": crashed, "session": session, "captures": {}}}))
+        assert M.closing_book_refusal(store, session) == crashed
+        assert M.closing_book_run(store, session) == "refused"
+        assert failed(crashed, run="refused") == []
+        assert failed(None, run="skipped") == [record_, run_, reason]
+        # w5w2 check, F7: a later run that captured the book stands over the earlier
+        # refusal: the store lost a book a run stored
+        record("h", "2026-10-29T23:30:00+00:00", close, "captured", None)
+        assert M.closing_book_refusal(store, session) is None
+        assert M.closing_book_run(store, session) == "captured"
+        assert failed(None, run="captured") == []
+        assert failed(crashed, run="refused") == [record_, run_, reason]
+
+    def test_it_rebuilds_the_heston_rows_fit_time_clause_from_the_fits_record(self, monkeypatch, tmp_path):
+        """FUND_GRADE_PLAN 0.8: a session scored on its closing book whose Heston fit was
+        made on a chain downloaded after that book gave way says so in the Heston row,
+        with the download's UTC minute. The audit compared the row with scorecard.json
+        only; it now rebuilds the clause from the fit's chain record and its own clock."""
+        import importlib
+        import pickle
+        import types
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        M = importlib.import_module("recompute.surface_math")
+        root = tmp_path / "data_store"
+        (root / "calibrations").mkdir(parents=True)
+        clause = ("; that chain was downloaded at 2026-10-30 08:51 UTC, after the closing book scored here "
+                  "had given way to the overnight one, so part of its error here is the market's move "
+                  "between the two")
+        row = ("Heston at the stored model_version-2 joint SPX/VIX-index fit. The fit was made on the "
+               "Yahoo chain")
+
+        def failed(text, fetched="2026-10-30T08:51:33Z", book=M.BOOK_CLOSING, version=6):
+            with open(root / "calibrations" / "joint_cal_2026-10-29.pkl", "wb") as fh:
+                pickle.dump({"chain_diagnostics": {"source": "yfinance", "fetched_at": fetched}}, fh)
+            ctx = types.SimpleNamespace(vx={"report_version": version}, session="2026-10-29", s=None,
+                                        store=rc.data.Store(root), book=lambda s: book)
+            a = rc.core.Audit("t", BeautifulSoup(f"<dd>{text}</dd>", "lxml"))
+            S.heston_fit_time_note(a, ctx, a.soup.select_one("dd"))
+            return [c.label for c in a.checks if not c.ok]
+
+        shown = ("Heston row: fit-time clause shown (scored on the closing book, fit downloaded after it "
+                 "gave way, by the fit's record and this audit's clock)")
+        assert failed(row + clause) == []                                   # Fri 04:36 ET quotes
+        assert failed(row) == [shown]
+        assert failed(row + clause.replace("08:51", "08:41")) == [
+            "Heston row: when the fit's chain was downloaded (its record, UTC)"]
+        assert failed(row, fetched="2026-10-29T22:00:00Z") == []            # Thu 17:45 ET: still closing
+        assert failed(row + clause, book=M.BOOK_OVERNIGHT) == [shown]        # scored on the overnight book
+        assert failed(row, version=5) == []
+
+    def test_it_checks_every_book_of_the_newest_session_on_the_overview(self, monkeypatch, tmp_path):
+        """FUND_GRADE_PLAN 0.8: a weekday session can hold its closing book (the close
+        slot's) and its overnight book (the book slot's). The audit read only the
+        newest book per underlying, and only the public tree's records; it now
+        requires every book of each underlying's newest session, oldest quote first,
+        each named by its recorded state, counting the manifests of books held in
+        the private store too."""
+        import importlib
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        ov = importlib.import_module("recompute.overview")
+        root = tmp_path / "data_store"
+        for sub in ("cboe", "cboe_manifest"):
+            (root / "options" / sub).mkdir(parents=True)
+        s = "2026-11-02"                                  # synthetic records: any weekday session
+        recs = {("cboe", "spx_2026-10-30_084019Z"): ("2026-10-30", "2026-10-30T23:49:50Z", "closing", 9),
+                ("cboe", f"spx_{s}_000705Z"): (s, "2026-11-02T23:52:05Z", "closing", 7),
+                ("cboe_manifest", f"spx_{s}_073204Z"): (s, "2026-11-03T07:16:06Z", "gth", 8)}
+        for (sub, stem), (sess, qt, state, n) in recs.items():
+            (root / "options" / sub / f"{stem}.json").write_text(json.dumps(
+                {"underlying": "SPX", "session": sess, "quote_time": qt, "book_state": state,
+                 "rows": n, "two_sided_rows": n - 1, "expiries": 2}))
+
+        def failed(cell):
+            a = rc.core.Audit("t", BeautifulSoup(f"<table><tr><td>{cell}</td></tr></table>", "lxml"))
+            ov.check_pipeline_books(a, rc.data.Store(root), a.soup.select_one("td"))
+            return [c.label for c in a.checks if not c.ok]
+
+        # each book names its chain (tier 0.2): Cboe, its quote time, the share of its lines
+        # two-sided (6 of 7; the manifest's book, held privately, by its record: 7 of 8)
+        closing = ("7 lines (6 two-sided, 2 expiries), Cboe, quotes at 2026-11-02 23:52 UTC, 85.7% of its "
+                   "lines two-sided (closing book)")
+        overnight = ("8 lines (7 two-sided, 2 expiries), Cboe, quotes at 2026-11-03 07:16 UTC, 87.5% of its "
+                     "lines two-sided (overnight book)")
+        counts = "Cboe option books (counts from the stored quotes; each book's chain)"
+        assert failed(f"SPX {s}: {closing} and {overnight}") == []
+        assert failed(f"SPX {s}: {overnight}") == [            # the closing book left out
+            counts, f"{counts}: dates", f"SPX {s}: every book of the session named",
+            "SPX book 1: named by its recorded state (closing)", "SPX book 1: its chain (tier 0.2)"]
+        assert "SPX book 2: named by its recorded state (gth)" in failed(
+            f"SPX {s}: {closing} and {overnight.replace('(overnight book)', '(closing book)')}")
+        # a book that names another share of its lines two-sided, or no chain at all
+        assert "SPX book 2: its chain (tier 0.2)" in failed(f"SPX {s}: {closing} and "
+                                                            f"{overnight.replace('87.5%', '97.5%')}")
+        bare = closing.replace(", Cboe, quotes at 2026-11-02 23:52 UTC, 85.7% of its lines two-sided", "")
+        assert "SPX book 1: its chain (tier 0.2)" in failed(f"SPX {s}: {bare} and {overnight}")
+
     def test_it_leaves_a_model_the_scorecard_did_not_score_off_the_page(self, monkeypatch):
         """A session's surface is built whatever its Heston fit did (CITSEC-05); with no
         fit stored, scorecard.json lists heston_v2 as not available and the page gives
@@ -992,8 +1526,10 @@ class TestRecomputeAudit:
         for s, gap, devs in (("2026-10-29", 1.32, 6), ("2026-11-02", 1.92, 3)):
             d = tmp_path / "surface" / s
             d.mkdir(parents=True)
-            for name in ("residuals.parquet", "surface.json"):
-                (d / name).write_text("")
+            (d / "residuals.parquet").write_text("")
+            share = {"near_atm_two_sided_share": 1.0} if s == "2026-11-02" else {}
+            (d / "surface.json").write_text(json.dumps({"inputs": {"source": "cboe",
+                                                                   "quote_time": f"{s}T21:14:30Z", **share}}))
             (d / "vix_replication.json").write_text(json.dumps({
                 "indices": {"VIX": {"gap_vs_official": gap, "replicated": 20.0 + gap, "official": 20.0}},
                 "deviations": [f"departure {i}" for i in range(devs)]}))
@@ -1006,8 +1542,13 @@ class TestRecomputeAudit:
              "head": {"session": "2026-10-29"}, "arc": [], "skew": None}
         a = rc.core.Audit("t", BeautifulSoup("", "lxml"))
         items = {link: parts for link, _, parts, _ in ov.works_items(a, rc.data.Store(tmp_path), f)}
-        assert items["surface.html#vix-replication"] == [1.92, "2026-11-02", 3.0]
-        assert items["surface.html#scorecard"][2:] == ["2026-10-29", "2026-11-02"]
+        # each names its own session's chain and its two-sided share, or that none is recorded (0.2)
+        assert items["surface.html#vix-replication"] == [
+            1.92, "2026-11-02", 3.0,
+            " Chain: Cboe, quotes at 2026-11-02 21:14 UTC, 100.0% two-sided near the money."]
+        assert items["surface.html#scorecard"][2:] == [
+            "2026-10-29", "2026-11-02",
+            " Chain: Cboe, quotes at 2026-10-29 21:14 UTC, two-sided share not recorded."]
 
     def test_it_checks_the_overviews_stale_fit_banner_and_its_cause(self, monkeypatch, tmp_path):
         """A Friday without a fit followed by a skipped one left the headline fit 2 NYSE
@@ -1077,6 +1618,113 @@ class TestRecomputeAudit:
         yahoo = {"source": "yfinance", "quote_time": None, "t_origin": "2026-10-16T16:00:00-04:00"}
         assert M.replication_instant(yahoo, "2026-10-16") == ("2026-10-16T16:00", "chain_t_origin")
         assert M.replication_instant({"source": "yfinance"}, "2026-10-16") is None
+
+    def test_it_names_each_sessions_book_by_its_own_clock(self, monkeypatch):
+        """FUND_GRADE_PLAN 0.8: the Surface page names the book each session's VIX gap
+        was measured on and gives the gap's median and range per book. The audit
+        classifies each session from surface.json's source and quote time by its own
+        calendar (not the capture's recorded state): a Cboe book quoted after the
+        session's close and before the next Global Trading Hours open is its closing
+        book (a Friday's lasts the weekend), one inside those hours its overnight book,
+        any other Cboe instant 'other', any other source a Yahoo chain."""
+        import importlib
+        _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        cases = {"2026-10-19T02:30:00Z": M.BOOK_OVERNIGHT,        # Sun 22:30 ET: Monday's GTH
+                 "2026-10-17T00:30:00Z": M.BOOK_CLOSING,          # Fri 20:30 ET
+                 "2026-10-18T16:00:00Z": M.BOOK_CLOSING,          # Sunday noon
+                 "2026-10-16T21:55:00Z": M.BOOK_CLOSING,          # Fri 17:55 ET, the close slot
+                 "2026-10-16T20:10:00Z": M.BOOK_OTHER,            # Fri 16:10 ET, before the cutoff
+                 "2026-10-19T13:20:00Z": M.BOOK_OTHER}            # Mon 09:20 ET, the pause
+        for qt, want in cases.items():
+            assert M.replication_book({"source": "cboe", "quote_time": qt}, "2026-10-16") == want, qt
+        # a weekday: the closing book until 20:15 ET, the overnight one from then
+        assert M.replication_book({"source": "cboe", "quote_time": "2026-10-28T00:10:00Z"},
+                                  "2026-10-27") == M.BOOK_CLOSING            # Tue 20:10 ET
+        assert M.replication_book({"source": "cboe", "quote_time": "2026-10-28T00:20:00Z"},
+                                  "2026-10-27") == M.BOOK_OVERNIGHT          # Tue 20:20 ET
+        assert M.replication_book({}, "2026-10-26") is None
+
+    def test_it_names_a_closing_book_by_its_quote_time_not_its_underlyings_last_trade(self, monkeypatch):
+        """w5w2 check, F2 and F3: the audit took a Cboe book quoted after the close and
+        before Global Trading Hours open for the closing book only when surface.json's
+        underlying last trade was at or before the close. That check tells nothing
+        apart (Cboe stamps the VIX close 16:15:01; SPX overnight books record the
+        session's 16:14:59, as its closing book does), and the producer no longer
+        makes it: the audit's clock reads the quote time alone, whatever last trade a
+        record holds."""
+        import importlib
+        _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        rec = {"source": "cboe", "quote_time": "2026-10-30T23:49:50Z"}               # Fri 19:49 ET
+        for last in (None, "2026-10-30T16:14:59", "2026-10-30T16:15:01", "2026-10-30T16:40:00",
+                     "2026-10-29T16:14:59"):
+            assert M.replication_book({**rec, "underlying_last_trade_time": last}, "2026-10-30") == (
+                M.BOOK_CLOSING), last
+        overnight = {"source": "cboe", "quote_time": "2026-10-28T03:15:00Z"}         # Tue 23:15 ET
+        assert M.replication_book({**overnight, "underlying_last_trade_time": "2026-10-27T16:14:59"},
+                                  "2026-10-27") == M.BOOK_OVERNIGHT
+        assert not hasattr(M, "last_trade_by_close")
+
+    def test_it_names_a_yahoo_download_by_when_it_was_fetched(self, monkeypatch):
+        """w5 review, major 3: the Surface page put the bot's Yahoo download of 2026-11-02,
+        fetched at 03:30 UTC in the next session's overnight hours, in one 'Yahoo chain'
+        row with the C23 close snapshots. A Yahoo chain records no quote time, so the
+        audit classifies it by when it was downloaded, by its own calendar, as it does a
+        Cboe book by its quote time: inside the next session's Global Trading Hours an
+        overnight download, any other instant (or none recorded) a Yahoo chain. The
+        instant is a pre-QUANT-01 chain's quote time (the download instant), else its
+        fetch time, from inputs or universe."""
+        import importlib
+        _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        cases = {"2026-11-03T03:30:03Z": M.BOOK_YAHOO_OVERNIGHT,   # Mon 22:30 ET: Tuesday's GTH
+                 "2026-11-02T22:00:00Z": M.BOOK_YAHOO,             # Mon 17:00 ET, after the close
+                 "2026-11-02T18:00:00Z": M.BOOK_YAHOO,             # Mon 13:00 ET, the session itself
+                 "2026-11-03T14:20:00Z": M.BOOK_YAHOO}             # Tue 09:20 ET, the pause
+        for at, want in cases.items():
+            assert M.replication_book({"source": "yfinance", "fetched_at": at}, "2026-11-02") == want, at
+            assert M.replication_book({"source": "yfinance"}, "2026-11-02", {"fetched_at": at}) == want, at
+        # a Friday's: Saturday morning is the weekend, Sunday 21:01 ET Monday's GTH
+        assert M.replication_book({"source": "yfinance", "fetched_at": "2026-10-31T08:50:33Z"},
+                                  "2026-10-30") == M.BOOK_YAHOO
+        assert M.replication_book({"source": "yfinance", "fetched_at": "2026-11-02T02:01:00Z"},
+                                  "2026-10-30") == M.BOOK_YAHOO_OVERNIGHT
+        # a pre-QUANT-01 chain stamped its download instant (Tue 01:26 ET) as its quote time
+        assert M.replication_book({"source": "yfinance", "quote_time": "2026-10-27T05:26:50Z"},
+                                  "2026-10-26") == M.BOOK_YAHOO_OVERNIGHT
+        assert M.replication_book({"source": "yfinance"}, "2026-10-26") == M.BOOK_YAHOO
+
+    def test_it_checks_the_book_the_overviews_replication_finding_names(self, monkeypatch, tmp_path):
+        """w5 review, major 3: the Overview's 'VIX replicated from the stored chain'
+        finding gave the gap without saying whether it was taken on a closing book (the
+        replication's own error) or an overnight one (which also holds the overnight
+        move). The audit classifies the session Surface shows by its own clock and
+        requires that book's sentence in the finding, and no other book's."""
+        import importlib
+
+        from bs4 import BeautifulSoup
+
+        rc = _recompute(monkeypatch)
+        ov = importlib.import_module("recompute.overview")
+        M = importlib.import_module("recompute.surface_math")
+        d = tmp_path / "surface" / "2026-11-02"
+        d.mkdir(parents=True)
+        (d / "residuals.parquet").write_text("")
+        (d / "surface.json").write_text(json.dumps({"inputs": {"source": "yfinance",
+                                                               "fetched_at": "2026-11-03T03:30:03Z"}}))
+        assert set(ov.BOOK_BUILT) == set(M.BOOK_ORDER)
+
+        def failed(sentence: str) -> list[str]:
+            html = ('<ul id="find-list-works"><li class="find-item"><a href="surface.html#vix-replication">'
+                    f"VIX replicated from the stored chain</a>: +1.92 index pts. {sentence}</li></ul>")
+            a = rc.core.Audit("t", BeautifulSoup(html, "lxml"))
+            ov.check_replication_book(a, rc.data.Store(tmp_path))
+            assert len(a.checks) == len(ov.BOOK_BUILT)
+            return [c.label for c in a.checks if not c.ok]
+        assert failed(ov.BOOK_BUILT[M.BOOK_YAHOO_OVERNIGHT]) == []
+        assert failed(ov.BOOK_BUILT[M.BOOK_YAHOO])            # the close-snapshot sentence is wrong here
+        assert failed("")                                     # and naming none is too
 
     def test_its_calendar_times_an_early_closes_closing_book_at_1315(self, monkeypatch):
         """Tier 0.5 review: on an NYSE early close SPX options and the VIX close at

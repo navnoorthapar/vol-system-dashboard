@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import itertools
+import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -707,6 +708,163 @@ def replication_instant(inputs: dict, session: str) -> tuple[str, str] | None:
         return None
     at = dt.datetime.fromisoformat(str(t0)).astimezone(NY)
     return at.replace(tzinfo=None).isoformat(timespec="minutes"), "chain_t_origin"
+
+
+# which book a session's replication sets against the Cboe close, as the page names it
+BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER = "closing", "overnight", "yahoo", "other"
+BOOK_YAHOO_OVERNIGHT = "yahoo_overnight"
+BOOK_ORDER = (BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER)
+GTH_CLOSE = dt.time(9, 15)
+
+
+def _next_session(day: dt.date) -> dt.date:
+    nxt = day + dt.timedelta(days=1)
+    while not is_session(nxt):
+        nxt += dt.timedelta(days=1)
+    return nxt
+
+
+def overnight_at(at: dt.datetime, session: str) -> bool:
+    """``at`` (tz-aware) falls in the Global Trading Hours of the session after
+    ``session``: 20:15 ET the evening before it to 09:15 ET on it."""
+    nxt = _next_session(dt.date.fromisoformat(session))
+    at = at.astimezone(NY)
+    return dt.datetime.combine(nxt - dt.timedelta(days=1), GTH_OPEN, NY) <= at < dt.datetime.combine(
+        nxt, GTH_CLOSE, NY)
+
+
+def _instant(text: Any) -> dt.datetime:
+    at = dt.datetime.fromisoformat(str(text))
+    return at if at.tzinfo is not None else at.replace(tzinfo=dt.UTC)
+
+
+def replication_book(inputs: dict | None, session: str, universe: dict | None = None) -> str | None:
+    """The book a session was built from, from surface.json's record of its chain and
+    this audit's own clock rules: a Cboe book quoted after the session's close and
+    outside the next session's Global Trading Hours (20:15 ET the evening before it to
+    09:15) is its closing book; one quoted inside them its overnight book; any other
+    Cboe instant (the session's own hours, the 09:15-09:30 pause) 'other'. A chain of
+    another source records no quote time, so it goes by when it was downloaded (the
+    quote_time a chain stored before QUANT-01 carried was that instant, else its
+    fetched_at; ``universe`` is read where ``inputs`` holds neither): inside those
+    hours an overnight download, else (or with no instant recorded) a Yahoo chain.
+    None without a recorded source."""
+    inp, uni = inputs or {}, universe or {}
+    src, qt = inp.get("source") or uni.get("source"), inp.get("quote_time")
+    if src is None:
+        return None
+    if src != "cboe":
+        got = qt or uni.get("quote_time") or inp.get("fetched_at") or uni.get("fetched_at")
+        return BOOK_YAHOO_OVERNIGHT if got and overnight_at(_instant(got), session) else BOOK_YAHOO
+    if not qt:
+        return BOOK_OTHER
+    at = _instant(qt).astimezone(NY)
+    day = dt.date.fromisoformat(session)
+    nxt = _next_session(day)
+    if overnight_at(at, session):
+        return BOOK_OVERNIGHT
+    after_close = at >= dt.datetime.combine(day, cboe_close_time(session), NY)
+    return BOOK_CLOSING if after_close and at < dt.datetime.combine(nxt, GTH_CLOSE, NY) else BOOK_OTHER
+
+
+def closing_books(store: Store, session: str) -> int:
+    """How many SPX books of ``session`` the record holds that are its closing book by
+    this audit's clock (replication_book on each record's quote time): the records
+    beside raw books committed here and the manifests of books held privately."""
+    n = 0
+    for sub in ("cboe", "cboe_manifest"):
+        for jp in sorted((store.root / "options" / sub).glob(f"spx_{session}_*.json")):
+            rec = json.loads(jp.read_text())
+            n += replication_book({"source": "cboe", "quote_time": rec.get("quote_time")},
+                                  session) == BOOK_CLOSING
+    return n
+
+
+def _close_slot_runs(store: Store, session: str) -> list[tuple[str, dict]]:
+    """The close slot's runs of ``session`` from data_store/runs/run_*.json (schema
+    run_ledger/1): each record whose slot is 'close', or whose steps hold the closebook
+    step, without the book slot's full 'capture' step, and whose session (its capture's,
+    else expected_session) is ``session``, oldest first by run_utc, with each one's SPX
+    capture record ({} when it holds none), or {'status': 'no-step'} for a run without
+    the closebook step (the close slot before it captured closing books)."""
+    runs = store.root / "runs"
+    found: list[tuple[str, dict]] = []
+    for path in sorted(runs.glob("run_*.json")) if runs.is_dir() else []:
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("schema") != "run_ledger/1":
+            continue
+        steps = rec.get("steps") or []
+        capt = rec.get("capture") or {}
+        if "capture" in steps or not (rec.get("slot") == "close" or "closebook" in steps):
+            continue
+        if str(capt.get("session") or rec.get("expected_session")) != session:
+            continue
+        if "closebook" not in steps:
+            found.append((str(rec.get("run_utc")), {"status": "no-step"}))
+            continue
+        spx = (capt.get("captures") or {}).get("SPX")
+        if not isinstance(spx, dict) or not spx:
+            # no SPX record: the capture step's own (skipped as a whole by the clock or
+            # the session check, or crashed: "capture step crashed: ..."; None with none)
+            spx = {"status": capt.get("status"), "reason": capt.get("reason")}
+        found.append((str(rec.get("run_utc")), spx))
+    return sorted(found, key=lambda x: x[0])
+
+
+def closing_book_run(store: Store, session: str) -> str:
+    """What the close slot's run records say of a session whose store holds no closing
+    book, in this order: 'captured' (a run captured or found it, yet the store holds none,
+    whatever another run did), 'refused' (a run did not store it and says why),
+    'skipped' (a run's record says it skipped the book), 'no-step' (the close slot ran
+    without the closebook step) or 'none' (no close-slot run of the session is
+    recorded)."""
+    runs = _close_slot_runs(store, session)
+    if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
+        return "captured"
+    if closing_book_refusal(store, session):
+        return "refused"
+    if any(spx.get("status") == "skipped" for _, spx in runs):
+        return "skipped"
+    return "no-step" if runs else "none"
+
+
+def closing_book_refusal(store: Store, session: str) -> str | None:
+    """Why the job did not store ``session``'s closing SPX book, from its run records
+    (_close_slot_runs): the newest close-slot run (by run_utc) whose SPX capture neither
+    stored the book nor was 'skipped' (rejected, failed, or a capture step that crashed),
+    its recorded reason; None when no such run is recorded, or when a close-slot run of
+    the session stored the book (closing_book_run's 'captured')."""
+    runs = _close_slot_runs(store, session)
+    if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
+        return None
+    found = [(t, str(spx.get("reason") or "its run record gives no reason for it"))
+             for t, spx in runs if spx.get("status") not in ("captured", "exists", "skipped", "no-step")]
+    return max(found)[1] if found else None
+
+
+def fit_left_the_closing_book(downloaded: str | None, session: str) -> bool | None:
+    """Whether a chain downloaded at ``downloaded`` (UTC) holds quotes from after the
+    session's closing book gave way to the next session's Global Trading Hours book
+    (the delayed feed's quotes are 15 minutes old): its quote instant at or after
+    20:15 ET on the evening before the next session and before that session's 09:30
+    open. None without a download time."""
+    if not downloaded:
+        return None
+    try:
+        at = dt.datetime.fromisoformat(str(downloaded))
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=dt.UTC)
+    quoted = (at - dt.timedelta(minutes=15)).astimezone(NY)
+    nxt = dt.date.fromisoformat(session) + dt.timedelta(days=1)
+    while not is_session(nxt):
+        nxt += dt.timedelta(days=1)
+    return (dt.datetime.combine(nxt - dt.timedelta(days=1), GTH_OPEN, NY) <= quoted
+            < dt.datetime.combine(nxt, dt.time(9, 30), NY))
 
 
 # ── the page's number formats ─────────────────────────────────────────────────

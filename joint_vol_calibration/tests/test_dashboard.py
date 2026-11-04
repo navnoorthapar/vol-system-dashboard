@@ -28,6 +28,7 @@ data_store/ (tests that need different inputs point the app at a temp copy).
 from __future__ import annotations
 
 import collections
+import contextlib
 import hashlib
 import importlib.util
 import itertools
@@ -38,6 +39,7 @@ import shutil
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -1974,6 +1976,179 @@ def test_a_chain_the_backtest_excludes_has_no_surface_beta_and_a_true_minus(dash
     assert note is None or "β estimator" not in note.group(1)
 
 
+def _book_by_clock(sj: dict, session: str) -> str | None:
+    """The book a surface session was built from, derived here from its surface.json
+    record's instants and the NYSE calendar alone, as the recompute audit derives it
+    (surface_math.replication_book), never from the book state the capture recorded,
+    which the pages read (desk_surface.replication_book): so a test that compares a
+    page's book with this one checks the page against the clock. The Global Trading
+    Hours of the session after ``session`` run from 20:15 ET on the calendar evening
+    before it to 09:15 ET on it. A Cboe book by its quote time: inside them the
+    overnight book, from the session's close (16:15 ET; 13:15 on an NYSE early close)
+    until they open its closing book, at any other instant, or with none recorded,
+    'other'. A Yahoo chain, which records no quote time, by its download instant (a
+    pre-QUANT-01 chain's quote time, else fetched_at): inside them an overnight
+    download, else (or with no instant recorded) a Yahoo chain."""
+    import datetime as dt
+
+    from joint_vol_calibration.data import database as db
+    from joint_vol_calibration.data import option_chain as oc
+
+    inp, uni = sj.get("inputs") or {}, sj.get("universe") or {}
+    src = inp.get("source") or uni.get("source")
+    if not src:
+        return None
+    day, nxt = dt.date.fromisoformat(session), oc.next_session(session)
+    ny = db.NY_TZ
+    gth_open = dt.datetime.combine(nxt - dt.timedelta(days=1), dt.time(20, 15), ny)
+    gth_close = dt.datetime.combine(nxt, dt.time(9, 15), ny)
+    cutoff = dt.time(13, 15) if db.is_early_close(day) else dt.time(16, 15)
+
+    def instant(x: Any) -> dt.datetime:
+        t = pd.Timestamp(str(x))
+        return (t.tz_localize("UTC") if t.tzinfo is None else t).to_pydatetime()
+    if src == "cboe":
+        if not inp.get("quote_time"):
+            return "other"
+        at = instant(inp["quote_time"])
+        if gth_open <= at < gth_close:
+            return "overnight"
+        return "closing" if dt.datetime.combine(day, cutoff, ny) <= at < gth_open else "other"
+    got = inp.get("quote_time") or uni.get("quote_time") or inp.get("fetched_at") or uni.get("fetched_at")
+    if not got:
+        return "yahoo"
+    return "yahoo_overnight" if gth_open <= instant(got) < gth_close else "yahoo"
+
+
+def test_a_yahoo_chain_is_named_by_when_it_was_downloaded(dash):
+    """w5 review, major 3: a Yahoo chain records no quote time, so every one was a
+    'Yahoo chain', and the Surface page's by-book table and tile put the bot's
+    download of 2026-11-02, fetched at 03:30 UTC in the next session's overnight hours,
+    with the C23 close snapshots. A Yahoo chain is now classified by its download
+    instant as a Cboe book is by its quote time: inside the next session's Global
+    Trading Hours an overnight download (its gap may hold the overnight move), else a
+    Yahoo chain. Checked on cases of each and on every stored surface session."""
+    ds = dash.desk_surface
+    yahoo = {"source": "yfinance", "quote_time": None, "t_origin_basis": "session close 16:00 ET"}
+    night, other = ds.BOOK_YAHOO_OVERNIGHT, ds.BOOK_YAHOO
+    cases = [({"inputs": {**yahoo, "fetched_at": "2026-11-03T03:30:03Z"}}, "2026-11-02", night),
+             ({"inputs": {**yahoo, "fetched_at": "2026-11-02T22:00:00Z"}}, "2026-11-02", other),
+             ({"inputs": {**yahoo, "fetched_at": "2026-10-31T08:50:33Z"}}, "2026-10-30", other),
+             ({"inputs": {**yahoo, "fetched_at": "2026-11-02T02:01:00Z"}}, "2026-10-30", night),
+             ({"inputs": {"source": "yfinance", "quote_time": "2026-10-27T05:26:50Z"}}, "2026-10-26",
+              ds.BOOK_YAHOO_OVERNIGHT),
+             ({"inputs": yahoo, "universe": {"fetched_at": "2026-11-03T03:30:03Z"}}, "2026-11-02",
+              ds.BOOK_YAHOO_OVERNIGHT),
+             ({"inputs": yahoo}, "2026-11-02", ds.BOOK_YAHOO),
+             ({"inputs": {"source": "cboe", "book_state": "closing", "quote_time": "2026-11-02T22:15:00Z",
+                          "fetched_at": "2026-11-02T22:30:00Z"}}, "2026-11-02", ds.BOOK_CLOSING),
+             ({"inputs": {}}, "2026-11-02", None)]
+    for sj, session, want in cases:
+        assert dash.surface_book(sj, session) == want, (sj, session)
+        assert _book_by_clock(sj, session) == want, (sj, session)
+    for session in dash.artifacts.surface_sessions(SHIPPED):
+        sj = json.loads((SHIPPED / "surface" / session / "surface.json").read_text())
+        assert dash.surface_book(sj, session) == _book_by_clock(sj, session), session
+
+
+def test_the_tests_book_of_a_cboe_session_is_its_quote_times_not_its_recorded_state():
+    """w5w2 check, F7: _book_by_clock, against which the presentation gate checks the
+    book each page names (the Overview's replication finding, Model Risk V2, the Surface
+    by-book table), read a Cboe book's recorded book_state, as the pages do, so it
+    could not catch a page that names a book its quote time contradicts. It now derives
+    the book from the quote time and the calendar, as the recompute audit does: here
+    the recorded state says one book and the quote time another, and the helper follows
+    the quote time, across the 2026-11-01 change to EST, a weekend and an early close."""
+    def cboe(state: str | None, qt: str | None) -> dict:
+        return {"inputs": {"source": "cboe", "book_state": state, "quote_time": qt}}
+    cases = [
+        (cboe("closing", "2026-11-03T03:15:00Z"), "2026-11-02", "overnight"),   # 22:15 EST: GTH
+        (cboe("gth", "2026-11-02T22:15:00Z"), "2026-11-02", "closing"),         # 17:15 EST
+        (cboe("closing", "2026-11-02T21:14:30Z"), "2026-11-02", "other"),       # 16:14:30 EST
+        (cboe("closing", "2026-10-29T21:14:30Z"), "2026-10-29", "closing"),     # 17:14:30 EDT
+        (cboe("gth", "2026-10-30T23:49:50Z"), "2026-10-30", "closing"),         # a Friday evening
+        (cboe("closing", "2026-11-02T01:15:00Z"), "2026-10-30", "overnight"),   # Sunday 20:15 EST
+        (cboe("gth", "2026-11-02T01:14:00Z"), "2026-10-30", "closing"),         # Sunday 20:14 EST
+        (cboe("closing", "2026-11-03T14:20:00Z"), "2026-11-02", "other"),       # the next morning's pause
+        (cboe("intraday", "2026-11-27T18:30:00Z"), "2026-11-27", "closing"),    # 13:30, an early close
+        (cboe("closing", "2026-11-27T18:00:00Z"), "2026-11-27", "other"),       # 13:00, before it
+        (cboe("closing", None), "2026-11-02", "other"),
+    ]
+    for sj, session, want in cases:
+        assert _book_by_clock(sj, session) == want, (sj, session)
+
+
+def test_the_vix_gap_is_given_by_the_book_each_session_was_built_from(dash, pages):
+    """FUND_GRADE_PLAN 0.8: the history listed every session's VIX replication gap,
+    and the VIX tile ranged over all of them, whether the replication was set
+    against the 16:15 ET close at the instant it is computed (a Cboe closing book),
+    hours after it (the overnight book) or at no recorded instant (a Yahoo chain).
+    Each history row now names its book from the session's surface.json record, a
+    table gives the gap's sessions, median and range per book, and the tile ranges
+    over the sessions of this session's book only. Expected values are derived from
+    the stored artifacts, whatever sessions the bot has added."""
+    import html as _html
+
+    ds = dash.desk_surface
+    index = json.loads((SHIPPED / "surface" / "index.json").read_text())["sessions"]
+    books, gaps = {}, {}
+    for r in index:
+        sj = SHIPPED / "surface" / r["session"] / "surface.json"
+        if sj.exists():
+            books[r["session"]] = _book_by_clock(json.loads(sj.read_text()), r["session"])
+        if r.get("vix_replicated") is not None and r.get("vix_official") is not None:
+            gaps[r["session"]] = r["vix_replicated"] - r["vix_official"]
+    html = pages["/surface"]
+
+    def cells(table_id):
+        tbl = re.search(rf'<table[^>]*id="{table_id}".*?</table>', html, re.DOTALL)
+        assert tbl, table_id
+        return [[_html.unescape(re.sub(r"<[^>]+>", "", c)).strip()
+                 for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.DOTALL)]
+                for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl.group(0), re.DOTALL)
+                if "<td" in tr]
+
+    hist = {row[0]: row for row in cells("surface-history-table")}
+    assert set(hist) == {r["session"] for r in index}
+    col = _table_heads(html, "surface-history-table").index("Book")
+    for session, row in hist.items():
+        assert row[col] == ds.BOOK_LABELS.get(books.get(session) or "", "—"), session
+    want = ds.gap_by_book([{"book": books.get(s), "gap": g, "session": s} for s, g in gaps.items()])
+    got = cells("vix-gap-by-book")
+    assert [r[0] for r in got] == [w["label"] for w in want]
+    # tier 0.2: each row declares the sessions it is taken over (data-chain-over), whose
+    # chains their history rows above name: those of its book with a gap, by the record
+    over = re.findall(r'<tr data-chain-over="([^"]*)">', re.search(
+        r'<table[^>]*id="vix-gap-by-book".*?</table>', html, re.DOTALL).group(0))
+    assert over == [" ".join(f"surface:{s}" for s in sorted(gaps) if books.get(s) == w["book"])
+                    for w in want]
+    for row, w in zip(got, want):
+        assert row[1] == f"{w['n']:,}"
+        assert row[2] == dash.signed(w["median"], ".2f")
+        assert row[3] == ("—" if w["lo"] is None else
+                          f"{dash.signed(w['lo'], '.2f')} to {dash.signed(w['hi'], '.2f')}")
+    # the note below explains the books in the table and no other (the live page had only
+    # Yahoo-chain rows under a note about closing and overnight books)
+    note = re.search(r'<p class="note" id="vix-gap-by-book-note">(.*?)</p>', html, re.DOTALL)
+    text = _html.unescape(re.sub(r"\s+", " ", note.group(1)))
+    in_table = {w["book"] for w in want}
+    for book, phrase in (("closing", "A closing book is set against the Cboe close"),
+                         ("overnight", "An overnight book was quoted hours after the close"),
+                         ("yahoo_overnight", ("A Yahoo overnight download records no quote time and was "
+                                              "fetched in the next session’s overnight hours")),
+                         ("yahoo", "A Yahoo chain records no quote time and was not fetched overnight"),
+                         ("other", "Another Cboe book was quoted")):
+        assert (phrase in text) is (book in in_table), book
+    assert ("No session here was built from a closing book" in text) is ("closing" not in in_table)
+    # the tile: the range over the sessions of the page's own book
+    newest = max(s for s in hist)
+    own = books.get(newest)
+    same = [g for s, g in gaps.items() if own is None or books.get(s) == own]
+    tile = _visible_text(html)
+    if len(same) > 1:
+        assert f"gap, {len(same)} {ds.BOOK_SESSIONS.get(own or '', 'sessions')}: " in tile
+
+
 def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
     """'β = 0.82, estimated from five real 2026 SPX chains (0.80–0.84)': the five
     were 4 DB chains and a live capture, the range was typed in, and the later
@@ -2001,10 +2176,15 @@ def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
                     "chain, 2026-10-16, gives 0.70")
     grid_betas = pd.read_csv(SHIPPED / "backtest" / "beta_sensitivity.csv")["beta"]
     in_grid = any(abs(g - round(float(np.mean(every)), 2)) < 1e-9 for g in grid_betas)
-    want = (f"{stem} — the mean over all {len(every)} chains, {np.mean(every):.2f}, "
+    days = sorted([*inc["session"], *oos["session"],
+                   str(json.loads(LIVE_BETA_CAPTURE.read_text())["as_of_et"])[:10]])
+    tail = (f" — the mean over all {len(every)} chains, of {days[0]} to {days[-1]}, {np.mean(every):.2f}, "
             + ("is a row of the β grid" if in_grid else "is not in the β grid"))
-    text = _visible_text(pages["/corrections"])
-    assert want in text
+    assert _tight(stem + tail) in _tight(_visible_text(pages["/research"]))
+    # the Corrections page has no row naming the later chain, so it names it in the sentence
+    named = stem.replace(f"{first['session']}, gives",
+                         f"{first['session']} ({dash.key_stamp('options:' + first['session'])}), gives")
+    assert _tight(named + tail) in _tight(_visible_text(pages["/corrections"]))
     for route in ("/research", "/corrections"):
         assert "five real 2026 SPX chains" not in _visible_text(pages[route])
     # every chain is listed with its ratio and use
@@ -3160,17 +3340,35 @@ def test_overview_keeps_research_prototypes_off_the_first_screen(dash, pages):
     assert "none feeds a number on this page" in idx
 
 
+def _pipeline_books_text(text: str) -> str:
+    """The Overview pipeline panel's "Cboe option books" cell, from the page's text."""
+    m = re.search(r"Cboe option books (.*?) Accepted joint fits", text)
+    assert m, "no Cboe option books row"
+    return m.group(1)
+
+
 def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
     """Cboe book captures, accepted fits, artifacts and the forward ledger as
-    the stored records state them."""
+    the stored records state them. The books row names every book of each
+    underlying's newest session (FUND_GRADE_PLAN 0.8: a weekday session can
+    have a closing and an overnight book), each with its own counts."""
     pl = dash.pipeline_state(dash.artifacts.load_diagnostics_summary(dash.DATA))
     text = _visible_text(pages["/"])
     caps = [f for sub in ("cboe", "cboe_manifest") if (SHIPPED / "options" / sub).is_dir()
             for f in sorted((SHIPPED / "options" / sub).glob("*.json"))]
-    for rec in (json.loads(f.read_text()) for f in caps):
-        latest = next(c for c in pl["captures"] if c["underlying"] == rec["underlying"])
-        if latest["file"].startswith(f"{rec['underlying'].lower()}_{rec['session']}"):
-            assert f"{rec['underlying']} {rec['session']}: {rec['rows']:,} lines" in text
+    recs: dict = {}
+    for f in caps:
+        rec = json.loads(f.read_text())
+        recs.setdefault(rec["underlying"], []).append({**rec, "file": f.name})
+    row = _pipeline_books_text(text)
+    for und, mine in recs.items():
+        newest = max(str(r["session"]) for r in mine)
+        shown = sorted((r for r in mine if r["session"] == newest), key=lambda r: str(r["quote_time"]))
+        page = next(c for c in pl["captures"] if c["underlying"] == und)
+        assert [b["file"] for b in page["books"]] == [r["file"] for r in shown]
+        seg = row[row.index(f"{und} {newest}: "):]
+        for r in shown:
+            assert f"{r['rows']:,} lines ({r['two_sided_rows']:,} two-sided" in seg
     assert f"{pl['fits']} (model_version 2), newest {pl['fits_newest']}" in text
     assert f"{len(pl['surface_sessions'])} sessions" in text
     if pl["forward"]["state"] != "ok":
@@ -3201,6 +3399,47 @@ def test_pipeline_panel_reads_books_held_in_the_private_store(dash, tmp_path):
         dash.latest_cboe_captures(tmp_path)
 
 
+def test_overview_names_both_books_of_a_session_with_a_closing_and_an_overnight_book(
+        dash, tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.8: on a weekday the close slot stores the session's
+    closing book and the book slot its overnight book after it. The pipeline
+    panel named only the newest book per underlying, so the closing book the
+    session's surface is built from went unmentioned, and the presentation gate,
+    which checked every record of the session against the page, failed on such
+    a session and blocked the deploy. It names both, oldest quote first, each
+    with its counts and its book."""
+    opts = tmp_path / "options" / "cboe"
+    opts.mkdir(parents=True)
+    s = "2026-11-02"                                   # synthetic records: any weekday session
+    recs = {"spx_2026-10-30_084019Z": ("SPX", "2026-10-30", "2026-10-30T23:49:50Z", "closing", 27760, 27269),
+            f"spx_{s}_000705Z": ("SPX", s, "2026-11-02T23:52:05Z", "closing", 27753, 27262),
+            f"spx_{s}_073204Z": ("SPX", s, "2026-11-03T07:16:06Z", "gth", 28734, 27614),
+            f"vix_{s}_000706Z": ("VIX", s, "2026-11-02T23:52:06Z", "closing", 1519, 1394),
+            f"vix_{s}_073206Z": ("VIX", s, "2026-11-03T07:16:04Z", "gth", 1520, 1378)}
+    for stem, (und, sess, qt, state, rows, two) in recs.items():
+        (opts / f"{stem}.json").write_text(json.dumps(
+            {"underlying": und, "session": sess, "quote_time": qt, "book_state": state, "rows": rows,
+             "two_sided_rows": two, "expiries": 45}))
+    got = {c["underlying"]: c for c in dash.latest_cboe_captures(tmp_path)}
+    assert [b["file"] for b in got["SPX"]["books"]] == [f"spx_{s}_000705Z.json", f"spx_{s}_073204Z.json"]
+    assert got["SPX"]["file"] == f"spx_{s}_073204Z.json"            # the newest is still the newest
+
+    orig = dash.latest_cboe_captures
+    monkeypatch.setattr(dash, "latest_cboe_captures", lambda data_dir=None: orig(tmp_path))
+    book = dash.book_chain_record                           # each book's chain read from its record
+    monkeypatch.setattr(dash, "book_chain_record", lambda name, data_dir=None: book(name, tmp_path))
+    row = _pipeline_books_text(_visible_text(dash.app.test_client().get("/").get_data(as_text=True)))
+    row = re.sub(r" ;", ";", row)                 # the text read puts a space where a book's element ends
+    # tier 0.2: each book names its chain, vendor, quote time and two-sided share
+    assert row == (f"SPX {s}: 27,753 lines (27,262 two-sided, 45 expiries), Cboe, quotes at 2026-11-02 23:52 "
+                   "UTC, 98.2% of its lines two-sided (closing book) and 28,734 lines (27,614 two-sided, 45 "
+                   "expiries), Cboe, quotes at 2026-11-03 07:16 UTC, 96.1% of its lines two-sided (overnight "
+                   f"book); VIX {s}: 1,519 lines (1,394 two-sided, 45 expiries), Cboe, quotes at 2026-11-02 "
+                   "23:52 UTC, 91.8% of its lines two-sided (closing book) and 1,520 lines (1,378 two-sided, "
+                   "45 expiries), Cboe, quotes at 2026-11-03 07:16 UTC, 90.7% of its lines two-sided "
+                   "(overnight book)")
+
+
 def test_overview_pipeline_panel_prints_the_deploy_streak(dash, tmp_path, monkeypatch):
     """FUND_GRADE_PLAN 0.4: the daily workflow writes the deploy streak
     (scripts/ci/deploy_streak.py, from the gh-pages deploy commits) before it
@@ -3216,7 +3455,7 @@ def test_overview_pipeline_panel_prints_the_deploy_streak(dash, tmp_path, monkey
         resp = dash.app.test_client().get("/")
         assert _errors(resp) == errors0                      # the streak file is never a loader error
         html = resp.get_data(as_text=True)
-        m = re.search(r'<tr id="deploy-streak">(.*?)</tr>', html, re.DOTALL)
+        m = re.search(r'<tr id="deploy-streak"[^>]*>(.*?)</tr>', html, re.DOTALL)
         return " ".join(_visible_text("<body>" + m.group(1)).split()) if m else None
 
     assert row() is None                                     # no file: no row, no error
@@ -3474,9 +3713,11 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
               "corrections.html": 150_000, "model-risk.html": 100_000}
     # model-risk.html: 80 kB until VALIDATOR-12/13 added M21–M23, three checks and a
     # monitoring line per production model (about 88 kB). Its history strips draw one dot
-    # per stored session, about 150 bytes each, and the daily job adds a session a day:
-    # they are budgeted per dot (200 bytes) and the rest of the page as a whole, so the
-    # budget does not fail the bot's gate a few weeks of sessions from now.
+    # per stored session, and the daily job adds a session a day: they are budgeted per
+    # dot and the rest of the page as a whole, so the budget does not fail the bot's gate a
+    # few weeks of sessions from now. A dot was about 150 bytes (200 budgeted); since tier
+    # 0.2 it names the chain its value is read off (vendor, quote time, two-sided share)
+    # in its tooltip and in the strip's label, about 330 bytes (400 budgeted).
     for name, cap in budget.items():
         html = (out / name).read_text(encoding="utf-8")
         size = len(html.encode("utf-8"))
@@ -3484,7 +3725,7 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
             strips = re.findall(r'<svg class="hist".*?</svg>', html, re.DOTALL)
             hist = sum(len(x.encode("utf-8")) for x in strips)
             dots = html.count('<circle class="h-')
-            assert hist <= 200 * dots, (name, hist, dots)
+            assert hist <= 400 * dots, (name, hist, dots)
             size -= hist
         assert size <= cap, (name, size)
     # shared assets: the chart library is the only large script, fonts are subsets
@@ -3849,12 +4090,13 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
         # (the bot's 2026-10-28 session: −0.180998 against −0.180999)
         assert [m[0] for m in mids] == pytest.approx([float(k) for k in q["k"]], abs=1e-6), s["name"]
         # a quote where the model has no IV (NaN in the residual table: a deep wing the
-        # model cannot price) is a gap in the series, not a point
+        # model cannot price, as the simulated 2026-11-02 Heston fit on four deep
+        # out-of-the-money puts of one-week expiries) is a gap in the series, not a point
         want = [float(v) * 100 if np.isfinite(v) else None for v in q["model_iv"]]
         got = [p[1] for p in s["data"]]
         assert [g is None for g in got] == [w is None for w in want], s["name"]
         priced = [w for w in want if w is not None]
-        assert [g for g in got if g is not None] == pytest.approx(priced, abs=1e-4)
+        assert [g for g in got if g is not None] == pytest.approx(priced, abs=1e-4), s["name"]
         assert [v for p in by[(e, "ba")]["data"] for v in p[1:]] == pytest.approx(
             [v for b, a in zip(q["bid_iv"], q["ask_iv"]) for v in (b * 100, a * 100)], abs=1e-5)
 
@@ -5674,14 +5916,19 @@ def test_browser_panels_beside_taller_ones_carry_no_large_blank(site_browser):
 
 
 _OPEN_ALL_JS = """() => { document.querySelectorAll('.g details').forEach(d => { d.open = true; }); }"""
+# the blank below a panel's body, measured to its first foot where it has one (its chain's
+# source line, tier 0.2, or "Cited on"): the feet are content, as in _LAYOUT_JS
 _PANEL_FIT_JS = """id => { const p = document.getElementById(id);
   let last = -Infinity;
   p.querySelectorAll('.panel-body *').forEach(el => { const b = el.getBoundingClientRect();
     if (b.width > 0 && b.height > 0 && !el.closest('details:not([open]) > :not(summary)'))
       last = Math.max(last, b.bottom); });
+  const foot = [...p.children].find(c => c.classList.contains('panel-foot')
+    && c.getBoundingClientRect().height > 0);
+  const end = foot ? foot.getBoundingClientRect().top : p.getBoundingClientRect().bottom;
   const charts = [...p.querySelectorAll('.chart.grow')]
     .map(c => Math.round(c.getBoundingClientRect().height));
-  return {blank: Math.round(p.getBoundingClientRect().bottom - last), charts: charts}; }"""
+  return {blank: Math.round(end - last), charts: charts}; }"""
 
 
 def test_browser_an_open_disclosure_stretches_no_chart_and_leaves_no_blank_beside_it(site_browser):
@@ -5690,7 +5937,9 @@ def test_browser_an_open_disclosure_stretches_no_chart_and_leaves_no_blank_besid
     1,250 px below its text beside the open change log, and the implied-β chart
     grew to 1,359 px for a 0.55–0.95 range beside the open inference notes,
     exaggerating its year-to-year swings. A row with an open disclosure now lets
-    each panel end with its own content, and no grow chart exceeds 420 px."""
+    each panel end with its own content, and no grow chart exceeds 420 px. A
+    panel's feet (its chains' source lines, tier 0.2, and "Cited on") are content:
+    the blank is measured to the first, as the grid test and interact.mjs do."""
     ctx, page = _page(site_browser, 1440, 900)
     try:
         page.goto(site_browser["base"] + "research.html", wait_until="load")
@@ -6646,7 +6895,7 @@ def test_by_design_breaches_are_apart_from_live_ones(dash, pages, monkeypatch):
     html = pages["/model-risk"]
     designs = [c for c in d["monitors"] if c["status"] == "design"]
     for c in designs:
-        row = re.search(rf'<tr id="{c["id"]}" data-status="design">(.*?)</tr>', html, re.DOTALL)
+        row = re.search(rf'<tr id="{c["id"]}" data-status="design"[^>]*>(.*?)</tr>', html, re.DOTALL)
         assert row, c["id"]
         text = _html_unescape(" ".join(_visible_text("<body>" + row.group(1)).split()))
         assert "BY DESIGN" in text
@@ -6952,7 +7201,7 @@ def _findings(html: str) -> list[tuple[str, str, list[str]]]:
     cols = re.findall(r'<section class="([^"]+)"[^>]*>\s*<h3 class="find-head"[^>]*>(.*?)</h3>\s*'
                       r'<ul class="find-list[^"]*"[^>]*>(.*?)</ul>', strip.group(1), re.DOTALL)
     return [(c, _visible_text("<body>" + h).strip(),
-             re.findall(r'<li class="find-item">(.*?)</li>', ul, re.DOTALL))
+             re.findall(r'<li class="find-item"[^>]*>(.*?)</li>', ul, re.DOTALL))
             for c, h, ul in cols]
 
 
@@ -7070,7 +7319,7 @@ def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(d
     if gap is not None:
         assert f"by the Cboe formula, {tail}." in works
     mr = _visible_text(pages["/model-risk"])
-    assert f"Cboe VIX formula on the stored two-sided chain, {tail}; a gap points" in mr
+    assert f"Cboe VIX formula on the stored two-sided chain, {tail}." in mr
     for html in (pages["/"], pages["/model-risk"]):
         assert "Cboe rules" not in html
         assert "Cboe VIX rules" not in html
@@ -7453,7 +7702,7 @@ def test_overview_surface_line_is_the_one_month_row_with_its_age(dash, pages):
     ds = _desk_module()
     m1 = ds.constant_maturity(ds.delta_grid(*_desk_inputs()))[0]
     assert m1["label"] == "1M"
-    line = re.search(r'<p class="note" id="surface-line">(.*?)</p>', pages["/"], re.DOTALL)
+    line = re.search(r'<p class="note" id="surface-line"[^>]*>(.*?)</p>', pages["/"], re.DOTALL)
     assert line, "the Overview's headline-fit panel lost its surface line"
     text = re.sub(r"\s+([,.)])", r"\1", _visible_text("<body>" + line.group(1)))
     session = _surface_file("surface.json").parent.name
@@ -7626,7 +7875,8 @@ def test_skew_term_chart_is_log_log_with_units_and_the_slope_table_is_polyfit(da
         ts = sorted(sj["term_structure"], key=lambda t: t["T_days"])
         t1, k1 = np.array([x["T"] for x in sl]), np.array([ds.svi_atm_skew(x) for x in sl])
         t2, k2 = np.array([t["T_days"] / 365 for t in ts]), np.array([t["atm_skew_essvi"] for t in ts])
-        cells = rows[s["session"]]
+        # the cells after the session's Chain column (tier 0.2; the badge test checks it)
+        cells = [c for i, c in enumerate(rows[s["session"]]) if i != 1]
         for col, (t, k, lo) in zip((2, 3, 5, 6), ((t1, k1, 0), (t2, k2, 0), (t1, k1, 30), (t2, k2, 30))):
             keep = t * 365 >= lo
             ref = np.polyfit(np.log(t[keep]), np.log(np.abs(k[keep])), 1)[0]
@@ -7719,7 +7969,7 @@ def test_surface_change_against_the_compared_sessions_states_its_gap(dash, pages
     assert 'data-chart-filter="chart-atm-ts chart-rr-term"' in sec
     new = _cm_of(ds, next(s for s in inputs if s["session"] == head))
     for old in earlier:
-        cap = _html_unescape(re.search(rf'id="vs-table-{old}">\s*<caption>(.*?)</caption>', sec,
+        cap = _html_unescape(re.search(rf'id="vs-table-{old}">\s*<caption[^>]*>(.*?)</caption>', sec,
                                        re.DOTALL).group(1))
         gap = dash.session_age(old, head)
         assert f"vs {old}, {dash.plural(gap, 'NYSE session')} earlier" in re.sub(r"<[^>]+>", "", cap)
@@ -7983,16 +8233,18 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
 
 def test_chain_badge_names_the_source_and_the_quote_time(dash):
     """P2.5: the badge is generic: a Yahoo snapshot says so and that it has no
-    quote time; a Cboe-sourced chain prints 'Cboe' and its quote time."""
+    quote time; a Cboe-sourced chain prints 'Cboe' and its quote time. Tier 0.2: each
+    gives the chain's near-the-money two-sided share, or says it is not recorded."""
     yahoo = {"inputs": {"source": "yfinance", "quote_time": None, "chain_rows": 6191},
              "universe": {"n_universe": 2913, "n_expiries": 17}}
     assert dash.chain_badge(yahoo, [43, 40, 41, 43]) == (
-        "Chain: Yahoo Finance close snapshot · no quote time · 6,191 rows → 2,913 scored · "
-        "17 expiries (other stored sessions 40–43)")
+        "Chain: Yahoo Finance close snapshot · no quote time · two-sided share not recorded · 6,191 rows "
+        "→ 2,913 scored · 17 expiries (other stored sessions 40–43)")
     cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-23T15:59:30-04:00", "chain_rows": 9000},
-            "universe": {"n_universe": 4000, "n_expiries": 30}}
+            "universe": {"n_universe": 4000, "n_expiries": 30, "near_atm_two_sided_share": 0.99775}}
     txt = dash.chain_badge(cboe, [17])
-    assert txt.startswith("Chain: Cboe · quotes at 2026-10-23 15:59:30-04:00 · 9,000 rows → 4,000 scored")
+    assert txt.startswith("Chain: Cboe · quotes at 2026-10-23 15:59:30-04:00 · 99.8% two-sided near the money"
+                          " · 9,000 rows → 4,000 scored")
     assert txt.endswith("30 expiries (other stored session 17)")
     assert "Yahoo" not in txt
     assert "no quote time" not in txt
@@ -8337,7 +8589,6 @@ def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
     bot's fail-soft step allows, would otherwise be the headline), with the run record
     the bot writes for a fit its gate rejected. Returns (data dir, that session)."""
     from types import SimpleNamespace
-    from typing import Any
 
     from joint_vol_calibration.surface import report, scorecard
 
@@ -8582,8 +8833,9 @@ def test_the_overview_replication_item_cites_the_session_surface_shows(dash, no_
                   no_fit["/surface"], re.DOTALL)
     n = len(re.findall(r"<li>", m.group(1))) if m else 0
     tail = f", with {dash.plural(n, 'listed departure')} (Surface)" if n else ""
+    built = dash.desk_surface.BOOK_BUILT[_book_by_clock(_chain_of(data, newest), newest)]
     assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
-            f"{newest}, by the Cboe formula{tail}.") in works, works
+            f"{newest}, by the Cboe formula{tail}. {built}.") in works, works
 
 
 def _fit_chain_parts(data: Path, cal: dict, session: str) -> list[str]:
@@ -8745,10 +8997,10 @@ def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(d
               if cid.startswith("chart-smile-") and s_.get("quotes")]
     assert smiles
     assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
-    note = _visible_text("<body>" + re.search(r'<p class="note" id="smile-book">(.*?)</p>', html,
+    note = _visible_text("<body>" + re.search(r'<p class="note" id="smile-book"[^>]*>(.*?)</p>', html,
                                               re.DOTALL).group(1))
-    assert (f"These panels draw the {fit} surface’s quotes, a Cboe book with {book['time']}, not the "
-            f"{fit_name} the fit was made on.") in note
+    assert (f"These panels draw the {fit} surface’s quotes, a Cboe book with {book['time']} "
+            f"({book['share']}), not the {fit_name} the fit was made on.") in note
     oos = _visible_text("<body>" + re.search(r'id="oos".*?<p class="note">(.*?)</p>', html,
                                              re.DOTALL).group(1))
     assert "In half-spreads on the session’s Cboe quotes, not the chain fitted here, see" in oos
@@ -8758,6 +9010,656 @@ def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(d
     assert f"inside ({clause})." in _tight(_card(cboe_surface["/"], "surface.html#scorecard"))
     mr = _visible_text(cboe_surface["/model-risk"])
     assert (clause in mr) == (cboe_surface["newest"] == fit)
+
+
+# ── tier 0.2: every session-level number read off a quote chain names that chain ──
+
+def _as_vendor(sj: dict, vendor: str, session: str) -> dict:
+    """``session``'s surface.json recorded as built from ``vendor``'s chain, as the
+    producer records each: a Yahoo download of the session's stored chain, fetched the
+    next morning with T from the close; or a Cboe closing book, fetched by the close slot
+    at 22:30 UTC with quotes 15 minutes older: after the 16:15 ET close and before the
+    overnight session opens at 20:15 ET, under EDT and EST alike (_book_by_clock). Only
+    the source fields change, so the view is the committed surface under the other label."""
+    nxt = (pd.Timestamp(session) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    if vendor == "yahoo":
+        rec = {"source": "yfinance", "quote_time": None, "fetched_at": f"{nxt}T08:50:33Z",
+               "t_origin_basis": "session close 16:00 ET", "book_state": None}
+        chain = f"data_store/options/spx_{session}.parquet"
+    else:
+        rec = {"source": "cboe", "quote_time": f"{session}T22:15:00Z", "fetched_at": f"{session}T22:30:00Z",
+               "t_origin_basis": "session close 16:00 ET", "book_state": "closing"}
+        chain = f"data_store/options/cboe/spx_{session}_223000Z.parquet"
+    return {**sj, "inputs": {**(sj.get("inputs") or {}), **rec, "chain": chain},
+            "universe": {**(sj.get("universe") or {}), **rec}}
+
+
+def _vendor_store(dash, tmp_path: Path, vendor: str, no_diag: bool = False) -> tuple[Path, list[str]]:
+    """The committed record with every surface session the pages cite as one session's
+    (the headline fit's and every later one, the newest among them) built from
+    ``vendor``'s chain: as committed where it already is, else relabelled (_as_vendor),
+    the Heston scorecard row saying whether that is the chain the fit was made on.
+    ``no_diag``: the headline (newest) fit's diagnostics are missing, as the bot
+    publishes a fit whose diagnostics step timed out (its row of diagnostics/
+    summary.json and its own file are not there). Returns (the data dir, the
+    relabelled sessions)."""
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
+    fit_chain = dash.fit_chain_record(cal, fit)
+    sessions = dash.artifacts.surface_sessions(SHIPPED)
+    cited = [s_ for s_ in sessions if s_ >= min(fit, sessions[-1])]
+    moved = [s_ for s_ in cited if (dash.chain_provenance(json.loads(
+        (SHIPPED / "surface" / s_ / "surface.json").read_text())) or {}).get("vendor") != vendor]
+    data = tmp_path / "data_store"
+    data.mkdir()
+    for child in SHIPPED.iterdir():
+        if child.name not in ("surface", "calibrations", "options"):
+            (data / child.name).symlink_to(child)
+    _link_options(data, two_books=vendor == "cboe")
+    (data / "calibrations").mkdir()
+    for child in (SHIPPED / "calibrations").iterdir():
+        if child.name != "diagnostics":
+            (data / "calibrations" / child.name).symlink_to(child)
+    diag = data / "calibrations" / "diagnostics"
+    diag.mkdir()
+    for child in (SHIPPED / "calibrations" / "diagnostics").iterdir():
+        if child.name != "summary.json" and not (no_diag and child.name == f"{fit}.json"):
+            (diag / child.name).symlink_to(child)
+    summ = json.loads((SHIPPED / "calibrations" / "diagnostics" / "summary.json").read_text())
+    if no_diag:              # (a record whose newest fit has none yet is already in this state)
+        summ["rows"] = [r for r in summ["rows"] if r["session"] != fit]
+        summ["n_sessions"] = len(summ["rows"])
+    (diag / "summary.json").write_text(json.dumps(summ))
+    (data / "surface").mkdir()
+    for child in (SHIPPED / "surface").iterdir():
+        if child.name not in moved:
+            (data / "surface" / child.name).symlink_to(child)
+    for s_ in moved:
+        d = data / "surface" / s_
+        shutil.copytree(SHIPPED / "surface" / s_, d)
+        sj = _as_vendor(json.loads((d / "surface.json").read_text()), vendor, s_)
+        (d / "surface.json").write_text(json.dumps(sj))
+        sc = json.loads((d / "scorecard.json").read_text())
+        for m in sc["models"]:
+            if str(m["model"]).startswith("heston") and m.get("available") is not False:
+                m["fit"] = {**(m.get("fit") or {}),
+                            "fit_chain_source": (dash.chain_provenance(fit_chain) or {}).get("vendor"),
+                            "scored_on_fit_chain": dash.same_chain(fit_chain, sj)}
+        (d / "scorecard.json").write_text(json.dumps(sc))
+    return data, moved
+
+
+def _link_options(data: Path, two_books: bool) -> None:
+    """``data``/options as committed, linked file by file (the raw books' records and the
+    private store's manifests in directories of their own, so a record can be added).
+    ``two_books``: the newest session with SPX books stored, whichever directory holds
+    them, also holds whichever of a closing and an overnight (Global Trading Hours) book
+    it lacks, as a weekday's close slot and the book slot after it store them
+    (FUND_GRADE_PLAN 0.8; the Overview's pipeline panel then names both): a record
+    beside the raw books, the closing book quoted when the close slot's is (22:15 UTC,
+    after the 16:15 ET close in EDT and EST), the overnight book three hours after the
+    overnight session that trades for the next session opens. The bot also publishes
+    a newest session with only its overnight book (the close slot refuses a closing book
+    that fails the quote-state gate) and one whose books are held privately (manifests
+    only): the view still has both books then."""
+    opts = data / "options"
+    opts.mkdir()
+    for child in (SHIPPED / "options").iterdir():
+        if child.name not in ("cboe", "cboe_manifest"):
+            (opts / child.name).symlink_to(child)
+    recs: list[dict] = []
+    for sub in ("cboe", "cboe_manifest"):
+        src = SHIPPED / "options" / sub
+        if sub == "cboe" or src.is_dir():
+            (opts / sub).mkdir()
+        for child in (src.iterdir() if src.is_dir() else []):
+            (opts / sub / child.name).symlink_to(child)
+        recs += [json.loads(p.read_text()) for p in sorted((opts / sub).glob("spx_*.json"))]
+    if not two_books or not recs:
+        return
+    newest = max(str(r["session"]) for r in recs)
+    mine = sorted((r for r in recs if str(r["session"]) == newest), key=lambda r: str(r["quote_time"]))
+    states = {r.get("book_state") for r in mine}
+    base = mine[-1]
+    add = []
+    if "closing" not in states:
+        # the close slot's book (fetched 22:30 UTC): its closing book by the clock in EDT and EST
+        add.append(("closing", pd.Timestamp(f"{newest}T22:15:00Z"), -7, -2))
+    if "gth" not in states:
+        # three hours into the overnight session that trades for the next session (from
+        # 20:15 ET the evening before it): a Friday's opens on Sunday evening
+        from joint_vol_calibration.data import option_chain as oc
+        nxt = pd.Timestamp(oc.next_session(newest))
+        opens = (nxt - pd.Timedelta(days=1)).replace(hour=20, minute=15).tz_localize("America/New_York")
+        add.append(("gth", (opens + pd.Timedelta(hours=3)).tz_convert("UTC"), 974, 345))
+    for state, qt, more, more_two in add:
+        fetched = qt + pd.Timedelta(minutes=15)
+        (opts / "cboe" / f"spx_{newest}_{fetched:%H%M%S}Z.json").write_text(json.dumps(
+            {**base, "session": newest, "book_state": state, "quote_time": f"{qt:%Y-%m-%dT%H:%M:%S}Z",
+             "fetched_at": f"{fetched:%Y-%m-%dT%H:%M:%S}Z", "rows": int(base["rows"]) + more,
+             "two_sided_rows": int(base["two_sided_rows"]) + more_two}))
+
+
+@pytest.mark.parametrize("stored", ["closing", "overnight", "both", "private"])
+def test_the_badge_tests_cboe_view_holds_both_books_of_the_newest_session_whatever_it_stored(
+        tmp_path, monkeypatch, stored):
+    """The badge test's Cboe view (_link_options) gives the newest session with SPX books
+    a closing and an overnight book, the weekday state whose two books the Overview
+    names. It added only an overnight book, and read only options/cboe: a newest session
+    with only its overnight book (the close slot stores no closing book that fails the
+    quote-state gate) or with its books held privately (options/cboe_manifest) kept one
+    book, and the badge test, which requires both there, failed on a state the bot
+    publishes. Each stored book is kept as committed; an older session is left alone.
+    Each book, stored or added, is its book by its quote time (_book_by_clock): the
+    overnight book added for a Friday, three hours after its closing book, was quoted on
+    Friday evening, before the overnight session opens on Sunday (w5w2 check, F7)."""
+    src = tmp_path / "shipped" / "options"
+    (src / "cboe").mkdir(parents=True)
+    (src / "spx_2026-10-30.parquet").write_bytes(b"")
+
+    def rec(sub: str, session: str, state: str, qt: str) -> None:
+        (src / sub).mkdir(exist_ok=True)
+        (src / sub / f"spx_{session}_{qt[11:13]}{qt[14:16]}00Z.json").write_text(json.dumps(
+            {"underlying": "SPX", "session": session, "book_state": state, "quote_time": qt,
+             "rows": 100, "two_sided_rows": 90, "expiries": 3}))
+
+    rec("cboe", "2026-10-29", "gth", "2026-10-30T07:16:04Z")
+    if stored in ("closing", "both"):
+        rec("cboe", "2026-10-30", "closing", "2026-10-30T21:52:05Z")
+    if stored in ("overnight", "both"):
+        rec("cboe", "2026-10-30", "gth", "2026-11-02T03:16:04Z")      # Sunday 22:16 EST
+    if stored == "private":
+        rec("cboe_manifest", "2026-10-30", "closing", "2026-10-30T21:52:05Z")
+    shipped = {p.relative_to(src): p.read_text() for p in src.rglob("*.json")}
+    monkeypatch.setitem(globals(), "SHIPPED", tmp_path / "shipped")
+    data = tmp_path / "data"
+    data.mkdir()
+    _link_options(data, two_books=True)
+
+    opts = data / "options"
+    assert (opts / "spx_2026-10-30.parquet").exists()
+    for rel, text in shipped.items():
+        assert (opts / rel).read_text() == text, rel
+    recs = [json.loads(p.read_text()) for sub in ("cboe", "cboe_manifest")
+            for p in (opts / sub).glob("spx_*.json")]
+    newest = sorted((r for r in recs if r["session"] == "2026-10-30"), key=lambda r: r["quote_time"])
+    assert [r["book_state"] for r in newest] == ["closing", "gth"]
+    assert [r["book_state"] for r in recs if r["session"] == "2026-10-29"] == ["gth"]
+    for r in recs:
+        by_clock = _book_by_clock({"inputs": {"source": "cboe", "quote_time": r["quote_time"]}}, r["session"])
+        assert by_clock == {"closing": "closing", "gth": "overnight"}[r["book_state"]], r
+    # without two_books the view is the record as committed
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    _link_options(plain, two_books=False)
+    assert sorted(str(p.relative_to(plain / "options")) for p in (plain / "options").rglob("*.json")) == \
+        sorted(str(r) for r in shipped)
+
+
+# the states the bot publishes that change which chain a number is read off: the newest
+# sessions Yahoo downloads or Cboe books (with a closing and an overnight book), and a
+# newest fit whose diagnostics timed out (the joint-fit card then reads the newest
+# diagnosed session's fit)
+_CHAIN_VIEWS = {"yahoo": ("yahoo", False), "cboe": ("cboe", False), "yahoo-no-diagnostics": ("yahoo", True)}
+
+
+@pytest.fixture(scope="module", params=list(_CHAIN_VIEWS))
+def chain_view(request, dash, tmp_path_factory):
+    """Every page rendered from _vendor_store for one view, with what the checks
+    read: the data dir, the headline fit's session and record, and the vendor."""
+    vendor, no_diag = _CHAIN_VIEWS[request.param]
+    data, moved = _vendor_store(dash, tmp_path_factory.mktemp(f"chain_{request.param}"), vendor, no_diag)
+    out = {"vendor": vendor, "view": request.param, "data": data, "moved": moved, "pages": {}}
+    # the database scratch copy is removed however the block ends, so a failed render
+    # cannot leave it in place for the module's later tests
+    with pytest.MonkeyPatch.context() as mp, contextlib.ExitStack() as stack:
+        mp.setattr(dash, "DATA", data)
+        # the copy's own committed-record database, as freeze_site builds the site
+        stack.enter_context(dash.record_db(scratch_dir=tmp_path_factory.mktemp(f"db_{request.param}")))
+        mp.setattr(dash, "_CHROME_CACHE", {})
+        path, cal = dash.load_headline_calibration()
+        out.update(cal=cal, fit=dash._calibration_session(cal, path))
+        out["newest"] = dash.artifacts.surface_sessions(data)[-1]
+        client = dash.app.test_client()
+        for route in dash.ROUTES:
+            r = client.get(route)
+            assert r.status_code == 200, route
+            assert r.headers.get("X-Dashboard-Loader-Errors") == "0", (route, r.headers)
+            out["pages"][route] = r.get_data(as_text=True)
+    return out
+
+
+def _chain_of(data: Path, session: str) -> dict:
+    return json.loads((data / "surface" / session / "surface.json").read_text())
+
+
+def _fit_pv(dash, data: Path, cal_file: str) -> dict:
+    """chain_provenance of the chain the stored fit ``cal_file`` was made on (its
+    chain_diagnostics and stored chain, fit_chain_record), read from ``data``."""
+    path = data / "calibrations" / cal_file
+    with open(path, "rb") as fh:
+        cal = pickle.load(fh)
+    pv = dash.chain_provenance(dash.fit_chain_record(cal, dash._calibration_session(cal, path), data))
+    assert pv, cal_file
+    return pv
+
+
+def _options_pv(dash, data: Path, session: str) -> dict | None:
+    """chain_provenance of the stored chain options/spx_<session>.parquet: as the stored
+    fit of that session names it when that fit passes the gate and was made on this
+    file (its chain_diagnostics hold a Yahoo download's fetch time and the two-sided
+    share, which the file does not), and the file's own source and quote-time columns
+    must not contradict it; else from those columns alone. So an options:<s> key and
+    a fit:<s> key name one file the same way."""
+    ch = pd.read_parquet(data / "options" / f"spx_{session}.parquet", columns=["source", "quote_time"])
+    src, qt = (sorted(set(ch[c].dropna().astype(str))) for c in ("source", "quote_time"))
+    own = dash.chain_provenance({"inputs": {"source": src[0] if len(src) == 1 else None,
+                                            "quote_time": qt[0] if len(qt) == 1 else None}})
+    path = data / "calibrations" / f"joint_cal_{session}.pkl"
+    if not path.is_file():
+        return own
+    with open(path, "rb") as fh:
+        cal = pickle.load(fh)
+    rec = dash.fit_chain_record(cal, dash._calibration_session(cal, path), data)
+    if (dash.calibration_is_legacy(cal) is not False or not dash.calibration_gate(cal)[0]
+            or (rec or {}).get("inputs", {}).get("chain") != f"data_store/options/spx_{session}.parquet"):
+        return own
+    fit = dash.chain_provenance(rec)
+    assert own, session
+    assert fit, session
+    assert own["vendor"] == fit["vendor"], (session, own, fit)
+    diag_qt = (cal.get("chain_diagnostics") or {}).get("quote_time")
+    assert not qt or not diag_qt or qt == [str(diag_qt)], (session, qt, diag_qt)
+    return fit
+
+
+def _greeks_source_calibration(data: Path) -> str:
+    """The calibration file the stored Greeks surface records as its source (its
+    parquet metadata), read without the dashboard's loader."""
+    import pyarrow.parquet as pq
+    meta = pq.read_schema(data / "greeks" / "greeks_surface.parquet").metadata or {}
+    raw = meta.get(b"greeks_provenance") or meta.get(b"provenance")
+    assert raw is not None, "the Greeks surface records no provenance"
+    prov = json.loads(raw.decode())
+    src = prov.get("source") if isinstance(prov.get("source"), dict) else {}
+    return Path(str(prov.get("source_calibration") or src.get("calibration_file"))).name
+
+
+def _names_chain(text: str, pv: dict | None) -> bool:
+    """The chain's source badge in ``text``: chain_provenance's name (or its short
+    form, 'Yahoo download'), its quote-time clause ('quotes at …', 'fetched …',
+    'no quote time') and its two-sided share ('99.8% two-sided near the money',
+    'two-sided share not recorded'); a chain whose source is not recorded says so."""
+    t = re.sub(r"\s+", " ", text)
+    if pv is None:
+        return "source not recorded" in t
+    return (pv["name"] in t or pv["short"] in t) and pv["badge"][0] in t and pv["share"] in t
+
+
+def _panel_html(html: str, pid: str) -> str:
+    m = re.search(rf'<section class="panel[^"]*" id="{re.escape(pid)}"[^>]*>(.*?)</section>', html, re.DOTALL)
+    assert m, pid
+    return m.group(1)
+
+
+def _key_chain(dash, data: Path, key: str) -> dict | None:
+    """chain_provenance of the chain a page's data-chain key names, read from ``data``
+    here, not by the page's resolver (dashboard.app.chain_of_key): a surface session's
+    surface.json; a stored fit's own record (its chain_diagnostics and stored chain); a
+    stored chain's parquet (its source and quote-time columns); the live capture behind
+    β (its US/Eastern capture time in UTC); a forward ledger's book."""
+    kind, _, arg = key.partition(":")
+    if kind == "surface":
+        return dash.chain_provenance(_chain_of(data, arg))
+    if kind in ("fit", "cal"):
+        return _fit_pv(dash, data, f"joint_cal_{arg}.pkl" if kind == "fit" else arg)
+    if kind == "options":
+        return _options_pv(dash, data, arg)
+    if kind == "live":
+        live = json.loads((ROOT / "joint_vol_calibration" / "tests" / "fixtures"
+                           / "spx_chain_live_20261012.json").read_text())
+        at = pd.Timestamp(live["as_of_et"]).tz_localize("America/New_York").tz_convert("UTC")
+        return dash.chain_provenance({"inputs": {"source": "yfinance",
+                                                 "fetched_at": at.strftime("%Y-%m-%dT%H:%M:%SZ")}})
+    if kind == "book":                    # a stored Cboe book's record, or its private-store manifest
+        rec = next(json.loads(p.read_text()) for sub in ("cboe", "cboe_manifest")
+                   for p in [data / "options" / sub / f"{arg}.json"] if p.exists())
+        return dash.chain_provenance({"inputs": {"source": "cboe", "quote_time": rec["quote_time"],
+                                                 "book_rows": rec.get("rows"),
+                                                 "book_two_sided_rows": rec.get("two_sided_rows")}})
+    if kind == "ledger":
+        inp = json.loads((data / "forward" / f"ledger_{arg}.json").read_text())["inputs"]
+        return dash.chain_provenance({"inputs": {
+            "source": inp["book"]["source"], "quote_time": inp["quote_time"],
+            "near_atm_two_sided_share": inp["book"].get("near_atm_two_sided_share")}})
+    raise AssertionError(f"unknown chain key {key!r}")
+
+
+# Every panel, page head, Model Risk check, Overview finding and result card declares in
+# data-chain what its numbers are read off: chain keys, 'parts' (its own elements carry
+# keys) or 'none'. A 'none' is listed here with why; any other unit is checked. In a
+# 'parts' unit every table with an id declares each row (keys; data-chain-over: the
+# sessions a row aggregating over them is taken over, each named in its own row of the
+# panel; 'parts'; or 'none', its table listed here as 'rows:<id>'), or itself 'none',
+# listed here as 'table:<id>'.
+_BACKTEST = "the backtest, marked at β·VIX with no option prices"
+_NO_CHAIN_UNITS: dict[str, dict[str, str]] = {
+    "/": {
+        "state-regime": "the rule label and its inputs: VIX, VVIX and SPX closes",
+        "state-ts": "VIX index closes", "state-pdv": "VIX against the PDV forecast of SPX closes",
+        "vx-curve": "VX futures settlements, not an option chain", "vix-ratio": "VIX and VIX3M closes",
+        "state-pipeline": "no Cboe book stored yet: counts of stored records (with a book stored it is "
+                          "'parts', each book naming its chain)",
+        "rows:pipeline": "counts of stored records: fits, surface reports, diagnostics, ledger sessions, "
+                         "deploys and the backtest's window (the Cboe books row names each book's chain)",
+        "finding:calibration.html#history": "counts of stored fits",
+        "finding:research.html#inference": _BACKTEST, "result:research.html#inference": _BACKTEST,
+        "finding:research.html#research-classifier": "the classifier's accuracy on rule labels",
+        "finding:research.html#forward": "a count of registered ledger sessions",
+        "finding:calibration.html#vixleg": "a range over every gated fit, not one session's; each fit's "
+                                           "own score names its chain on Calibration #vixleg",
+        "finding:calibration.html#sigma-tradeoff": "the production σ box, a constant",
+    },
+    "/surface": {"surface-plan": "what the page will show: no number"},
+    "/risk": {"hedge": "a 2020 straddle priced at the VIX term structure, with no option chain"},
+    "/research": dict.fromkeys((
+        "page-head", "sleeve-spec", "equity", "drawdown", "rolling", "sleeves", "sleeve-pnl", "round-trips",
+        "trade-hists", "trade-stats", "drawdowns", "monthly", "annual", "inference", "beta-grid", "why",
+        "limits"), _BACKTEST) | {
+        "benchmarks": "Cboe strategy index levels, not an option chain",
+        "forecast": "vol forecasts of SPX closes", "research-classifier": "a classifier of rule labels",
+        "label-history": "rule labels",
+        "table:vrp-beta-table": "β·VIX against realised vol of SPX closes, β fixed: no option chain"},
+    "/model-risk": {
+        "page-head": "counts of checks and models", "inventory": "the model inventory's prose",
+        "definitions": "the glossary", "check-calib-age": "a count of NYSE sessions",
+        "check-rate-reference": "the rate curve", "check-vx-lag": "the VX futures table's age",
+        "check-greeks-source": "whether the Greeks' fit is the headline fit (yes or no)",
+        "check-label-lag": "the market database's age", "check-ledger-chain": "the ledger's hash chain",
+        "check-svi-certificate": "whether the certificates are stored (yes or no)",
+        "check-classifier": "the classifier's accuracy"},
+    "/corrections": dict.fromkeys(("page-head", "waterfall", "headline", "register"),
+                                  "the corrections log: no number read off a chain"),
+}
+
+
+def _chain_units(soup) -> list[tuple[str, Any, list]]:
+    """(id, element, what it covers) of every unit a page must declare: the page head
+    (covering everything above the first panel: the Surface and Calibration tiles under
+    the badge, the Overview findings), each panel, each Model Risk check, each Overview
+    finding and result card."""
+    main = soup.select_one("main")
+    head = main.select_one(".page-head")
+    region, el = [head], head.find_next_sibling()
+    while el is not None and not ((el.name == "section" and "panel" in (el.get("class") or []))
+                                  or el.select_one("section.panel")):
+        region.append(el)
+        el = el.find_next_sibling()
+    units = [("page-head", head, region)]
+    units += [(x["id"], x, [x]) for x in main.select("section.panel")]
+    units += [(x["id"], x, [x]) for x in main.select("tr[id^=check-]")]
+    units += [(f"finding:{x.a['href']}", x, [x]) for x in main.select("li.find-item")]
+    units += [(f"result:{x['href']}", x, [x]) for x in main.select("a.result")]
+    return units
+
+
+def _own_text(el) -> str:
+    """An element's text without the parts that carry a data-chain of their own (rows,
+    captions, history dots): those are checked on their own, so a unit must name its
+    chain in its own text, not only in a nested part's."""
+    import copy
+    own = copy.copy(el)
+    for x in own.select("[data-chain]"):
+        x.decompose()
+    return own.get_text(" ")
+
+
+def _chain_audit(dash, data: Path, route: str, html: str,
+                 pages: dict | None = None) -> tuple[list, dict]:
+    """Every declaration of one page, checked: (what is wrong, {unit id: its keys}).
+    ``pages`` (route: html) resolves an aggregate's data-chain-over-at on another page."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    for t in soup(["script", "style", "template", "noscript"]):
+        t.decompose()
+    bad: list[tuple] = []
+    keys_of: dict[str, str] = {}
+    exempt = _NO_CHAIN_UNITS.get(route, {})
+    cache: dict[str, dict | None] = {}
+
+    def names(text: str, keys: str) -> list[str]:
+        missing = []
+        for k in keys.split():
+            if k not in cache:
+                cache[k] = _key_chain(dash, data, k)
+            if not _names_chain(text, cache[k]):
+                missing.append(k)
+        return missing
+    for uid, el, scope in _chain_units(soup):
+        dc = el.get("data-chain")
+        keys_of[uid] = dc
+        if not dc:
+            bad.append((route, uid, "declares no data-chain"))
+        elif dc == "none":
+            if uid not in exempt:
+                bad.append((route, uid, "says it reads no chain but is not listed in _NO_CHAIN_UNITS"))
+        elif dc == "parts":
+            if not [x for s in scope for x in s.select("[data-chain]")
+                    if x.get("data-chain") not in ("none", "parts")]:
+                bad.append((route, uid, "'parts' with no part that names a chain"))
+            # its tables: each row names its chain or the sessions it is taken over (the
+            # by-book gap table), or the table reads no chain (a chart's own data table,
+            # without an id, repeats the chart's, whose unit is checked)
+            for t in (t for s in scope for t in s.select("table[id]")):
+                if t.get("data-chain") == "none":
+                    if f"table:{t['id']}" not in exempt:
+                        bad.append((route, uid, f"table #{t['id']} says it reads no chain but is not listed"))
+                    continue
+                for tr in t.select("tbody tr"):
+                    rc = tr.get("data-chain")
+                    if not rc and not tr.get("data-chain-over"):
+                        bad.append((route, uid, f"table #{t['id']} has a row that declares no chain"))
+                    elif rc == "none" and f"rows:{t['id']}" not in exempt and tr.get("id") not in exempt:
+                        bad.append((route, uid, f"table #{t['id']} has a 'none' row, its rows not listed"))
+                    elif rc == "parts" and not [x for x in tr.select("[data-chain]")
+                                                if x.get("data-chain") not in ("none", "parts")]:
+                        bad.append((route, uid, f"table #{t['id']} has a 'parts' row naming no chain"))
+        elif missing := names(" ".join(_own_text(s) for s in scope), dc):
+            bad.append((route, uid, "does not name", missing))
+    # every other element with keys, inside a unit or not (a row, caption, line or history
+    # dot); the page head names its chains in the region it covers, checked above
+    for el in soup.select("main [data-chain]"):
+        dc = str(el["data-chain"])
+        if dc in ("none", "parts") or "page-head" in (el.get("class") or []):
+            continue
+        if missing := names(_own_text(el), dc):
+            bad.append((route, el.get("id") or el.name, "does not name", missing,
+                        re.sub(r"\s+", " ", el.get_text(" "))[:120]))
+    # a row taken over several sessions' chains (data-chain-over: the Surface's gap by book)
+    # names none itself: each must be a key a row of its own panel declares, and names, or
+    # of the panel data-chain-over-at names ('#beta-chains', 'research.html#beta-chains')
+    files = {f: r for r, f in dash.ROUTES.items()}
+    for el in soup.select("main [data-chain-over]"):
+        over = str(el["data-chain-over"]).split()
+        panel = el.find_parent("section")
+        if at := el.get("data-chain-over-at"):
+            page, _, pid = str(at).partition("#")
+            other = soup if not page else BeautifulSoup((pages or {}).get(files.get(page, ""), ""), "lxml")
+            panel = other.select_one(f"section#{pid}")
+        declared = {k for x in (panel.select("[data-chain]") if panel is not None else [])
+                    for k in str(x["data-chain"]).split()}
+        if not over or [k for k in over if k not in declared]:
+            bad.append((route, el.get("id") or el.name, "taken over chains its panel does not name",
+                        [k for k in over if k not in declared] or "no key",
+                        re.sub(r"\s+", " ", el.get_text(" "))[:120]))
+    return bad, keys_of
+
+
+def test_the_beta_aggregates_declare_the_chains_they_are_taken_over(dash, pages):
+    """w5 review, minor 4: 'the mean over all 10 chains (0.78)' under Research's β grid
+    (a panel that reads no chain) and the Corrections register's 'the first later chain,
+    2026-10-16, gives 0.70 — the mean over all 10 chains, 0.78' named no chain, outside
+    any unit the badge test checks, and change with every chain the bot stores. Each
+    aggregate now declares the chains it is taken over (data-chain-over: the estimation
+    chains, or those and every later one), each named in a row of Research's
+    #beta-chains (data-chain-over-at), with the span of their sessions; on Corrections
+    the first later chain is named by its own key. The badge test checks every such
+    declaration (test_every_number_from_a_quote_chain_names_its_chain)."""
+    from bs4 import BeautifulSoup
+
+    research = BeautifulSoup(pages["/research"], "lxml")
+    rows = research.select("section#beta-chains table#beta-chains tbody tr")
+    use = {tr["data-chain"]: tr.select("td")[-1].get_text(" ").strip() for tr in rows}
+    est = sorted(k for k, u in use.items() if u == "estimation")
+    every = sorted(k for k, u in use.items() if u in ("estimation", "later, out of sample"))
+    later = sorted(k for k, u in use.items() if u == "later, out of sample")
+    assert est
+    assert every
+    for route, at in (("/research", "#beta-chains"), ("/corrections", "research.html#beta-chains")):
+        soup = research if route == "/research" else BeautifulSoup(pages[route], "lxml")
+        over = [(sorted(str(el["data-chain-over"]).split()), el.get("data-chain-over-at"),
+                 re.sub(r"\s+", " ", el.get_text(" "))) for el in soup.select("main [data-chain-over]")]
+        means = [o for o in over if "the mean over all" in o[2]]
+        assert means, route
+        for keys, where, text in means:
+            assert (keys, where) == (every, at), (route, text)
+            assert f"the mean over all {len(every)} chains" in text
+        assert [(k, w) for k, w, t in over if "= mean of" in t] == [(est, at)], route
+        if later:
+            first = min(later)
+            if route == "/research":
+                assert ([first], at) in [(k, w) for k, w, t in over if "gives" in t]
+            else:
+                span = [el for el in soup.select("main [data-chain]") if el["data-chain"] == first]
+                assert span, route
+                assert dash.key_stamp(first) in re.sub(r"\s+", " ", span[0].get_text(" "))
+    # the grid's ◆, when the all-chain mean is a row of it
+    grid_note = research.select_one("section#beta-grid")
+    if "◆ the mean over all" in grid_note.get_text(" "):
+        el = grid_note.select_one("[data-chain-over]")
+        assert sorted(str(el["data-chain-over"]).split()) == every
+
+
+def test_every_number_from_a_quote_chain_names_its_chain(dash, chain_view):
+    """Tier 0.2: a number read off a session's quote chain shows that chain's source
+    badge beside it (its vendor, its quote time: a Cboe book's 'quotes at …', a Yahoo
+    download's 'fetched …', a close snapshot's 'no quote time', and the share of its
+    near-the-money lines that are two-sided, or that it is not recorded) in its own
+    panel, row, line or history dot, on every page, in each state the bot publishes
+    (chain_view: Yahoo or Cboe newest sessions, a newest fit without diagnostics).
+
+    The pages declare it: every panel, page head, Model Risk check, Overview finding
+    and result card carries a data-chain attribute with the chain keys its numbers are
+    read off ('surface:<session>', 'fit:<session>', 'options:<session>', 'live',
+    'ledger:<session>'), 'parts' when its rows or lines carry their own, or 'none'. So a
+    page cannot add a unit without saying what it reads, a 'none' must be listed above
+    with its reason, and each key is resolved here from the record (_key_chain) and
+    looked for in the text beside it. Where the session a unit reads is not in its key
+    alone, it is checked against the page's own rule (the joint-fit card's session, the
+    Greeks' source fit, the Model Risk rows' artifacts, β's newest chain)."""
+    data, pages, fit = chain_view["data"], chain_view["pages"], chain_view["fit"]
+    newest = chain_view["newest"]
+    assert (dash.chain_provenance(_chain_of(data, newest)) or {}).get("vendor") == chain_view["vendor"]
+    assert set(_NO_CHAIN_UNITS) <= set(dash.ROUTES)
+    bad: list[tuple] = []
+    keys: dict[str, dict[str, str]] = {}
+    for route in dash.ROUTES:
+        b, keys[route] = _chain_audit(dash, data, route, pages[route], pages)
+        bad += b
+    assert bad == [], (chain_view["view"], bad)
+
+    # the session each key names is the one the page reads
+    ov, sf, cb, mr, rk = (keys[r] for r in ("/", "/surface", "/calibration", "/model-risk", "/risk"))
+    line = re.search(r'<p class="note" id="surface-line"[^>]*>(.*?)</p>', pages["/"], re.DOTALL).group(0)
+    s_line = re.search(r"surface (?:<[^>]+>)?(\d{4}-\d{2}-\d{2})", line).group(1)
+    assert f'data-chain="surface:{s_line}"' in line
+    card = re.search(r'<a class="result" href="surface.html#scorecard"(.*?)</a>', pages["/"],
+                     re.DOTALL).group(1)
+    s_card = re.search(r"data_store/surface/(\d{4}-\d{2}-\d{2})/scorecard.json", card).group(1)
+    assert ov["result:surface.html#scorecard"] == f"surface:{s_card}"
+    # the joint-fit card's session as the card takes it (and test_overview_key_results_are_read_from_
+    # the_shipped_artifacts): the headline fit's diagnostics row, else, when the bot's fail-soft
+    # diagnostics of a new fit are missing, the newest diagnosed session
+    summ = json.loads((data / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
+    own = [r for r in summ if r["session"] == fit]
+    card_fit = (own or [max(summ, key=lambda r: r["session"])])[0]["session"] if summ else fit
+    joint = next(k for k in ov if k.startswith("result:calibration.html#"))
+    assert ov[joint] == f"fit:{card_fit}", (ov[joint], card_fit)
+    assert ov["state-fit"] == f"fit:{fit}"
+    # the pipeline panel's Cboe books each name their book (tier 0.8: a weekday session's
+    # closing and overnight books, in the cboe view), once any is stored
+    books = [p for sub in ("cboe", "cboe_manifest") for p in (data / "options" / sub).glob("*.json")]
+    assert ov["state-pipeline"] == ("parts" if books else "none")
+    newest_books = re.findall(r'data-chain="book:(spx_[^"]+)"', pages["/"])
+    spx = [(p.stem, json.loads(p.read_text())) for sub in ("cboe", "cboe_manifest")
+           for p in (data / "options" / sub).glob("spx_*.json")]
+    last = max(str(r["session"]) for _, r in spx)
+    mine = sorted(((k, r) for k, r in spx if str(r["session"]) == last),
+                  key=lambda x: str(x[1]["quote_time"]))
+    assert newest_books == [k for k, _ in mine]
+    if chain_view["vendor"] == "cboe":              # the view's weekday state: both books
+        assert {r.get("book_state") for _, r in mine} >= {"closing", "gth"}, newest_books
+    shown = dash.artifacts.load_surface(data)["session"]
+    surface_panels = [k for k in sf if k not in ("page-head", "surface-history")]
+    assert len(surface_panels) >= 15
+    # the scorecard also declares the chain its Heston row was fitted on when it says it is
+    # scored on another (tier 0.8: its fit-time clause reads that chain's download time)
+    sc = json.loads((data / "surface" / shown / "scorecard.json").read_text())
+    hfit = next(((m.get("fit") or {}) for m in sc["models"] if str(m["model"]).startswith("heston")
+                 and m.get("available") is not False
+                 and (m.get("fit") or {}).get("scored_on_fit_chain") is False), {})
+    assert sf["scorecard"] == f"surface:{shown}" + (f" cal:{hfit['source']}" if hfit.get("source") else "")
+    assert all(sf[k] == f"surface:{shown}" for k in surface_panels if k != "scorecard"), sf
+    assert sf["page-head"] == f"surface:{shown}"
+    assert sf["surface-history"] == "parts"
+    assert cb["page-head"] == f"fit:{fit}"
+    specs = _raw_specs(pages["/calibration"])
+    smiles = [k for k in cb if k.startswith("smile-")]
+    assert smiles
+    for pid in smiles:
+        quotes = (specs.get(f"chart-{pid}") or {}).get("quotes")
+        assert cb[pid] == (f"surface:{fit}" if quotes else f"fit:{fit}"), pid
+    slug = dash.desk_monitor.slug
+    for key in ("oos_rmse", "short_oos_rmse", "vix_rmse", "params_at_bound", "feller"):
+        assert mr[f"check-{slug(key)}"] == f"fit:{fit}", key
+    for key in ("vix_rep_gap", "arb_exec_share", "median_abs_hs"):
+        row = re.search(rf'<tr id="check-{slug(key)}"[^>]*>(.*?)</tr>', pages["/model-risk"],
+                        re.DOTALL).group(1)
+        # the session whose artifact the row reads (its path is set with word breaks)
+        own_s = re.search(r"data_store/surface/(\d{4}-\d{2}-\d{2})/", re.sub(r"<[^>]+>", "", row)).group(1)
+        assert mr[f"check-{slug(key)}"] in (f"surface:{own_s}", "parts"), key
+    # β drift reads the market database's newest chain: the last later chain of the Research table
+    rows = re.findall(r'<tr[^>]*data-chain="([^"]+)"><td>[^<]*</td><td class="nowrap">[^<]*</td>'
+                      r'<td>[^<]*</td><td class="num">[^<]*</td><td>later, out of sample</td>',
+                      pages["/research"])
+    assert rows
+    assert mr["check-beta-drift"] == rows[-1], (mr["check-beta-drift"], rows)
+    assert rk["page-head"] == f"cal:{_greeks_source_calibration(data)}"
+    assert all(v == rk["page-head"] for k, v in rk.items() if k not in ("page-head", "hedge"))
+
+
+def test_a_stored_chain_is_named_as_the_fit_made_on_it_names_it(dash):
+    """Tier 0.2 (w5 review, major 1): Research's β chains, its VRP β row and Model Risk's
+    β-drift check name each stored chain data_store/options/spx_<session>.parquet by its
+    options:<session> key, which was resolved from the file alone. The file holds no
+    fetch time of a Yahoo download stored since QUANT-01 and no two-sided share, so every
+    such download was called 'Yahoo Finance close snapshot, no quote time, two-sided
+    share not recorded' while Calibration, the Overview and the Surface scorecard named
+    the same file 'Yahoo Finance download, fetched …, 95.2% two-sided near the money'
+    from the fit made on it. Every gate-passing fit whose stored chain is its session's
+    file is checked: the two keys name that file in the same words."""
+    checked = []
+    for r in dash.scan_calibrations():
+        s, path = r["session"], Path(r["path"])
+        if (r["legacy"] is not False or not r["ok"] or path.name != f"joint_cal_{s}.pkl"
+                or not (dash.DATA / "options" / f"spx_{s}.parquet").exists()):
+            continue
+        rec = dash.fit_chain_record(dash._load_pickle(path), s)
+        if rec["inputs"]["chain"] != f"data_store/options/spx_{s}.parquet":
+            continue
+        assert dash.key_stamp(f"options:{s}") == dash.key_stamp(f"fit:{s}"), s
+        checked.append(s)
+    assert checked
 
 
 # ── P2.7: no half-empty grid rows, no blank panel bottoms ────────────────────
@@ -8807,8 +9709,10 @@ _LAYOUT_JS = """([maxUnused, maxBlank, exempt]) => {
           || el.classList.contains('grow-col')) return;
       last = Math.max(last, el.getBoundingClientRect().bottom);
     });
-    if (last !== -Infinity && p.getBoundingClientRect().bottom - last > maxBlank)
-      blanks.push(p.id + ' ' + Math.round(p.getBoundingClientRect().bottom - last));
+    // a panel's feet (its chain's source line, where it is cited) are content too
+    const foot = [...p.children].find(c => c.classList.contains('panel-foot') && vis(c));
+    const end = foot ? foot.getBoundingClientRect().top : p.getBoundingClientRect().bottom;
+    if (last !== -Infinity && end - last > maxBlank) blanks.push(p.id + ' ' + Math.round(end - last));
   });
   return {holes, blanks};
 }"""
@@ -8824,7 +9728,8 @@ def test_browser_grid_rows_are_full_and_panels_end_with_their_content(site_brows
     the blank below the replication panel's closed disclosure (135 px at 1440)
     and the scenario grid's (111 px at 1920). Nor is a .grow-col box itself: it
     stretches to its panel, so only what it holds is content (counting it hid a
-    440 px smile in a 1,446 px panel)."""
+    440 px smile in a 1,446 px panel). A panel's feet (the chain's source line,
+    tier 0.2, and "Cited on") are content: the blank is measured to the first."""
     ctx, page = _page(site_browser, width, 900)
     try:
         for name in ("index.html", "surface.html", "calibration.html", "risk.html", "research.html",
@@ -9250,7 +10155,7 @@ def test_vrp_beta_table_is_recomputed_from_the_market_db(dash, pages):
     f = _vol_frame().loc[start:end].dropna(subset=["rv_fwd"])
     tbl = html[html.index('id="vrp-beta-table"'):]
     tbl = tbl[:tbl.index("</table>")]
-    rows = re.findall(r'<tr[^>]*data-vrp-beta="([\d.]+)">(.*?)</tr>', tbl, re.DOTALL)
+    rows = re.findall(r'<tr[^>]*data-vrp-beta="([\d.]+)"[^>]*>(.*?)</tr>', tbl, re.DOTALL)
     assert [float(b) for b, _ in rows] == list(dict.fromkeys(betas))
     for b, cells in rows:
         beta = float(b)
@@ -9398,7 +10303,7 @@ def _monitor_rows(html: str) -> list[tuple[str, str, str]]:
     m = re.search(r'<table class="tbl cards" id="monitor-table">.*?<tbody>(.*?)</tbody>', html, re.DOTALL)
     assert m is not None
     tbody = m.group(1)
-    return re.findall(r'<tr id="(check-[\w-]+)" data-status="(\w+)">(.*?)</tr>', tbody, re.DOTALL)
+    return re.findall(r'<tr id="(check-[\w-]+)" data-status="(\w+)"[^>]*>(.*?)</tr>', tbody, re.DOTALL)
 
 
 def test_model_risk_lists_breaches_first_and_counts_them_in_its_filters(dash, pages):
@@ -9417,6 +10322,12 @@ def test_model_risk_lists_breaches_first_and_counts_them_in_its_filters(dash, pa
     assert statuses[:n_breach] == ["breach"] * n_breach
     assert "breach" not in statuses[n_breach:]
     inv = [m["id"] for m in d["inventory"]] + [v["id"] for v in d["vendor_inputs"]] + ["Data"]
+    if not n_breach:
+        # with no BREACH on the record the order is also checked on the page's own rows
+        # with the last one made a BREACH: it must come first
+        rows_ = [{**m, "status": "breach" if i == len(d["monitors"]) - 1 else m["status"]}
+                 for i, m in enumerate(d["monitors"])]
+        assert dash.desk_monitor.order_checks(rows_, inv)[0]["id"] == d["monitors"][-1]["id"]
     for st in _SEVERITY:
         models = [m["model"] for m in d["monitors"] if m["status"] == st]
         assert models == sorted(models, key=inv.index), st
@@ -9444,6 +10355,9 @@ def test_model_risk_history_ends_with_todays_value_and_uses_todays_limits(dash, 
             assert m["history"]["last"] == pytest.approx(m["num"], abs=1e-12), m["check"]
         lim = dash.MONITOR_LIMITS[m["limits_key"]]
         size = abs if m["key"] == "vix_rep_gap" else float
+        if m["key"] == "vix_rep_gap" and m["status"] == "info":   # a gap not on a closing book
+            assert {x["status"] for x in m["history"]["dots"]} == {"info"}
+            continue
         assert [x["status"] for x in m["history"]["dots"]] == [dash._rag(size(x["value"]), lim)
                                                                for x in m["history"]["dots"]]
     oos = next(m for m in d["monitors"] if m["key"] == "oos_rmse")
@@ -9468,20 +10382,21 @@ def test_model_risk_history_ends_with_todays_value_and_uses_todays_limits(dash, 
             assert "single observation" in body, m["check"]
 
 
-def test_model_risk_bullets_scale_the_value_against_the_limits(dash, pages):
-    """P3.3: each numeric check has a server-rendered bullet (role=img) whose tick x
-    is proportional to the value on [0, max(1.5·a, value)] and whose label names
-    the value and both limits."""
-    html = pages["/model-risk"]
-    d = {m["id"]: m for m in dash.load_model_risk()["monitors"]}
+def _check_bullets(dash, html: str, monitors: list[dict]) -> int:
+    """Each numeric check's bullet on the Model Risk page ``html`` against its row of
+    load_model_risk (``monitors``); returns how many bullets there are. A check whose
+    limits do not apply to today's value (limits_apply false: a VIX gap taken on another
+    book than the closing book) has none."""
+    d = {m["id"]: m for m in monitors}
     n = 0
     for rid, _st, body in _monitor_rows(html):
         svg = re.search(r'<svg class="bullet"[^>]*>', body)
         m = d[rid]
         lim = dash.MONITOR_LIMITS.get(m["limits_key"] or "")
-        if lim is None or m["num"] is None:
+        if lim is None or m["num"] is None or not m["limits_apply"]:
             assert svg is None, rid
             continue
+        assert svg is not None, rid
         a = _attrs(svg.group(0))
         assert a["role"] == "img"
         top = max(1.5 * lim[1], m["num"])
@@ -9491,7 +10406,32 @@ def test_model_risk_bullets_scale_the_value_against_the_limits(dash, pages):
         assert f"watch ≤ {lim[1]:g}" in label, rid
         assert label.startswith("value "), rid
         n += 1
-    assert n >= 10
+    return n
+
+
+def test_model_risk_bullets_scale_the_value_against_the_limits(dash, pages):
+    """P3.3: each numeric check has a server-rendered bullet (role=img) whose tick x
+    is proportional to the value on [0, max(1.5·a, value)] and whose label names
+    the value and both limits."""
+    assert _check_bullets(dash, pages["/model-risk"], dash.load_model_risk()["monitors"]) >= 9
+
+
+def test_model_risk_bullets_hold_in_every_chain_view(dash, chain_view, tmp_path):
+    """The bullet check above on the badge test's views: with the newest surface built
+    from a Yahoo chain, Model Risk's VIX replication check is informational (its limits
+    apply to a closing book's gap only, w5 review major 3) and has no bullet. The check
+    ran on the committed record only, whose newest surface is a closing book, so it
+    expected a bullet there and failed the presentation gate on a Yahoo-built newest
+    session (the w5 reviewer's yfull tree)."""
+    (tmp_path / "db").mkdir()
+    with pytest.MonkeyPatch.context() as mp, contextlib.ExitStack() as stack:
+        mp.setattr(dash, "DATA", chain_view["data"])
+        stack.enter_context(dash.record_db(scratch_dir=tmp_path / "db"))
+        mp.setattr(dash, "_CHROME_CACHE", {})
+        monitors = dash.load_model_risk()["monitors"]
+    assert _check_bullets(dash, chain_view["pages"]["/model-risk"], monitors) >= 9
+    rep = next(m for m in monitors if m["key"] == "vix_rep_gap")
+    assert rep["limits_apply"] is (rep["status"] != "info")
 
 
 def test_model_risk_values_link_to_their_evidence_and_the_evidence_links_back(dash, pages):
@@ -9956,20 +10896,187 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
     assert n >= 3 * len(specs[0][1]["quotes"]["groups"]) * len(specs[0][1]["quotes"]["models"])
 
 
-def test_quote_inspector_footnote_names_the_chain_and_its_quote_time(dash, pages):
-    """The tooltip's footnote is the chain's own source and quote time (surface.json),
-    'Yahoo close, no quote time' for a Yahoo snapshot without one. Each smile's chain
-    is its page's: the newest surface session's on Surface, the headline fit's on
-    Calibration (a newer session without a fit has another book and quote time)."""
-    for route, spec in _smile_specs(pages):
-        sj = json.loads((_smile_chain(dash, route) / "surface.json").read_text())
+def _check_quote_footnotes(dash, pages: dict, chain_dirs: dict[str, Path]) -> int:
+    """Each smile's quote-inspector footnote against the record of its chain
+    (``chain_dirs``: the surface session directory each route's smiles are drawn from):
+    quote_source_note of its surface.json. A Yahoo chain without a quote time is a
+    download named by its fetch time when the record holds one (every bot chain since
+    QUANT-01), and 'Yahoo close, no quote time' only when it holds none (the C23 close
+    snapshots). Returns the number of smiles checked."""
+    n = 0
+    for route, spec in [("/surface", _raw_specs(pages["/surface"])["chart-slices"])] + [
+            ("/calibration", s) for cid, s in _raw_specs(pages["/calibration"]).items()
+            if cid.startswith("chart-smile-") and s.get("quotes")]:
+        sj = json.loads((chain_dirs[route] / "surface.json").read_text())
         want = dash.quote_source_note(sj)
-        inp = sj.get("inputs") or {}
+        inp, uni = sj.get("inputs") or {}, sj.get("universe") or {}
         if str(inp.get("source")).lower() in ("yfinance", "yahoo") and not inp.get("quote_time"):
-            assert want == "Yahoo close, no quote time"
+            fetched = inp.get("fetched_at") or uni.get("fetched_at")
+            if fetched:
+                at = pd.Timestamp(str(fetched)).tz_convert("UTC")
+                assert want.startswith(f"Yahoo download, fetched {at:%Y-%m-%d %H:%M} UTC; "
+                                       "Yahoo reports no quote times"), (route, want)
+            else:
+                assert want == "Yahoo close, no quote time", (route, want)
         assert spec["quotes"]["source"] == want, route
+        n += 1
+    return n
+
+
+def test_quote_inspector_footnote_names_the_chain_and_its_quote_time(dash, pages):
+    """The tooltip's footnote is the chain's own source and quote time (surface.json):
+    a Yahoo download's fetch time, 'Yahoo close, no quote time' only for a Yahoo chain
+    that records none. Each smile's chain is its page's: the newest surface session's on
+    Surface, the headline fit's on Calibration (a newer session without a fit has another
+    book and quote time). The badge test's views run it on a Yahoo-built newest session
+    too (test_quote_inspector_footnote_names_the_chain_in_every_chain_view)."""
+    assert _check_quote_footnotes(dash, pages, {r: _smile_chain(dash, r)
+                                                for r in ("/surface", "/calibration")})
     assert dash.quote_source_note({"inputs": {"source": "cboe", "quote_time": "2026-10-16T15:45:00"}}) \
         == "Cboe, quotes at 2026-10-16 15:45:00"
+
+
+def test_quote_inspector_footnote_names_the_chain_in_every_chain_view(dash, chain_view):
+    """The footnote check above, on the pages of the badge test's views: the newest
+    surface built from a Yahoo download (the bot's state when both book slots fail to
+    get a Cboe book), from Cboe books, and with the newest fit's diagnostics missing.
+    It expected 'Yahoo close, no quote time' of every Yahoo chain without a quote time,
+    so the presentation gate failed whenever the newest surface was a Yahoo download,
+    which the page names by its fetch time."""
+    data = chain_view["data"]
+    dirs = {"/surface": data / "surface" / dash.artifacts.surface_sessions(data)[-1],
+            "/calibration": data / "surface" / chain_view["fit"]}
+    assert _check_quote_footnotes(dash, chain_view["pages"], dirs)
+
+
+def _gaps_by_session(data: Path) -> dict[str, float]:
+    """Each stored surface session's VIX gap (replicated − Cboe close) as its
+    vix_replication.json stores it."""
+    out = {}
+    for p_ in sorted((data / "surface").glob("*/vix_replication.json")):
+        g = (json.loads(p_.read_text()).get("indices", {}).get("VIX") or {}).get("gap_vs_official")
+        if g is not None:
+            out[p_.parent.name] = float(g)
+    return out
+
+
+def test_the_overview_replication_finding_names_the_book_its_gap_was_taken_on(dash, chain_view):
+    """w5 review, major 3: the Overview's 'VIX replicated from the stored chain' finding
+    gave the gap without saying whether it was taken on a closing book (quotes standing
+    when the Cboe close is computed: the replication's own error), an overnight book or an
+    overnight Yahoo download (which also hold the market's move overnight) or a Yahoo chain
+    with no quote time. It now names the book of the session Surface shows, classified by
+    its record and the calendar (_book_by_clock), and no other, in every chain view."""
+    ds = dash.desk_surface
+    data, newest = chain_view["data"], chain_view["newest"]
+    works = _tight(" ".join(_visible_text("<body>" + it) for it in _findings(chain_view["pages"]["/"])[0][2]))
+    if newest not in _gaps_by_session(data):
+        assert "VIX replicated from the stored chain" not in works
+        return
+    book = _book_by_clock(_chain_of(data, newest), newest)
+    for b, sentence in ds.BOOK_BUILT.items():
+        assert (f"{sentence}." in works) is (b == book), (b, works)
+
+
+def _replication_row(html: str) -> tuple[str, str]:
+    """(status, row html) of Model Risk's VIX-replication check."""
+    return next((st, body) for i, st, body in _monitor_rows(html) if i == "check-vix-rep-gap")
+
+
+def _check_replication_row(dash, data: Path, html: str) -> dict:
+    """Model Risk's VIX-replication check against the record in ``data``: it names the
+    book of the session Surface shows (_book_by_clock); its history is the sessions of
+    that book alone, each dot its session's signed gap, with today's rank among them;
+    its limits apply to a closing book's gap only: on another book it is informational,
+    with no bullet, and its dots are not coloured by the limits. Returns what it read."""
+    ds = dash.desk_surface
+    newest = dash.artifacts.surface_sessions(data)[-1]
+    gaps = _gaps_by_session(data)
+    book = _book_by_clock(_chain_of(data, newest), newest)
+    st, body = _replication_row(html)
+    text = _tight(_visible_text("<body>" + body))
+    for b, sentence in ds.BOOK_BUILT.items():
+        assert (f"{sentence}." in text) is (b == book), (b, text)
+    assert f"History and rank: {ds.BOOK_SESSIONS[book]} only." in text
+    same = [s_ for s_ in sorted(gaps) if _book_by_clock(_chain_of(data, s_), s_) == book]
+    dots = re.findall(r'<circle class="h-(\w+)"[^>]*data-chain="surface:([\d-]+)"', body)
+    gap = gaps.get(newest)
+    lim = dash.MONITOR_LIMITS["vix_rep_gap"]
+    closing = book == ds.BOOK_CLOSING
+    if gap is None:
+        assert st == "na"
+    else:
+        assert st == (dash._rag(abs(gap), lim) if closing else "info"), (book, st)
+        assert ('class="bullet"' in body) is closing
+        assert ("limits apply to a closing book’s gap only" in text) is not closing
+        assert ("The limits apply to a closing book’s gap only, so this gap is informational." in text) \
+            is not closing
+    if len(same) < 2:
+        assert dots == [], (book, dots)
+    else:
+        assert [s_ for _, s_ in dots] == same, (book, dots)
+        assert [c for c, _ in dots] == [dash._rag(abs(gaps[s_]), lim) if closing else "info" for s_ in same]
+        ranked = dash.desk_monitor.history_view([(s_, gaps[s_]) for s_ in same], lim, two_sided=True)
+        assert ranked["range"] in text
+        if gap is not None:
+            assert f"rank today: {ranked['rank']}" in text
+    return {"book": book, "same": same, "status": st, "dots": dots}
+
+
+def test_model_risk_ranks_a_vix_gap_among_the_sessions_of_its_book(dash, chain_view):
+    """w5 review, major 3: Model Risk's VIX-replication check (V2) ranked and ranged
+    today's gap over every stored session and applied one set of limits whatever book
+    each gap was taken on: '4th of 11' over −0.78 to +1.25, an overnight book's +1.25
+    marked 'watch' as 'a thin or stale strip', when an overnight gap also holds the
+    market's move overnight. It now names its book, ranks and ranges over the sessions of
+    that book only, and applies its limits to a closing book's gap only, in every chain
+    view (_check_replication_row)."""
+    got = _check_replication_row(dash, chain_view["data"], chain_view["pages"]["/model-risk"])
+    if chain_view["vendor"] == "yahoo":
+        assert got["status"] in ("info", "na")
+
+
+def test_model_risk_colours_closing_book_gaps_by_its_limits(dash, tmp_path):
+    """The closing-book side of the check above: with the session before the newest
+    relabelled a closing book (_as_vendor), the history holds the closing-book sessions
+    alone, those two among them and any other the record holds, coloured by the limits
+    and ranked among them; the overnight books and Yahoo chains are left out
+    (_check_replication_row reads each session's book by the clock)."""
+    sessions = dash.artifacts.surface_sessions(SHIPPED)
+    newest = sessions[-1]
+    sj = json.loads((SHIPPED / "surface" / newest / "surface.json").read_text())
+    if _book_by_clock(sj, newest) != "closing":
+        pytest.skip(f"the newest surface session {newest} is not a closing book")
+    gaps = _gaps_by_session(SHIPPED)
+    earlier = [s_ for s_ in sessions[:-1] if s_ in gaps and s_ < newest]
+    if not earlier:
+        pytest.skip("no earlier surface session replicates the VIX")
+    other = earlier[-1]
+    data = tmp_path / "data_store"
+    data.mkdir()
+    for child in SHIPPED.iterdir():
+        if child.name != "surface":
+            (data / child.name).symlink_to(child)
+    (data / "surface").mkdir()
+    for child in (SHIPPED / "surface").iterdir():
+        if child.name != other:
+            (data / "surface" / child.name).symlink_to(child)
+    shutil.copytree(SHIPPED / "surface" / other, data / "surface" / other)
+    rec = _as_vendor(json.loads((SHIPPED / "surface" / other / "surface.json").read_text()), "cboe", other)
+    (data / "surface" / other / "surface.json").write_text(json.dumps(rec))
+    (tmp_path / "db").mkdir()
+    with pytest.MonkeyPatch.context() as mp, contextlib.ExitStack() as stack:
+        mp.setattr(dash, "DATA", data)
+        stack.enter_context(dash.record_db(scratch_dir=tmp_path / "db"))
+        mp.setattr(dash, "_CHROME_CACHE", {})
+        r = dash.app.test_client().get("/model-risk")
+        assert r.status_code == 200
+        html = r.get_data(as_text=True)
+    got = _check_replication_row(dash, data, html)
+    assert got["book"] == "closing"
+    assert other in got["same"], got["same"]
+    assert got["same"][-1] == newest, got["same"]
+    assert [s_ for _, s_ in got["dots"]] == got["same"]
 
 
 def test_smile_series_hold_no_raw_series_name_in_their_legend(pages):
@@ -11819,6 +12926,81 @@ def test_the_recompute_audit_fails_on_one_wrong_digit(recompute_audit, frozen_si
     assert ("ticker", "1M ATMF (SVI-cal, 30 days), %") in failed
 
 
+
+def test_the_recompute_audit_fails_on_a_wrong_chain(recompute_audit, frozen_site, tmp_path):
+    """Tier 0.2: the chain each Surface panel, the Surface history's rows, the
+    comparison's captions and the Overview's surface line name is recomputed from the
+    session's surface.json by the audit's own code, and each Cboe book the Overview's
+    pipeline panel names from its record and stored quotes. In a copy of the frozen
+    site, the delta grid's source line, the history's first Chain cell, the first
+    compared session's chain and the surface line's chain each name another chain,
+    and the smile panel's source line and the pipeline's first book another two-sided
+    share; each is reported as a mismatch."""
+    site = tmp_path / "site"
+    shutil.copytree(frozen_site, site)
+
+    def other(text: str) -> str:            # a chain other than the one printed
+        return ("Yahoo Finance close snapshot, no quote time" if "Yahoo Finance close snapshot" not in text
+                else "Cboe, quotes at 2026-01-02 21:14 UTC")
+    sf = site / "surface.html"
+    html = sf.read_text(encoding="utf-8")
+    foot = re.search(r'(<div class="panel-foot src-foot" id="delta-grid-chain">)(.*?)(</div>)', html,
+                     re.DOTALL)
+    assert foot
+    html = html[:foot.start(2)] + "Chain: " + other(foot.group(2)).replace(", ", " · ") + html[foot.end(2):]
+    row = re.search(r'id="surface-history-table".*?<tbody><tr[^>]*><td class="nowrap">[^<]*</td>'
+                    r'<td>([^<]*)</td>', html, re.DOTALL)
+    assert row
+    html = (html[:row.start(1)] + ("Yahoo close, no quote time" if not row.group(1).startswith("Yahoo close")
+                                   else "Cboe, quotes at 2026-01-02 21:14 UTC") + html[row.end(1):])
+    cap = re.search(r'id="vs-table-[\d-]+">\s*<caption[^>]*><strong class="vs-head">.*?</strong> \(([^)]*)\)',
+                    html, re.DOTALL)
+    assert cap
+    html = html[:cap.start(1)] + other(cap.group(1)) + html[cap.end(1):]
+    sf.write_text(html, encoding="utf-8")
+    ov = site / "index.html"
+    html = ov.read_text(encoding="utf-8")
+    line = re.search(r'id="surface-line"[^>]*>.*?; ([^)]*)\)', html, re.DOTALL)
+    assert line
+    ov.write_text(html[:line.start(1)] + other(line.group(1)) + html[line.end(1):], encoding="utf-8")
+    # the smile panel's source line with another two-sided share (its chain otherwise right)
+    html = sf.read_text(encoding="utf-8")
+    share = re.search(r'id="slices-chain">.*?(\d+\.\d% two-sided near the money'
+                      r'|two-sided share not recorded)', html, re.DOTALL)
+    assert share
+    wrong = ("12.3% two-sided near the money" if not share.group(1).startswith("12.3")
+             else "45.6% two-sided near the money")
+    sf.write_text(html[:share.start(1)] + wrong + html[share.end(1):], encoding="utf-8")
+    # the scorecard's fit chain line, where the record calls for one, with another share
+    html = sf.read_text(encoding="utf-8")
+    fit_line = re.search(r'id="scorecard-chain-2">.*?(\d+\.\d% two-sided near the money'
+                         r'|two-sided share not recorded)', html, re.DOTALL)
+    if fit_line:
+        sf.write_text(html[:fit_line.start(1)] + ("12.3% two-sided near the money" if not fit_line.group(1)
+                      .startswith("12.3") else "45.6% two-sided near the money") + html[fit_line.end(1):],
+                      encoding="utf-8")
+    # the Overview pipeline's first book with another two-sided share of its lines (tier 0.8's books)
+    html = ov.read_text(encoding="utf-8")
+    bs = re.search(r'data-chain="book:[^"]+">[^<]*?(\d+\.\d)% of its lines two-sided', html)
+    assert bs
+    ov.write_text(html[:bs.start(1)] + ("12.3" if bs.group(1) != "12.3" else "45.6") + html[bs.end(1):],
+                  encoding="utf-8")
+    res = recompute_audit.run(site, SHIPPED)
+    failed = {(c.page, c.panel, c.label) for c in res["checks"] if not c.ok}
+    assert ("Surface", "panel source lines", "#delta-grid source line") in failed
+    assert ("Surface", "panel source lines", "#slices source line") in failed
+    assert (("Surface", "panel source lines", "#scorecard fit chain line (the fit's own record)") in failed) \
+        is bool(fit_line)
+    assert any(pg == "Overview" and p == "pipeline" and lab.endswith("book 1: its chain (tier 0.2)")
+               for pg, p, lab in failed), sorted(x for x in failed if x[0] == "Overview")
+    assert any(p == "#surface-history" and lab.endswith("chain (its surface.json inputs)")
+               for _, p, lab in failed)
+    assert any(p == "#surface-change" and lab.endswith("its chain (surface.json inputs)")
+               for _, p, lab in failed)
+    assert ("Overview", "headline fit", "surface line: its chain (surface.json inputs): says '; "
+            + re.search(r'id="surface-line"[^>]*>.*?; ([^)]*)\)', (frozen_site / "index.html").read_text(
+                encoding="utf-8"), re.DOTALL).group(1) + ")'") in failed
+
 def test_the_audit_leaves_out_a_scorecard_model_the_producer_marks_unavailable(recompute_audit, tmp_path):
     """A session whose Heston fit was rejected stores Heston in its scorecard as
     {available: false, reason} with no metrics (the Cboe-rebuilt 2026-10-20 does).
@@ -11990,12 +13172,22 @@ def test_the_audit_checks_the_data_file_for_every_reader_and_typed_readout_numbe
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):
     """T11: every dot of the VIX-replication check's history is the signed gap
     (replicated − Cboe close) of its session's vix_replication.json, not |gap|;
-    the limit check still applies to the size."""
+    the limit check still applies to the size. The history is over the stored sessions
+    of the newest surface's book alone (V2 ranks a gap among the sessions of its book),
+    so it is missing exactly when fewer than two of those replicate the VIX."""
     d = dash.load_model_risk()
     row = next(m for m in d["monitors"] if m["key"] == "vix_rep_gap")
     h = row["history"]
     if h is None:
-        pytest.skip("fewer than two stored surface sessions replicate the VIX")
+        stored = dash.artifacts.surface_sessions(SHIPPED)
+        book = _book_by_clock(_chain_of(SHIPPED, stored[-1]), stored[-1])
+        same = [s_ for s_ in _gaps_by_session(SHIPPED)
+                if s_ in stored and _book_by_clock(_chain_of(SHIPPED, s_), s_) == book]
+        assert len(same) < 2, (book, same)
+        pytest.skip(f"Model Risk ranks the VIX gap among the "
+                    f"{dash.desk_surface.BOOK_SESSIONS.get(str(book), 'sessions of one book')} alone, and "
+                    f"{len(same)} of them {'replicates' if len(same) == 1 else 'replicate'} the VIX: "
+                    "a history needs two")
     gaps = {}
     for p in sorted((SHIPPED / "surface").glob("*/vix_replication.json")):
         g = json.loads(p.read_text()).get("indices", {}).get("VIX", {}).get("gap_vs_official")
@@ -12003,8 +13195,9 @@ def test_model_risk_vix_gap_history_keeps_the_sign(dash):
             gaps[p.parent.name] = float(g)
     for dot in h["dots"]:
         assert dot["value"] == pytest.approx(gaps[dot["session"]], abs=1e-12)
-        assert dot["status"] == dash.desk_monitor.rag(abs(dot["value"]), dash.MONITOR_LIMITS["vix_rep_gap"])
-    if any(v < 0 for v in gaps.values()):
+        assert dot["status"] == ("info" if row["status"] == "info" else dash.desk_monitor.rag(
+            abs(dot["value"]), dash.MONITOR_LIMITS["vix_rep_gap"]))
+    if any(dot["value"] < 0 for dot in h["dots"]):
         assert "−" in h["range"]
     if row["num"] is not None:                    # None: today's session does not replicate the VIX
         assert row["num"] == pytest.approx(abs(row["num"]))      # today's limit check: the size
@@ -12130,13 +13323,17 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
     later = {"inputs": {"source": "yfinance", "quote_time": None, "fetched_at": "2026-10-28T08:50:33Z",
                         "t_origin_basis": "session close 16:00 ET"}}
     assert dash.chain_source(later) == ["Yahoo Finance download", "fetched 2026-10-28 08:50 UTC",
-                                        "Yahoo reports no quote times", "T from the 16:00 ET close"]
+                                        "Yahoo reports no quote times", "T from the 16:00 ET close",
+                                        "two-sided share not recorded"]
     assert dash.chain_sentence(later) == ("a Yahoo Finance download fetched 2026-10-28 08:50 UTC "
-                                          "(Yahoo reports no quote times; T from the 16:00 ET close)")
+                                          "(Yahoo reports no quote times; T from the 16:00 ET close; "
+                                          "two-sided share not recorded)")
     assert dash.chain_source({"inputs": {"source": "yfinance", "t_origin_basis": "session close 16:00 ET"}}) \
-        == ["Yahoo Finance close snapshot", "no quote time"]
-    cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z"}}
-    assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC"]
+        == ["Yahoo Finance close snapshot", "no quote time", "two-sided share not recorded"]
+    cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z",
+                       "near_atm_two_sided_share": 1.0}}
+    assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC",
+                                       "100.0% two-sided near the money"]
     # every page that names a surface session's chain says what it is (the Overview's
     # surface result is the headline fit's session's, the others the newest session's)
     for route in ("/", "/surface", "/model-risk"):

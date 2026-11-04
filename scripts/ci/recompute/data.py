@@ -126,26 +126,79 @@ def chain_words(inputs: dict, universe: dict | None = None) -> tuple[str, str, l
     a download 'fetched …', with where its T runs from ('T measured from the
     fetch' when its T origin was that instant, 'T from the 16:00 ET close' when
     it was the close); one without is a close snapshot with 'no quote time';
-    a Cboe book prints 'quotes at …' its recorded quote time."""
+    a Cboe book prints 'quotes at …' its recorded quote time. The badge parts end
+    with the chain's recorded near-the-money two-sided share ('99.8% two-sided near
+    the money', else 'two-sided share not recorded'; FUND_GRADE_PLAN 0.2)."""
     uni = universe or {}
     src = str(inputs.get("source") or uni.get("source") or "").strip().lower()
     if not src:
         return None
+    raw = inputs.get("near_atm_two_sided_share")
+    raw = uni.get("near_atm_two_sided_share") if raw is None else raw
+    share = (f"{float(raw) * 100:.1f}% two-sided near the money" if raw is not None
+             else "two-sided share not recorded")
     qt = inputs.get("quote_time") or uni.get("quote_time")
     if src in ("yfinance", "yahoo"):
         fetched = qt or inputs.get("fetched_at") or uni.get("fetched_at")
         if not fetched:
-            return "Yahoo Finance close snapshot", "no quote time", ["no quote time"]
+            return "Yahoo Finance close snapshot", "no quote time", ["no quote time", share]
         parts = [f"fetched {_utc_minutes(fetched)}", "Yahoo reports no quote times"]
         basis = str(inputs.get("t_origin_basis") or uni.get("t_origin_basis") or "")
         if qt and basis.startswith("quote_time"):
             parts.append("T measured from the fetch")
         elif basis.startswith("session close"):
             parts.append("T from the 16:00 ET close")
-        return "Yahoo Finance download", f"{parts[0]}; {', '.join(parts[1:])}", parts
+        return "Yahoo Finance download", f"{parts[0]}; {', '.join(parts[1:])}", [*parts, share]
     name = "Cboe" if src == "cboe" else src
     clause = f"quotes at {_utc_minutes(qt)}" if qt else "no quote time"
-    return name, clause, [clause]
+    return name, clause, [clause, share]
+
+
+# chain_words' names in the short form a table cell uses ('Cboe' stays 'Cboe')
+SHORT_NAMES = {"Yahoo Finance download": "Yahoo download", "Yahoo Finance close snapshot": "Yahoo close"}
+
+
+def chain_stamp(inputs: dict, universe: dict | None = None) -> str | None:
+    """'Cboe, quotes at 2026-10-30 23:49 UTC': the chain's name and its quote-time
+    clause (the first badge part), as a page sentence or row names the chain (tier 0.2)."""
+    w = chain_words(inputs, universe)
+    return f"{w[0]}, {w[2][0]}, {w[2][-1]}" if w else None
+
+
+def chain_short(inputs: dict, universe: dict | None = None) -> str | None:
+    """'Cboe', 'Yahoo download' or 'Yahoo close' and the quote-time clause: a table
+    cell naming a session's chain ('Cboe, quotes at 2026-10-30 23:49 UTC')."""
+    w = chain_words(inputs, universe)
+    return f"{SHORT_NAMES.get(w[0], w[0])}, {w[2][0]}, {w[2][-1]}" if w else None
+
+
+def book_short(quote_time: Any, rows: Any, two_sided_rows: Any) -> str:
+    """'Cboe, quotes at 2026-10-30 23:49 UTC, 98.2% of its lines two-sided': a stored
+    Cboe book as the Overview's pipeline panel names it (tier 0.2), its two-sided share
+    from its lines (a book's record holds no near-the-money share)."""
+    share = (f"{float(two_sided_rows) / float(rows) * 100:.1f}% of its lines two-sided"
+             if rows and two_sided_rows is not None else "two-sided share not recorded")
+    clause = f"quotes at {_utc_minutes(quote_time)}" if quote_time else "no quote time"
+    return f"Cboe, {clause}, {share}"
+
+
+def fit_chain_inputs(store: Store, cal: dict, session: str) -> dict:
+    """The chain a joint fit was made on, as chain_words reads a surface's inputs: the
+    fit's own chain_diagnostics (vendor, quote or fetch time, where T runs from), its
+    vendor else the one source of the stored chain it was fitted on
+    (options/spx_<spx_snapshot_session or session>.parquet)."""
+    raw = cal.get("chain_diagnostics")
+    diag: dict = raw if isinstance(raw, dict) else {}
+    src = diag.get("source")
+    if not src:
+        snap = str(cal.get("spx_snapshot_session") or session)[:10]
+        path = store.root / "options" / f"spx_{snap}.parquet"
+        if path.exists():
+            col = pd.read_parquet(path, columns=["source"])["source"].dropna().astype(str).unique()
+            src = col[0] if len(col) == 1 else None
+    return {"source": src, "quote_time": diag.get("quote_time"), "fetched_at": diag.get("fetched_at"),
+            "t_origin_basis": diag.get("t_origin_basis"),
+            "near_atm_two_sided_share": diag.get("near_atm_two_sided_share")}
 
 
 def _record(root: Path, table: str) -> pd.DataFrame:

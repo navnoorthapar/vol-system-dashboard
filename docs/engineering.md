@@ -14,7 +14,7 @@ review round's fixes, 2026-10-21). Counts are from those days; the gates keep th
 | `a11y` | axe-core 4.13.0 in Playwright 1.63.0 Chromium over the frozen site | any WCAG 2.0/2.1/2.2 A/AA violation at 1440 or 390 px in either colour scheme; horizontal scroll at 320–1920 px; a JS error; a request to another origin |
 | `audit` | pip-audit 2.10.1 (installed from the hashed `scripts/ci/pip_audit_lock.txt`) on every pin of `requirements-lock.txt` at its public version, through `scripts/ci/pip_audit_gate.py` | an advisory with no entry in `scripts/ci/pip_audit_allowlist.json` (id or alias, package, a reason, an expiry at most 180 days ahead); an expired or malformed entry; no report after four attempts (an unreachable advisory service fails, never passes) |
 | `mutation` | `make mutation` (weekly and on demand); `tests/test_ci_tools.py` checks every mutant's site on each push | a mutant the properties do not kill (other than the documented equivalent); a mutant whose site is no longer unique (stale) |
-| `simulate` | `scripts/ci/simulate_next_session.py --full`: the daily bot's book slot, offline, on a copy of the checkout for the session after the database's last one, then the bot's three gates (read from `daily_refresh.yml`) and the full suite in that copy. The book is priced by parameters moved off the headline (κ × 0.6, θ × 1.2, σ × 0.7 below 1.9, ρ + 0.1, v₀ × 1.3) plus about 1 vol point of parity-preserving smile noise, and the job fails unless every fitted parameter moves at least 5%; the Cboe capture is replayed, then the forward ledger and every derived artifact | the simulated session not accepted or not recorded; any gate or suite failure, i.e. a test that pins a value the bot replaces (the 2026-10-20 incident class). What it does not catch: pins on features of real chains that a synthetic constant-carry Heston book does not reproduce |
+| `simulate` | `scripts/ci/simulate_next_session.py --full`: the daily bot's close slot and book slot, offline, on a copy of the checkout for the session after the database's last one, then the bot's three gates (read from `daily_refresh.yml`) and the full suite in that copy. The close slot runs the steps the workflow gives it (market data, labels and the closebook step) at 18:07 ET; the book slot runs at 22:30 ET. The Yahoo book is priced by parameters moved off the headline (κ × 0.6, θ × 1.2, σ × 0.7 below 1.9, ρ + 0.1, v₀ × 1.3) plus about 1 vol point of parity-preserving smile noise, and the job fails unless every fitted parameter moves at least 2%. The newest committed Cboe book is replayed as the book each slot's feed shows: the closing book for the close slot, and for the book slot the overnight book after a Monday–Thursday session or, after a Friday, the closing book already stored. Then the forward ledger and every derived artifact | the simulated session not accepted or not recorded; the close slot storing no closing book, the book slot not capturing the overnight book (or, after a Friday, not finding the closing one), the forward ledger not trading on the book slot's book, or the surface not built from the closing book; a run record missing or not the run's; any gate or suite failure, i.e. a test that pins a value the bot replaces (the 2026-10-20 incident class). What it does not catch: pins on features of real chains that a synthetic constant-carry Heston book does not reproduce |
 
 `make reproduce` (an artifact outside its tolerance fails; docs/reproduce.md) runs weekly and on demand in its own
 workflow, `.github/workflows/reproduce.yml`, which commits its result to `data_store/reproduce/status.json` (shown on
@@ -142,15 +142,19 @@ since the published site is static files.
 Since FUND_GRADE_PLAN 0.6 the `audit` job is a gate (`scripts/ci/pip_audit_gate.py`). It audits every pin at its public
 version (torch as `2.14.0`, so the CPU build is audited too) and fails on any advisory that
 `scripts/ci/pip_audit_allowlist.json` does not cover with a reason and an expiry. Its first run (2026-10-28) found 44
-advisories (43 distinct) in four packages; each is an allowlist entry with its reason. The pins were left unchanged
-(the change added the hashes only):
+advisories (43 distinct) in four packages, and its first CI run ten more published since (nine in filelock, one in
+Pillow). The pins were left unchanged (the change added the hashes only). The allowlist now holds 52 entries, one per
+advisory, each with its own reason and an expiry, in three packages:
 
-| Package | Locked | Advisories | Fixed in | Why allowed, until |
+| Package | Locked | Advisories allowed | Fixed in | Why allowed, until |
 |---|---|---|---|---|
-| certifi | 2026.2.25 | PYSEC-2026-4320 (a root whose intermediates were compromised) | 2026.10.18 | applies to the bot's downloads; the fix is inside the 14-day cooldown until 2026-11-01; bump it then (entry expires 2026-11-08) |
-| pillow | 12.3.0 | 39 (decoders, TIFF/PDF/EPS writers) | 13.0.0 | nothing here opens or decodes an image; matplotlib only writes the repo's own figures (2026-12-31) |
-| filelock | 3.32.3 | 3 (ReadWriteLock, soft locks; two Windows only) | 4.2.1 | torch dependency; nothing here uses those locks (2026-12-31) |
-| setuptools | 84.0.0 | GHSA-xmj3-9gf7-h52w (Windows legacy egg install) | 84.1.0 | torch dependency; Linux runners, pip installs (2026-12-31) |
+| pillow | 12.3.0 | 39 (decoders, TIFF/PDF/EPS writers, lossless JPEG with draft()) | 13.0.0 | nothing here opens or decodes an image; matplotlib only writes the repo's own figures (2026-12-31) |
+| filelock | 3.32.3 | 12 (ReadWriteLock, soft and Unix lock files; each needs another local user, a second process on the same soft lock, or Windows) | 4.0.9 and 4.2.1 | torch dependency; nothing here imports it or calls the torch paths that lock files, and CI and the bot run on single-user Linux runners (2026-12-31) |
+| setuptools | 84.0.0 | 1 (GHSA-xmj3-9gf7-h52w, Windows legacy egg install) | 84.1.0 | torch dependency; Linux runners, pip installs (2026-12-31) |
+
+certifi is no longer on it. Its one advisory, PYSEC-2026-4320 in 2026.2.25 (a root whose intermediates were
+compromised), applied to the bot's downloads; it was allowed while the fix was inside the 14-day release cooldown, then
+certifi was bumped to 2026.10.18 on 2026-11-01 (requirements.txt floors it) and the entry removed.
 
 ## Licences
 

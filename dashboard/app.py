@@ -2016,6 +2016,14 @@ def load_page3() -> dict[str, Any]:
                     for k in ("kappa", "theta", "sigma", "rho", "v0"))
             except Exception as exc:
                 _logger.info("headline comparison unavailable: %s", exc)
+        # the chain the source fit was made on (tier 0.2): the Greeks are that fit's
+        d["fit_chain_stamp"] = None
+        src_file = DATA / "calibrations" / str(prov.get("source_calibration") or "")
+        if prov.get("source_calibration") and src_file.is_file():
+            with _loader_boundary(d, f"the Greeks' source fit ({src_file.name})"):
+                scal = _load_pickle(src_file)
+                d["fit_chain_stamp"] = chain_stamp(
+                    fit_chain_record(scal, _calibration_session(scal, src_file)))
         surface_date = _date_str(prov.get("spot_date")) or d["as_of"]
         ref = _latest_market_session()
         item = _staleness("greeks", "Greeks surface", surface_date, ref)
@@ -2352,11 +2360,15 @@ def beta_estimation(regimes: pd.Series | None = None) -> dict:
         role = ("estimation" if status.startswith("included") else
                 "later" if status.startswith("out-of-sample") else "excluded")
         session = _date_str(r.get("session")) or str(r.get("source") or "")
+        # the stored chain the ratio is read off ('options_snapshots:<snapshot date>'),
+        # its data-chain key: the record's own source and quote time name it (tier 0.2)
+        snap = str(r.get("source") or "").rpartition(":")[2]
         chains.append({"kind": "DB chain", "session": session, "ratio": _num(r.get("ratio")),
-                       "role": role, "status": status, "regime": regime_on(session)})
+                       "role": role, "status": status, "regime": regime_on(session),
+                       "key": f"options:{snap}"})
     chains.append({"kind": "live capture", "session": str(live["as_of_et"])[:16] + " ET",
                    "ratio": _num(live["ratio_full_chain"]), "role": "estimation",
-                   "status": str(live.get("note") or ""), "regime": None})
+                   "status": str(live.get("note") or ""), "regime": None, "key": "live"})
     est = [c for c in chains if c["role"] == "estimation" and c["ratio"] is not None]
     later = [c for c in chains if c["role"] == "later" and c["ratio"] is not None]
     missing = sorted(set(BETA_ESTIMATION_SESSIONS)
@@ -2365,8 +2377,14 @@ def beta_estimation(regimes: pd.Series | None = None) -> dict:
         raise ValueError("β estimation chain(s) missing or excluded: " + ", ".join(missing))
     r_est = [c["ratio"] for c in est]
     r_all = r_est + [c["ratio"] for c in later]
+    # the chains each aggregate is taken over, by key (each named in a row of Research's
+    # #beta-chains: tier 0.2), and the sessions they span
+    days = sorted(str(c["session"])[:10] for c in est + later)
     return {
         "chains": chains, "later": later,
+        "est_keys": " ".join(str(c["key"]) for c in est),
+        "over_keys": " ".join(str(c["key"]) for c in est + later),
+        "over_first": days[0], "over_last": days[-1],
         "n_db": sum(1 for c in est if c["kind"] == "DB chain"),
         "n_live": sum(1 for c in est if c["kind"] == "live capture"),
         "mean": float(np.mean(r_est)), "lo": float(min(r_est)), "hi": float(max(r_est)),
@@ -3542,6 +3560,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
         fit_chain = None
     d["chain_badge"] = chain_badge(fit_chain) if fit_chain else None
     d["chain_sentence"] = chain_sentence(fit_chain) if fit_chain else None
+    d["fit_chain_stamp"] = chain_stamp(fit_chain) if fit_chain else None
+    d["fit_chain_foot"] = chain_foot(fit_chain, "Fit chain") if fit_chain else None
     own_chain = next((s for s in desk_inputs if s["session"] == session), None)
     d["smile_book"] = None
     if own_chain and not same_chain(fit_chain, own_chain["surface"]):
@@ -3748,6 +3768,10 @@ def calibration_extras(d: dict, cal: dict) -> None:
         d["smiles"].append({
             "expiry": exp, "T_days": T_days, "n": a.get("n"), "source": source, "note": note,
             "badge": badge, "note_short": note_short, "k_range": k_rng, "y_range": y_rng,
+            # its source line: the book its quotes come from, else the chain the fit was made on
+            "src": (chain_foot(surf.get("surface"), "Quotes") if source == "quotes"
+                    else d.get("fit_chain_foot")),
+            "chain": f"surface:{session}" if source == "quotes" else f"fit:{session}",
             "spec": charts.xy(
                 f"chart-smile-{exp}", f"Smile {exp} ({_fmt(T_days, '.0f')} days)",
                 x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True, "label": "k"},
@@ -4571,10 +4595,13 @@ def vrp_view(spx: pd.DataFrame, vix: pd.Series, start: str | None, end: str | No
     if beta_bt is not None:
         betas.append((round(beta_bt, 2), "the backtest's mark"))
     betas.append((VRP_REFERENCE_BETA, "round reference"))
+    chain_of_row: dict[float, str] = {}
     if newest_chain:
-        betas.append((round(float(newest_chain["ratio"]), 2),
+        b_new = round(float(newest_chain["ratio"]), 2)
+        betas.append((b_new,
                       (f"newest chain's ATM / VIX ({newest_chain['session']}: "
-                       f"{_fmt(newest_chain['ratio'], '.3f')})")))
+                       f"{_fmt(newest_chain['ratio'], '.3f')}; chain: {key_stamp(newest_chain['key'])})")))
+        chain_of_row[b_new] = newest_chain["key"]
     seen: set = set()
     rows = []
     for b, why in betas:
@@ -4583,7 +4610,7 @@ def vrp_view(spx: pd.DataFrame, vix: pd.Series, start: str | None, end: str | No
         seen.add(b)
         st = desk_market.vrp_stats(f["vix"], f["rv_fwd"], b, start, end)
         if st:
-            rows.append({**st, "why": why,
+            rows.append({**st, "why": why, "chain": chain_of_row.get(b) if why.startswith("newest") else None,
                          "backtest": beta_bt is not None and abs(b - round(beta_bt, 2)) < 1e-9})
     full = desk_market.vrp_stats(f["vix"], f["rv_fwd"], 1.0)
     b_bt = round(beta_bt, 2) if beta_bt is not None else None
@@ -4939,7 +4966,7 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
         held = ("alternate strikes held out" if str(fit_in.get("rule") or "").startswith("alternate strikes")
                 else "held-out strikes")
         pv = chain_provenance({"inputs": fit_in})
-        snap = f" {pv['name']}, {pv['time']}." if pv else ""
+        snap = f" {pv['name']}, {pv['time']}, {pv['share']}." if pv else ""
         out.append({
             "key": f"Arbitrage-free SVI surface · {held}",
             "value": _fmt(sr["median_abs_hs"], ".2f"), "unit": "half-spreads",
@@ -4958,14 +4985,16 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
             "ci_kind": "range",
             "ci_note": ("A range across sessions, not a sampling interval. Held-out strikes sit between "
                         "fitted ones (an interpolation test)."),
-            "href": "surface.html#scorecard", "source": f"data_store/surface/{sr['session']}/scorecard.json"})
+            "href": "surface.html#scorecard", "source": f"data_store/surface/{sr['session']}/scorecard.json",
+            "chain": f"surface:{sr['session']}"})
     else:
         out.append({"key": "Arbitrage-free SVI surface · held-out strikes", "value": "—", "unit": "",
                     "detail": "The surface report has not run for any stored session, so no model is scored "
                               "in half-spreads yet.",
                     "ci": None, "ci_note": "needs data_store/surface/<session>/scorecard.json "
                                            "(scripts/surface_report.py), not yet generated",
-                    "href": "surface.html", "source": "data_store/surface/<session>/scorecard.json"})
+                    "href": "surface.html", "source": "data_store/surface/<session>/scorecard.json",
+                    "chain": "none"})
     # 2. the joint SPX/VIX fit out of sample: Heston against rough Heston
     jr = joint_fit_result(diag, p2.get("session"))
     if jr:
@@ -4973,6 +5002,8 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
         side = {"floor": " on its floor", "ceiling": " (= Heston)"}.get(jr["rough_H_side"] or "", "")
         h_txt = f"H {_fmt(jr['rough_H'], '.2f')}{side}" if jr["rough_H"] is not None else "H —"
         n_txt = f"the {_fmt(p2.get('n_oos'), ',')}" if p2.get("session") == jr["session"] else "the"
+        # the chain that session's fit was made on (tier 0.2)
+        stamp = key_stamp(f"fit:{jr['session']}")
         out.append({
             "key": "Joint SPX/VIX fit · out of sample",
             "value": _fmt(jr["heston_oos"], ".2f"), "unit": "vol pts, Heston",
@@ -4980,18 +5011,20 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
                        f"indices in the objective{bound}. Rough Heston on the same quotes: "
                        f"{_fmt(jr['rough_oos'], '.2f')} "
                        f"({h_txt}); lower on {jr['n_lower']} of {jr['n_sessions']} sessions, and on "
-                       f"{jr['n_same']} it returns H = ½, i.e. Heston."),
+                       f"{jr['n_same']} it returns H = ½, i.e. Heston. Fit chain: {stamp}."),
             "ci": (f"Range over {jr['n_sessions']} sessions: Heston {jr['heston_range']}, rough Heston "
                    f"{jr['rough_range']} vol pts"
                    + (f"; κ ±{_fmt(jr['kappa_rse'] * 100, '.0f')}% (Gauss–Newton curvature scale)"
                       if jr["kappa_rse"] is not None else "")),
             "ci_kind": "range", "ci_note": None, "href": "calibration.html#rough-vs-heston",
-            "source": "data_store/calibrations/diagnostics/summary.json"})
+            "source": "data_store/calibrations/diagnostics/summary.json", "chain": f"fit:{jr['session']}"})
     elif p2.get("spx_oos_rmse") is not None:
+        head_fit = f"fit:{p2.get('session')}"
         out.append({"key": "Joint SPX/VIX fit · out of sample",
                     "value": _fmt(p2["spx_oos_rmse"], ".2f"), "unit": "vol pts, Heston",
                     "detail": (f"SPX IV RMSE on the {_fmt(p2.get('n_oos'), ',')} quotes outside the fit "
-                               f"({p2.get('session')}), with the four VIX indices in the objective."),
+                               f"({p2.get('session')}), with the four VIX indices in the objective. "
+                               f"Fit chain: {key_stamp(head_fit)}."), "chain": head_fit,
                     "ci": None, "ci_note": ("rough Heston and the range over sessions need the calibration "
                                             "diagnostics (diagnostics/summary.json), not yet generated"),
                     "href": "calibration.html#oos",
@@ -5021,7 +5054,7 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
                                f"{_fmt(ci['hi'], '+.2f')} "
                                f"({ci.get('method') or 'bootstrap'}, {_fmt(ci.get('reps'), ',')} draws)"),
                         "ci_kind": "interval", "ci_note": None, "href": "research.html#inference",
-                        "source": "data_store/backtest/inference/summary.json"})
+                        "source": "data_store/backtest/inference/summary.json", "chain": "none"})
         else:
             p = k.get("s3_null_p")
             out.append({"key": "Signal timing vs random entry",
@@ -5032,7 +5065,8 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
                                    f"{p4.get('start_date', '')[:4]}–{p4.get('end_date', '')[:4]})"),
                         "ci": None,
                         "ci_note": "the bootstrap interval needs the inference artifact, not yet generated",
-                        "href": "research.html#inference", "source": "data_store/backtest/full_results.pkl"})
+                        "href": "research.html#inference", "source": "data_store/backtest/full_results.pkl",
+                        "chain": "none"})
     return out
 
 
@@ -5091,8 +5125,12 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
     fails: list[dict] = []
     nxt: list[dict] = []
 
-    def item(lead: str, href: str, text: str) -> dict:
-        return {"lead": lead, "href": href, "text": text}
+    def item(lead: str, href: str, text: str, chain: str = "none") -> dict:
+        """One finding; ``chain``: the data-chain keys of the chains its numbers are read
+        off, each named at its end ('Chain: …', 'fit chain: …'), or 'none' (tier 0.2)."""
+        if chain != "none":
+            text += " " + chain_sentence_of(chain) + "."
+        return {"lead": lead, "href": href, "text": text, "chain": chain}
     # works: the arbitrage-free surface on held-out strikes, the VIX replication, the gate
     sr = surface_result(surf_oos, p2.get("session"))
     if sr and _num(sr["median_abs_hs"]) is not None:
@@ -5101,7 +5139,7 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
             "Arbitrage-free SVI surface", "surface.html#scorecard",
             f"median {_fmt(sr['median_abs_hs'], '.2f')} half-spreads from the mid, "
             f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask, on the held-out strikes of "
-            f"{sr['session']}{newer}."))
+            f"{sr['session']}{newer}.", f"surface:{sr['session']}"))
         # the replication of the session Surface shows (the newest surface session): no
         # Heston figure sits beside it, and the item links to that page's replication
         try:
@@ -5112,10 +5150,15 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
         vix = indices.get("VIX") or {}
         gap = _num(vix.get("gap_vs_official"))
         if gap is not None:
+            # the book it was built from: a closing book's gap is the replication's own, an
+            # overnight one's also holds the market's move overnight (FUND_GRADE_PLAN 0.8)
+            built = desk_surface.BOOK_BUILT.get(surface_book(rep.get("surface"), rep.get("session")) or "")
             works.append(item(
                 "VIX replicated from the stored chain", "surface.html#vix-replication",
                 f"{signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
-                f"{rep['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."))
+                f"{rep['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."
+                + (f" {built}." if built else ""),
+                f"surface:{rep['session']}"))
     arc = p2.get("archive") or {}
     if arc.get("n_legacy") is not None:
         # The job stores a fit only when it passes the gate, so 'k of k current fits
@@ -5140,7 +5183,7 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
         if vv:
             bits.append(f"VVIX {_fmt(vv['model'], '.0f')} against {_fmt(vv['market'], '.0f')}")
         fails.append(item("One-factor Heston at the short end", "calibration.html#oos",
-                          ", ".join(bits) + f" ({p2.get('session')})."))
+                          ", ".join(bits) + f" ({p2.get('session')}).", f"fit:{p2.get('session')}"))
     # Heston's ATM skew against the market's power law in T (#skew-term): 'works'
     # only when within 10% of the SVI-cal market skew at every listed expiry
     sk = p2.get("skew_term") or {}
@@ -5154,13 +5197,16 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
                 f"{_fmt(abs(f0['svi']), '.2f')} {SKEW_UNIT} at {_fmt(f0['T_days'], '.0f')} d); the market's "
                 f"slope in T is {signed(min(rng), '.2f')} to {signed(max(rng), '.2f')} over "
                 f"{plural(len(rng), 'session')} (SVI-cal, all expiries).")
+        # the market's skew is read off the surface's book, Heston's off the headline fit
+        sk_chain = f"surface:{sk['head']} fit:{p2.get('session')}"
         if cmp_["lo"] >= 0.9 and cmp_["hi"] <= 1.1:
-            works.append(item("Heston's ATM skew matches the market's", "calibration.html#skew-term", text))
+            works.append(item("Heston's ATM skew matches the market's", "calibration.html#skew-term", text,
+                              sk_chain))
         else:
             lead = ("Heston's ATM skew is steeper than the market's" if cmp_["steeper_all"] else
                     "Heston's ATM skew is flatter than the market's" if cmp_["flatter_all"] else
                     "Heston's ATM skew against the market's")
-            fails.append(item(lead, "calibration.html#skew-term", text))
+            fails.append(item(lead, "calibration.html#skew-term", text, sk_chain))
     ci = artifacts.bootstrap_ci(inf, "portfolio", "sharpe") if inf.get("state") == "ok" else None
     k = (p4 or {}).get("kpi") or {}
     if k.get("cum_ret") is not None and ci:
@@ -5196,7 +5242,7 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
         nxt.append(item(
             "Rough Heston in production", "calibration.html#rough-vs-heston",
             f"not adopted: lower out-of-sample error on {jr['n_lower']} of {jr['n_sessions']} sessions, "
-            f"{h_txt}."))
+            f"{h_txt}.", f"fit:{jr['session']}"))
     # the VX futures leg: scored out of sample only, and not at all where none is stored
     vl = p2.get("vx_leg") or {}
     legs = [v["leg"] for v in vl.get("views") or [] if v.get("leg")]
@@ -5224,9 +5270,15 @@ def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
     """The newest stored Cboe book per underlying: the records beside the raw books
     committed here (data_store/options/cboe/*.json) and the manifests of books
     held in the private data repository (data_store/options/cboe_manifest/*.json,
-    cboe_downloader.write_manifest: the same fields, no quotes)."""
+    cboe_downloader.write_manifest: the same fields, no quotes).
+
+    Each carries "books": every stored book of that underlying's newest session,
+    oldest quote first. A weekday session can have two (FUND_GRADE_PLAN 0.8): the
+    closing book the close slot stores and the overnight book the book slot
+    captures after it; the Overview names both, since the session's surface is
+    built from the first and the newest quote is the second's."""
     base = Path(data_dir or DATA) / "options"
-    newest: dict[str, dict] = {}
+    recs: dict[str, list[dict]] = {}
     files = [f for sub in ("cboe", "cboe_manifest") if (base / sub).is_dir()
              for f in sorted((base / sub).glob("*.json"))]
     for f in files:
@@ -5235,10 +5287,14 @@ def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
         except (OSError, ValueError) as exc:
             raise ValueError(f"options/{f.parent.name}/{f.name}: unreadable record ({exc})") from exc
         und = str(rec.get("underlying") or f.name.split("_")[0]).upper()
-        key = (str(rec.get("session")), str(rec.get("quote_time")))
-        if und not in newest or key > (str(newest[und].get("session")), str(newest[und].get("quote_time"))):
-            newest[und] = {**rec, "file": f.name}
-    return [newest[u] for u in sorted(newest)]
+        recs.setdefault(und, []).append({**rec, "file": f.name})
+    out = []
+    for und in sorted(recs):
+        mine = sorted(recs[und], key=lambda r: (str(r.get("session")), str(r.get("quote_time"))))
+        newest = mine[-1]
+        same = [r for r in mine if str(r.get("session")) == str(newest.get("session"))]
+        out.append({**newest, "books": same})
+    return out
 
 
 def deploy_streak(path: Path | None = None) -> dict | None:
@@ -5408,6 +5464,7 @@ def load_overview() -> dict[str, Any]:
                                        "calib_age", "model_version", "oos_rows", "n_oos", "vvix")}
     d["fit"]["tiles"] = p2.get("param_tiles") or []
     d["fit"]["ridge"] = p2.get("ridge")
+    d["fit"]["chain"] = p2.get("fit_chain_stamp")
     p4 = None
     with _loader_boundary(d, "backtest engine results (full_results.pkl)"):
         st = _load_pickle(DATA / "backtest" / "full_results.pkl")
@@ -5501,6 +5558,8 @@ def load_overview() -> dict[str, Any]:
             cm = desk_surface.constant_maturity(
                 desk_surface.delta_grid(surf["surface"], surf["residuals"], surf.get("vix")))
             d["surface_line"] = surface_state_line(cm, surf["session"], _latest_market_session())
+            if d["surface_line"]:
+                d["surface_line"]["chain"] = chain_stamp(surf["surface"])
     return d
 
 
@@ -6117,13 +6176,28 @@ def chain_provenance(surface_json: dict) -> dict | None:
     runs from, never 'quotes at'. A Cboe book records the time of its quotes.
     Keys: vendor ('yahoo', 'cboe' or the raw source), name, short, time (the
     quote-time clause), badge (that clause in parts short enough to set
-    unbroken on a 320 px phone), download (a Yahoo chain with a known fetch
-    instant)."""
+    unbroken on a 320 px phone), share (the near-the-money two-sided share the
+    chain records, near_atm_two_sided_share: '99.8% two-sided near the money',
+    else 'two-sided share not recorded'; FUND_GRADE_PLAN 0.2's third badge
+    part), download (a Yahoo chain with a known fetch instant)."""
     inp = surface_json.get("inputs") or {}
     uni = surface_json.get("universe") or {}
     src = str(inp.get("source") or uni.get("source") or "").strip().lower()
     if not src:
         return None
+    pv = _chain_provenance(inp, uni, src)
+    sh = _num(inp.get("near_atm_two_sided_share"))
+    sh = _num(uni.get("near_atm_two_sided_share")) if sh is None else sh
+    # a stored Cboe book's record (book_chain_record) holds its lines and two-sided
+    # lines, not the near-the-money share its quote-state gate reads
+    rows, two = _num(inp.get("book_rows")), _num(inp.get("book_two_sided_rows"))
+    pv["share"] = (f"{_fmt(sh * 100, '.1f')}% two-sided near the money" if sh is not None
+                   else f"{_fmt(two / rows * 100, '.1f')}% of its lines two-sided" if rows and two is not None
+                   else "two-sided share not recorded")
+    return pv
+
+
+def _chain_provenance(inp: dict, uni: dict, src: str) -> dict:
     qt = inp.get("quote_time") or uni.get("quote_time")
     if src in YAHOO:
         fetched = qt or inp.get("fetched_at") or uni.get("fetched_at")
@@ -6143,9 +6217,10 @@ def chain_provenance(surface_json: dict) -> dict | None:
 
 
 def _chain_clause(surface_json: dict) -> str:
-    """'Yahoo Finance close snapshot, no quote time' (chain_provenance), for a note."""
+    """'Yahoo Finance close snapshot, no quote time, two-sided share not recorded'
+    (chain_provenance), for a note."""
     pv = chain_provenance(surface_json)
-    return f"{pv['name']}, {pv['time']}" if pv else "chain source not recorded"
+    return f"{pv['name']}, {pv['time']}, {pv['share']}" if pv else "chain source not recorded"
 
 
 def chain_sentence(surface_json: dict) -> str:
@@ -6157,18 +6232,231 @@ def chain_sentence(surface_json: dict) -> str:
         return "a chain whose source is not recorded"
     if pv["download"]:
         when, _, rest = pv["time"].partition("; ")
-        return f"a {pv['name']} {when} ({rest.replace(', ', '; ')})"
+        return f"a {pv['name']} {when} ({rest.replace(', ', '; ')}; {pv['share']})"
     if pv["time"] == "no quote time":
-        return f"a {pv['name']} with no quote time"
+        return f"a {pv['name']} with no quote time ({pv['share']})"
     if pv["vendor"] == "cboe":
-        return f"a {pv['name']} book with {pv['time']}"
-    return f"a {pv['name']}, {pv['time']}"
+        return f"a {pv['name']} book with {pv['time']} ({pv['share']})"
+    return f"a {pv['name']}, {pv['time']} ({pv['share']})"
 
 
 def chain_source(surface_json: dict) -> list[str] | None:
-    """['Yahoo Finance close snapshot', 'no quote time'] from surface.json inputs and universe."""
+    """['Yahoo Finance close snapshot', 'no quote time', 'two-sided share not recorded']
+    from surface.json inputs and universe: the name, the quote-time clause's parts and
+    the two-sided share."""
     pv = chain_provenance(surface_json)
-    return [pv["name"], *pv["badge"]] if pv else None
+    return [pv["name"], *pv["badge"], pv["share"]] if pv else None
+
+
+# Tier 0.2: every number read off a session's quote chain carries that chain's
+# source and quote time where it is shown (in its panel, row or sentence), not
+# only in the page's badge: a panel linked to on its own, a Model Risk row or an
+# Overview line was read without it. test_dashboard.py enumerates them.
+def surface_book(surface_json: Mapping | None, session: str | None) -> str | None:
+    """The book (desk_surface.BOOK_*) a stored session's surface, and so its VIX
+    replication, was built from, by its surface.json record: a Cboe book by the
+    state its capture recorded; a Yahoo chain by the instant it was downloaded
+    (desk_surface.yahoo_fetch_instant), classified as a Cboe book's quote time is
+    (cboe_downloader.book_state_at), so a download fetched in the next session's
+    overnight hours is an overnight download, not a close snapshot. None when the
+    record names no source."""
+    sj = surface_json or {}
+    inp, uni = sj.get("inputs") or {}, sj.get("universe") or {}
+    at = desk_surface.yahoo_fetch_instant(inp, uni)
+    state = None
+    if at and session:
+        from joint_vol_calibration.data import cboe_downloader as cd
+        state = cd.book_state_at(pd.Timestamp(at).to_pydatetime(), session)
+    return desk_surface.replication_book({**inp, "source": inp.get("source") or uni.get("source")}, state)
+
+
+def chain_stamp(surface_json: dict | None) -> str | None:
+    """'Cboe, quotes at 2026-10-30 23:49 UTC, 100.0% two-sided near the money',
+    'Yahoo Finance download, fetched 2026-10-30 08:51 UTC, two-sided share not
+    recorded': the chain's name, quote-time clause and two-sided share, for a sentence."""
+    pv = chain_provenance(surface_json or {})
+    return f"{pv['name']}, {pv['badge'][0]}, {pv['share']}" if pv else None
+
+
+def chain_foot(surface_json: dict | None, label: str = "Chain") -> list[str] | None:
+    """['Chain: Cboe', 'quotes at 2026-10-30 23:49 UTC']: a panel's source line, the
+    chain badge's parts without its counts (the panel macro's ``src``)."""
+    src = chain_source(surface_json or {})
+    return [f"{label}: {src[0]}", *src[1:]] if src else None
+
+
+def chain_short(surface_json: dict | None) -> str | None:
+    """'Cboe', 'Yahoo download', 'Yahoo close': the chain's short name."""
+    pv = chain_provenance(surface_json or {})
+    return pv["short"] if pv else None
+
+
+def chain_cell(surface_json: dict | None) -> str | None:
+    """'Cboe, quotes at 2026-10-30 23:49 UTC, 100.0% two-sided near the money', 'Yahoo
+    close, no quote time, two-sided share not recorded': a table cell naming a session's
+    chain."""
+    pv = chain_provenance(surface_json or {})
+    return f"{pv['short']}, {pv['badge'][0]}, {pv['share']}" if pv else None
+
+
+def fit_chain_of(session: str | None) -> dict | None:
+    """fit_chain_record of the stored gate-passing fit of ``session``, None without one."""
+    row = next((r for r in scan_calibrations() if r["session"] == session and r["legacy"] is False
+                and r["ok"]), None) if session else None
+    return fit_chain_record(_load_pickle(row["path"]), session) if row else None
+
+
+# Tier 0.2: a page names the chain under each number read off one by a chain key in a
+# data-chain attribute (the panel macro's ``chain``, or a row, caption or dot), which
+# test_dashboard.py resolves on its own and checks against the text beside it:
+#   surface:<session>  the chain the session's surface was built from (surface.json)
+#   fit:<session>      the chain the stored fit joint_cal_<session>.pkl was made on
+#   cal:<file>         the same for a calibration file named directly (the Greeks' source)
+#   options:<session>  the stored chain data_store/options/spx_<session>.parquet, named as the
+#                      gate-passing fit made on it names it (options_chain_record)
+#   live               the live Yahoo capture behind β (BETA_LIVE_CAPTURE)
+#   ledger:<session>   the book the forward ledger of that session marks on
+#   book:<name>        a stored Cboe book (options/cboe/<name>.json, or the manifest
+#                      options/cboe_manifest/<name>.json of one held privately)
+# Several keys are space-separated. 'parts' marks a unit whose chain-derived numbers sit
+# in elements of their own with a key; 'none' a unit with no number read off a chain.
+CHAIN_KEY_LABELS = {"surface": "Chain", "fit": "Fit chain", "cal": "Fit chain", "options": "Chain",
+                    "live": "Chain", "ledger": "Marks", "book": "Book"}
+
+
+def book_chain_record(name: str, data_dir: Path | None = None) -> dict | None:
+    """A stored Cboe book in surface.json's shape, from its record: beside the raw
+    book (data_store/options/cboe/<name>.json) or the manifest of one held in the
+    private store (options/cboe_manifest/<name>.json, the same fields): Cboe, its
+    quote time, and its lines and two-sided lines (the Overview's pipeline panel
+    prints those counts)."""
+    for sub in ("cboe", "cboe_manifest"):
+        path = Path(data_dir or DATA) / "options" / sub / f"{name}.json"
+        if path.exists():
+            rec = json.loads(path.read_text())
+            return {"inputs": {"source": "cboe", "quote_time": rec.get("quote_time"),
+                               "book_rows": rec.get("rows"), "book_two_sided_rows": rec.get("two_sided_rows"),
+                               "chain": f"data_store/options/{sub}/{name}.json"}, "universe": {}}
+    return None
+
+
+def options_chain_record(session: str) -> dict | None:
+    """The stored chain data_store/options/spx_<session>.parquet in surface.json's
+    shape, named as the gate-passing fit made on that file names it.
+
+    The file holds its source and, for a chain stored before QUANT-01, the
+    download instant in its quote_time column; it holds neither a later Yahoo
+    download's fetch time nor the share of its near-the-money lines two-sided
+    (it keeps the two-sided lines only). The fit made on it records both in its
+    chain_diagnostics (fit_chain_record; the surface layer reads a Yahoo chain's
+    fetch time there too, quotes.fit_fetched_at), so the file is named from that
+    record: read off the file alone, a download stored since QUANT-01 was called
+    a close snapshot with no quote time, and no stored chain had its share.
+    Without such a fit, the file's own source and quote time."""
+    path = DATA / "options" / f"spx_{session}.parquet"
+    if not path.exists():
+        return None
+    st = _chain_file_stats(path)
+    inputs = {"source": st["source"], "quote_time": st["quote_time"],
+              "chain": f"data_store/options/{path.name}"}
+    fit = _stored_chain_fit(session)
+    if fit is not None and fit["inputs"].get("chain") == inputs["chain"]:
+        inputs.update({k: v for k in ("source", "quote_time", "fetched_at", "t_origin_basis",
+                                      "near_atm_two_sided_share")
+                       if (v := fit["inputs"].get(k)) is not None})
+    return {"inputs": inputs, "universe": {}, "session": session}
+
+
+def _stored_chain_fit(session: str) -> dict | None:
+    """fit_chain_record of the stored fit joint_cal_<session>.pkl (the one a fit:<session>
+    key names) when it is a current-schema fit that passes the gate, else None."""
+    path = DATA / "calibrations" / f"joint_cal_{session}.pkl"
+    if not path.is_file():
+        return None
+    cal = _load_pickle(path)
+    if calibration_is_legacy(cal) is not False or not calibration_gate(cal)[0]:
+        return None
+    return fit_chain_record(cal, _calibration_session(cal, path))
+
+
+def live_chain_record() -> dict:
+    """The live Yahoo capture behind β (BETA_LIVE_CAPTURE): a download fetched at its
+    as_of_et (US/Eastern), recorded here in UTC as the other chains are."""
+    live = json.loads(BETA_LIVE_CAPTURE.read_text())
+    at = pd.Timestamp(str(live["as_of_et"])).tz_localize("America/New_York").tz_convert("UTC")
+    return {"inputs": {"source": "yfinance", "fetched_at": at.strftime("%Y-%m-%dT%H:%M:%SZ")}, "universe": {}}
+
+
+def ledger_chain_record(session: str) -> dict | None:
+    """The book the forward ledger of ``session`` marks its positions on (its
+    inputs.book: source, file, two-sided share; inputs.quote_time)."""
+    path = DATA / "forward" / f"ledger_{session}.json"
+    if not path.exists():
+        return None
+    inp = json.loads(path.read_text()).get("inputs") or {}
+    book: dict = inp["book"] if isinstance(inp.get("book"), dict) else {}
+    return {"inputs": {"source": book.get("source"), "quote_time": inp.get("quote_time"),
+                       "near_atm_two_sided_share": book.get("near_atm_two_sided_share"),
+                       "chain": book.get("file")}, "universe": {}, "session": session}
+
+
+def chain_of_key(key: str) -> dict | None:
+    """The chain one data-chain key names, in surface.json's shape, or None when the
+    record does not hold it."""
+    kind, _, arg = key.partition(":")
+    if kind == "surface":
+        path = DATA / "surface" / arg / "surface.json"
+        return json.loads(path.read_text()) if path.exists() else None
+    if kind in ("fit", "cal"):
+        path = DATA / "calibrations" / (f"joint_cal_{arg}.pkl" if kind == "fit" else arg)
+        if not path.is_file():
+            return None
+        cal = _load_pickle(path)
+        return fit_chain_record(cal, _calibration_session(cal, path))
+    if kind == "options":
+        return options_chain_record(arg)
+    if kind == "live":
+        return live_chain_record()
+    if kind == "ledger":
+        return ledger_chain_record(arg)
+    if kind == "book":
+        return book_chain_record(arg)
+    raise ValueError(f"unknown chain key {key!r}")
+
+
+def key_stamp(key: str) -> str:
+    """chain_stamp of the chain a key names ('chain source not recorded' without one)."""
+    return chain_stamp(chain_of_key(key)) or "chain source not recorded"
+
+
+def key_cell(key: str) -> str:
+    """chain_cell of the chain a key names ('source not recorded' without one)."""
+    return chain_cell(chain_of_key(key)) or "source not recorded"
+
+
+def chain_sentence_of(keys: str) -> str:
+    """'Chain: Cboe, quotes at …; fit chain: Yahoo Finance download, fetched …': the
+    chains of space-separated data-chain keys, as a sentence ends with them."""
+    out = []
+    for i, key in enumerate(keys.split()):
+        label = CHAIN_KEY_LABELS[key.partition(":")[0]]
+        out.append(f"{label if i == 0 else label[0].lower() + label[1:]}: {key_stamp(key)}")
+    return "; ".join(out)
+
+
+def key_feet(keys: str) -> list[list[str]]:
+    """The panel macro's source lines for its data-chain keys: one line per key, its
+    label by the key's kind ('Fit chain: Yahoo Finance download', 'fetched …')."""
+    out = []
+    for key in keys.split():
+        foot = chain_foot(chain_of_key(key), CHAIN_KEY_LABELS[key.partition(":")[0]])
+        out.append(foot or [f"{CHAIN_KEY_LABELS[key.partition(':')[0]]}: source not recorded"])
+    return out
+
+
+app.jinja_env.globals["key_feet"] = key_feet
+app.jinja_env.globals["key_stamp"] = key_stamp
+app.jinja_env.globals["key_cell"] = key_cell
 
 
 # the chain a fit was made on, as the scorecard records its vendor (fit_chain_source)
@@ -6204,6 +6492,30 @@ def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str |
     return " · ".join(parts)
 
 
+_CHAIN_STATS: dict = {}
+
+
+def _chain_file_stats(path: Path) -> dict:
+    """A stored chain's rows, listed expiries, its one recorded source and quote time
+    (None where it records several or none), cached by the file's identity (a page
+    names the same chain in many places)."""
+    st = path.stat()
+    key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    if key not in _CHAIN_STATS:
+        try:
+            ch = pd.read_parquet(path)
+        except (OSError, ValueError) as e:
+            raise artifacts.ArtifactError(f"{path}: unreadable stored chain ({e})") from e
+
+        def one(col: str) -> str | None:
+            vals = sorted(set(ch[col].dropna().astype(str))) if col in ch.columns else []
+            return vals[0] if len(vals) == 1 else None
+        _CHAIN_STATS[key] = {"rows": len(ch),
+                             "n_expiries": int(ch["expiry"].nunique()) if "expiry" in ch.columns else None,
+                             "source": one("source"), "quote_time": one("quote_time")}
+    return _CHAIN_STATS[key]
+
+
 def fit_chain_record(cal: dict, session: str | None, data_dir: Path | None = None) -> dict | None:
     """The chain a joint fit was made on, in surface.json's shape (inputs and
     universe) so chain_badge and chain_sentence can name it, read from the fit
@@ -6224,19 +6536,13 @@ def fit_chain_record(cal: dict, session: str | None, data_dir: Path | None = Non
     rows = n_exp = None
     stored_src = None
     if path.exists():
-        try:
-            ch = pd.read_parquet(path)
-        except (OSError, ValueError) as e:
-            raise artifacts.ArtifactError(f"{path}: unreadable stored chain ({e})") from e
-        rows = len(ch)
-        n_exp = int(ch["expiry"].nunique()) if "expiry" in ch.columns else None
-        srcs: list[str] = (sorted(set(ch["source"].dropna().astype(str))) if "source" in ch.columns
-                           else [])
-        stored_src = srcs[0] if len(srcs) == 1 else None
+        st = _chain_file_stats(path)
+        rows, n_exp, stored_src = st["rows"], st["n_expiries"], st["source"]
     oos = _num((cal.get("oos") or {}).get("n_spx_oos"))
     anchors = _num(cal.get("n_spx_options"))
     inputs = {"source": diag.get("source") or stored_src, "quote_time": diag.get("quote_time"),
               "fetched_at": diag.get("fetched_at"), "t_origin_basis": diag.get("t_origin_basis"),
+              "near_atm_two_sided_share": diag.get("near_atm_two_sided_share"),
               "chain": f"data_store/options/{path.name}", "chain_rows": rows}
     universe = {"n_universe": int(anchors) + int(oos) if anchors is not None and oos is not None else None,
                 "n_expiries": n_exp}
@@ -6375,7 +6681,8 @@ def surface_comparison(head: str, inputs: Sequence[dict]) -> dict | None:
     earlier = compared_sessions(head, stored)
     if head not in grids or not earlier:
         return None
-    views = [{"session": old, "gap": session_age(old, head),
+    by = {s["session"]: s["surface"] for s in inputs}
+    views = [{"session": old, "gap": session_age(old, head), "chain": chain_stamp(by.get(old)),
               "rows": desk_surface.cm_delta(grids[head]["cm"], grids[old]["cm"])} for old in earlier]
     return {"head": head, "default": earlier[0], "views": views, "grids": grids,
             "n_earlier": len(stored), "lags": list(COMPARE_LAGS)}
@@ -6542,6 +6849,21 @@ def surface_extras(d: dict, surf: dict) -> None:
     # var-swap vol per listed expiry and at constant maturity (desk_surface.py).
     # A slice whose delta cannot be inverted raises: the page fails closed.
     sj = surf.get("surface") or {}
+    # every panel is read off this session's chain (its data-chain key and source line);
+    # the comparison names each earlier session's, the history each row's (tier 0.2)
+    d["chain_key"] = f"surface:{session}"
+    d["chain_foot"] = chain_foot(sj)
+    d["chain_foot_head"] = chain_foot(sj, f"Chain of {session}")
+    # the scorecard also names the chain its Heston row was fitted on when that is not the
+    # book it is scored on: the row says so, and when that chain was downloaded (0.2, 0.8)
+    hfit = next(((m.get("fit") or {}) for m in ((surf.get("scorecard") or {}).get("models") or [])
+                 if isinstance(m, dict) and str(m.get("model", "")).startswith("heston")
+                 and m.get("available") is not False
+                 and (m.get("fit") or {}).get("scored_on_fit_chain") is False), {})
+    fit_file = str(hfit.get("source") or "")
+    d["scorecard_chain"] = (f"{d['chain_key']} cal:{fit_file}"
+                            if fit_file and (DATA / "calibrations" / fit_file).is_file() else d["chain_key"])
+    desk_inputs = None
     if (((sj.get("surfaces") or {}).get("svi_cal") or {}).get("params") or {}).get("slices"):
         listed = desk_surface.delta_grid(sj, res, surf.get("vix"))
         cm = desk_surface.constant_maturity(listed)
@@ -6932,6 +7254,11 @@ def surface_extras(d: dict, surf: dict) -> None:
         # every earlier session as well (the cell of a session where a model is
         # not scored is a dash, and the note says why)
         mk = history_model_keys(models, (r["model"] for r in oos_all))
+        # the book each session was built from (its surface.json record): only a
+        # closing book's gap sets the replication against the Cboe close at one instant
+        if desk_inputs is None:
+            desk_inputs = artifacts.load_surface_desk_inputs(DATA)
+        books = {s["session"]: surface_book(s["surface"], s["session"]) for s in desk_inputs}
         d["history_models"] = [{"key": m, "label": model_short(m)} for m in mk]
         d["history_gaps"] = any(oos_by.get((r["session"], m)) is None for r in idx for m in mk)
         # why Heston has no figure on a session, where the job's run records say
@@ -6943,11 +7270,20 @@ def surface_extras(d: dict, surf: dict) -> None:
                                  "vix_rep": _num(r.get("vix_replicated")),
                                  "vix_off": _num(r.get("vix_official")),
                                  "beta": _num(r.get("atm_over_vix_official")),
+                                 "book": books.get(r["session"]),
                                  # the out-of-sample median |z| of the scorecard, as every headline
                                  "oos": {m: oos_by.get((r["session"], m)) for m in mk}} for r in idx]
-        d["vix_gap_range"] = session_range(
-            (h["vix_rep"] - h["vix_off"]) for h in d["surface_history"]
-            if h["vix_rep"] is not None and h["vix_off"] is not None)
+        for h in d["surface_history"]:
+            h["gap"] = (h["vix_rep"] - h["vix_off"]
+                        if h["vix_rep"] is not None and h["vix_off"] is not None else None)
+            h["book_label"] = desk_surface.BOOK_LABELS.get(h["book"] or "")
+        # FUND_GRADE_PLAN 0.8: the gap's median and range by book, and the tile's range
+        # over the sessions of this session's own book, so a range never mixes a
+        # same-instant gap with one that holds the overnight move
+        d["vix_gap_by_book"] = desk_surface.gap_by_book(d["surface_history"])
+        own = books.get(session)
+        same = [h["gap"] for h in d["surface_history"] if own is None or h["book"] == own]
+        d["vix_gap_range"] = session_range(same, what=desk_surface.BOOK_SESSIONS.get(own or "", "sessions"))
 
 
 def _clean_keep(d: dict) -> dict:
@@ -7397,7 +7733,8 @@ def fit_check_values(cal: dict) -> dict:
 
 def surface_check_values(surf: dict) -> dict:
     """The surface-report checks of one stored session (scorecard, VIX replication,
-    the static-arbitrage screen): today's row and each session's dot."""
+    the static-arbitrage screen): today's row and each session's dot; ``book``, the
+    book its replication was built from (surface_book)."""
     hkey = heston_model_key(surf["models"])
     row = next((r for r in surf.get("scorecard_rows") or [] if r["model"] == hkey), None)
     st_ = row["oos"] if row else (artifacts.residual_stats(surf["residuals"], hkey) if hkey else {})
@@ -7407,6 +7744,7 @@ def surface_check_values(surf: dict) -> dict:
     n_ex, n_q = _num(arb.get("n_quotes_in_executable_violation")), _num(arb.get("n_quotes"))
     return {"median_abs_hs": _num(st_.get("median_abs_hs")), "inside_pct": _num(st_.get("inside_spread_pct")),
             "n_hs": _num(st_.get("n")), "scorecard": bool(row), "rep_gap": gap,
+            "book": surface_book(surf.get("surface"), surf.get("session")),
             "vix_rep_gap": abs(gap) if gap is not None else None,
             "arb_exec_share": n_ex / n_q * 100.0 if (n_ex is not None and n_q) else None,
             "n_ex": n_ex, "n_q": n_q}
@@ -7527,21 +7865,28 @@ def load_model_risk() -> dict[str, Any]:
         d["errors"].append(e)
     mon = []
 
-    def add(mid, check, value, text, limits_key, artifact, note, status=None, limits_text=None, key=None,
-            history=None, digits=".2f", two_sided=False):
+    # chain (tier 0.2, required): the data-chain key of the chain today's value is read
+    # off, its note naming it; 'parts' when only the history's dots carry one; 'none'
+    # when the check reads no quote chain. History points carry their own keys.
+    # limits_apply=False: the check's limits do not apply to today's value (its status,
+    # limits text and reason are given), so no bullet and its history's dots are not
+    # coloured by them
+    def add(mid, check, value, text, limits_key, artifact, note, *, chain, status=None, limits_text=None,
+            key=None, history=None, digits=".2f", two_sided=False, limits_apply=True):
         lim = MONITOR_LIMITS.get(limits_key)
+        applied = lim if limits_apply else None
         st = status if status is not None else _rag(value, lim) if lim else "na"
         page, anchor = CHECK_EVIDENCE.get(key or limits_key, (None, None))
         mon.append({"model": mid, "check": check, "short": CHECK_SHORT.get(key or limits_key, check),
                     "value": text, "status": st, "num": value,
                     "limits": limits_text or (f"OK ≤ {lim[0]:g} · watch ≤ {lim[1]:g} · breach above" if lim
                                               else "informational"),
-                    "artifact": artifact, "note": note, "key": key or limits_key,
-                    "limits_key": limits_key or None,
+                    "artifact": artifact, "note": note, "key": key or limits_key, "chain": chain,
+                    "limits_key": limits_key or None, "limits_apply": bool(applied),
                     "id": "check-" + desk_monitor.slug(key or limits_key or check),
                     "href": f"{page}#{anchor}" if page else None, "page": page, "anchor": anchor,
-                    "bullet": desk_monitor.bullet(value, lim, digits) if lim else None,
-                    "history": (desk_monitor.history_view(history, lim, digits, two_sided=two_sided)
+                    "bullet": desk_monitor.bullet(value, applied, digits) if applied else None,
+                    "history": (desk_monitor.history_view(history, applied, digits, two_sided=two_sided)
                                 if (lim and history) else None)})
     # the gated fits: today's values and each session's, from one function of the pickle
     gated: list[tuple[str, dict]] = []
@@ -7553,33 +7898,39 @@ def load_model_risk() -> dict[str, Any]:
         head = next((v for s_, v in gated if s_ == p2.get("session")), {})
 
     def fit_hist(k):
-        return [(s_, v[k]) for s_, v in gated]
+        return [(s_, v[k], f"fit:{s_}") for s_, v in gated]
+    fit_key = f"fit:{p2.get('session')}" if p2.get("session") else "none"
     fit_art = f"data_store/calibrations/{p2.get('calib_file') or 'joint_cal_<session>.pkl'}"
+    # a number of the fit says which chain it was fitted on (tier 0.2)
+    fit_on = f" Fit chain: {p2['fit_chain_stamp']}." if p2.get("fit_chain_stamp") else ""
     add(INV_CALIBRATOR, "Headline fit age (NYSE sessions)", _num(p2.get("calib_age")),
         _fmt(p2.get("calib_age")),
-        "calib_age", fit_art, "Newest gate-passing fit against the newest session with data.", digits=".0f")
+        "calib_age", fit_art, "Newest gate-passing fit against the newest session with data.", digits=".0f",
+        chain="none")
     pab = head.get("params_at_bound")
     add(INV_CALIBRATOR, "Parameters on a box bound",
         pab if pab is not None else float(len(p2.get("pinned_params") or [])),
         ", ".join(p2.get("active_constraints") or []) or "none", "params_at_bound", fit_art,
         "A parameter on its bound is set by the box, not the market." + box_refit_note(
-            p2.get("vvix_tradeoff") or [], p2.get("session")), history=fit_hist("params_at_bound"),
-        digits=".0f")
+            p2.get("vvix_tradeoff") or [], p2.get("session")) + fit_on, history=fit_hist("params_at_bound"),
+        digits=".0f", chain=fit_key)
     add(INV_CALIBRATOR, "Out-of-sample SPX IV RMSE (vol pts)", head.get("oos_rmse"),
         _fmt(head.get("oos_rmse"), ".2f"),
-        "oos_rmse", fit_art, f"{_fmt(p2.get('n_oos'), ',')} quotes not used in the fit.",
-        history=fit_hist("oos_rmse"))
+        "oos_rmse", fit_art, f"{_fmt(p2.get('n_oos'), ',')} quotes not used in the fit." + fit_on,
+        history=fit_hist("oos_rmse"), chain=fit_key)
     add(INV_CALIBRATOR, "Worst short-dated expiry OOS RMSE (≤ 30 days)", head.get("short_oos_rmse"),
         (f"{_fmt(head['short_oos_rmse'], '.2f')} ({head['short_expiry']})"
          if head.get("short_oos_rmse") is not None else "—"), "short_oos_rmse", fit_art,
-        "One-factor Heston misses the short end; see the calibration page.",
-        history=fit_hist("short_oos_rmse"))
+        "One-factor Heston misses the short end; see the calibration page." + fit_on,
+        history=fit_hist("short_oos_rmse"), chain=fit_key)
     add(INV_CALIBRATOR, "VIX index RMSE (index pts)", head.get("vix_rmse"),
         _fmt(head.get("vix_rmse"), ".2f"),
-        "vix_rmse", fit_art, "^VIX9D, ^VIX, ^VIX3M, ^VIX6M against the model.", history=fit_hist("vix_rmse"))
+        "vix_rmse", fit_art, "^VIX9D, ^VIX, ^VIX3M, ^VIX6M against the model." + fit_on,
+        history=fit_hist("vix_rmse"), chain=fit_key)
     add(INV_CALIBRATOR, "Feller condition (diagnostic, not imposed)", None,
         f"{p2.get('feller_state') or '—'}, margin {_fmt(p2.get('feller_margin'), '+.2f')}", "", fit_art,
-        "Not a no-arbitrage condition; reported, not limited.", status="info", key="feller")
+        "Not a no-arbitrage condition; reported, not limited." + fit_on, status="info", key="feller",
+        chain=fit_key)
     # M19: the rate reference of the headline fit: the Treasury zero curve, or ^IRX if the curve was refused
     rk = p2.get("r_ref_kind")
     rk_text = {"treasury_curve": "Treasury zero curve", "irx": "^IRX"}.get(str(rk), str(rk))
@@ -7589,7 +7940,7 @@ def load_model_risk() -> dict[str, Any]:
         + f"The curve is refused when missing or older than {_fmt(curve_max_age_days(), '.0f')} days; "
         "the fit then falls back to ^IRX and records it.",
         status="ok" if rk == "treasury_curve" else ("watch" if rk else "na"),
-        limits_text="OK on the curve · watch on ^IRX", key="rate_reference")
+        limits_text="OK on the curve · watch on ^IRX", key="rate_reference", chain="none")
     # M3: β drift — the newest stored chain against the frozen backtest β
     with _loader_boundary(d, "β estimation chains"):
         st = _load_pickle(DATA / "backtest" / "full_results.pkl")
@@ -7606,9 +7957,11 @@ def load_model_risk() -> dict[str, Any]:
              else "no later chain"),
             "beta_drift", ["data_store/backtest/full_results.pkl", "data_store/vol_system.db"],
             "The backtest marks every straddle at β·VIX: β as the run recorded it (atm_to_vix_ratio) "
-            "against the market DB's newest chain.", digits=".3f",
-            history=([(str(c["session"]), abs(c["ratio"] - beta)) for c in chains]
-                     if (newest and beta is not None and chains and chains[-1] is newest) else None))
+            "against the market DB's newest chain."
+            + (f" Newest chain: {key_stamp(newest['key'])}." if newest else ""), digits=".3f",
+            history=([(str(c["session"]), abs(c["ratio"] - beta), c["key"]) for c in chains]
+                     if (newest and beta is not None and chains and chains[-1] is newest) else None),
+            chain=newest["key"] if newest else "none")
     # M4: market DB lag behind the labels (the regime card's inputs)
     with _loader_boundary(d, "rule labels / market DB"):
         labels = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])
@@ -7619,7 +7972,7 @@ def load_model_risk() -> dict[str, Any]:
         add(INV_LABELS, "Market database lag behind the rule labels (sessions)", _num(lag), _fmt(lag),
             "label_lag",
             ["data_store/signals/regime_labels.parquet", "data_store/vol_system.db"],
-            f"Labels {lab_date}; market DB {db_date}.", digits=".0f")
+            f"Labels {lab_date}; market DB {db_date}.", digits=".0f", chain="none")
     # M5: the VX futures table behind the newest session (the fits' out-of-sample VX
     # leg); vx_freshness, the age the Overview and the footer's freshness table print
     with _loader_boundary(d, "VX futures table / newest session"):
@@ -7630,7 +7983,7 @@ def load_model_risk() -> dict[str, Any]:
             _fmt(vx_lag) if vx_date else "no futures table", "vx_lag", VX_TABLE,
             f"vix_futures_daily through {vx_date or '—'}; newest session {vx['ref'] or '—'}{src}. Only the "
             f"fits' out-of-sample VX score reads them, so a fit after {vx_date or 'the table'} has none.",
-            key="vx_lag", digits=".0f")
+            key="vx_lag", digits=".0f", chain="none")
     # M2: Greeks surface built from the headline fit
     g = load_page3()
     for e in g.get("errors") or []:
@@ -7641,7 +7994,7 @@ def load_model_risk() -> dict[str, Any]:
         "", "data_store/greeks/greeks_surface.parquet", f"Surface {g.get('surface_date')}.",
         status=("ok" if g.get("source_matches_headline")
                 else ("breach" if g.get("source_matches_headline") is False else "watch")),
-        limits_text="OK if yes · watch if unknown · breach if no", key="greeks_source")
+        limits_text="OK if yes · watch if unknown · breach if no", key="greeks_source", chain="none")
     # M8: classifier vs persistence (research only)
     with _loader_boundary(d, "research classifier (regime_classifier.pkl)"):
         clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
@@ -7653,7 +8006,8 @@ def load_model_risk() -> dict[str, Any]:
                 signed(gap, ".1f"),
                 "", "data_store/signals/regime_classifier.pkl",
                 "Research only since C17: below the no-skill baseline, so it never trades.",
-                status="breach" if gap < 0 else "ok", limits_text="OK ≥ 0 · breach below", key="classifier")
+                status="breach" if gap < 0 else "ok", limits_text="OK ≥ 0 · breach below", key="classifier",
+                chain="none")
     # surface artifacts: spread-unit fit quality and data checks on the stored chain
     try:
         surf = artifacts.load_surface(DATA)
@@ -7671,7 +8025,10 @@ def load_model_risk() -> dict[str, Any]:
                     shist.append((s_, surface_check_values(one)))
 
         def surf_hist(k):
-            return [(s_, v[k]) for s_, v in shist] if shist and shist[-1][0] == surf["session"] else None
+            if not shist or shist[-1][0] != surf["session"]:
+                return None
+            return [(s_, v[k], f"surface:{s_}") for s_, v in shist]
+        surf_key = f"surface:{surf['session']}"
         # a session's surface is built whatever its Heston fit did: its scorecard.json
         # then marks Heston not available, with the producer's reason (as
         # surface.scorecard.UNAVAILABLE_REASONS gives it)
@@ -7694,14 +8051,39 @@ def load_model_risk() -> dict[str, Any]:
              f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; "
              + _chain_clause(surf.get("surface") or {})
              + (f"; {fit_book_clause(fit_chain)}" if fit_chain else "") + "."),
-            history=surf_hist("median_abs_hs"), digits=".1f")
+            history=surf_hist("median_abs_hs"), digits=".1f",
+            # no value today when Heston is not scored on the session: only the dots carry chains
+            chain="parts" if unscored else surf_key)
         vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
+        book = chain_stamp(surf.get("surface"))
+        on_book = f" Chain: {book}." if book else ""
+        # FUND_GRADE_PLAN 0.8: a closing book's gap is the replication's own error, and the
+        # limits are set for it; an overnight book's or an overnight download's also holds
+        # the market's move overnight, so on another book the gap is informational. The
+        # history and today's rank are over the sessions of today's book only, as the
+        # Surface tile's range is, so a gap at the close is never ranked against one that
+        # holds an overnight move.
+        rep_book = today["book"]
+        closing = rep_book == desk_surface.BOOK_CLOSING
+        built = desk_surface.BOOK_BUILT.get(rep_book or "")
+        rep_hist = surf_hist("rep_gap")
+        if rep_hist is not None and rep_book is not None:
+            of_book = {s_ for s_, v in shist if v["book"] == rep_book}
+            rep_hist = [p_ for p_ in rep_hist if p_[0] in of_book]
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",
             today["vix_rep_gap"], signed(today["rep_gap"], ".2f") if today["rep_gap"] is not None else "—",
             "vix_rep_gap", sart + "vix_replication.json",
-            f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}; "
-            "a gap points at a thin or stale strip.",
-            history=surf_hist("rep_gap"), two_sided=True)
+            f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}."
+            + (f" {built}." if built else "")
+            + (" Its gap is the replication’s own error: a thin or stale strip, or a listed departure."
+               if closing else
+               " The limits apply to a closing book’s gap only, so this gap is informational.")
+            + (f" History and rank: {desk_surface.BOOK_SESSIONS[rep_book]} only." if rep_book else "")
+            + on_book,
+            history=rep_hist, two_sided=True, chain=surf_key,
+            **({} if closing or today["rep_gap"] is None else
+               {"status": "info", "limits_apply": False,
+                "limits_text": "limits apply to a closing book’s gap only"}))
         cert = (((surf.get("surface") or {}).get("surfaces") or {}).get("svi_cal") or {}).get(
             "arbitrage_free_certified")
         add(INV_SURFACE, "SVI-cal surface carries its butterfly and calendar certificates", None,
@@ -7709,7 +8091,7 @@ def load_model_risk() -> dict[str, Any]:
             "The label 'arbitrage-free', the density and tails (M21) and the desk coordinates (M22) "
             "rest on them.",
             status="ok" if cert else ("breach" if cert is False else "na"),
-            limits_text="OK if yes · breach if no", key="svi_certificate")
+            limits_text="OK if yes · breach if no", key="svi_certificate", chain="none")
         share = today["arb_exec_share"]
         lv = arb_violations((surf.get("surface") or {}).get("arbitrage") or {})
         legs = list(dict.fromkeys(v["bad_quote"] for v in lv if v["bad_quote"]))
@@ -7722,8 +8104,8 @@ def load_model_risk() -> dict[str, Any]:
             + (f" Single-quote outliers: {n_bad} of its {len(lv)} largest mid violations (bad quote "
                + legs[0] + (f" and {len(legs) - 1} more leg{'s' if len(legs) > 2 else ''}"
                             if len(legs) > 1 else "")
-               + "), counted in the share." if n_bad else ""),
-            history=surf_hist("arb_exec_share"), digits=".1f")
+               + "), counted in the share." if n_bad else "") + on_book,
+            history=surf_hist("arb_exec_share"), digits=".1f", chain=surf_key)
     else:
         for mid_, chk, key_ in ((INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)",
                                  "median_abs_hs"),
@@ -7734,7 +8116,8 @@ def load_model_risk() -> dict[str, Any]:
                                  "SVI-cal surface carries its butterfly and calendar certificates",
                                  "svi_certificate")):
             add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
-                "Shown once the surface report has run.", status="na", limits_text="—", key=key_)
+                "Shown once the surface report has run.", status="na", limits_text="—", key=key_,
+                chain="none")
     # M18: the forward ledger's hash chain (each entry names the SHA-256 of the one before)
     try:
         led = artifacts.load_forward_ledger(DATA)
@@ -7748,7 +8131,7 @@ def load_model_risk() -> dict[str, Any]:
         broken or "Each entry names the SHA-256 of the one before it, so an edited entry breaks the chain.",
         status="ok" if n_led else ("breach" if broken else "na"),
         limits_text="OK if intact · breach if broken",
-        key="ledger_chain")
+        key="ledger_chain", chain="none")
     # every count, session and state in the inventory's prose is computed from the
     # artifacts (desk_inventory), never typed; an unknown placeholder fails the build
     with _loader_boundary(d, "model inventory prose (dashboard/model_inventory.json placeholders)"):

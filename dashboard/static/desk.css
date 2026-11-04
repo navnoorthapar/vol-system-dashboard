@@ -580,7 +580,7 @@ svg.bullet .b-breach { fill: rgba(250, 153, 156, 0.38); }
 svg.bullet .b-tick { stroke: var(--text); stroke-width: 2; }
 svg.hist { display: block; overflow: visible; }
 svg.hist .h-ok { fill: var(--ok); } svg.hist .h-watch { fill: var(--watch); } svg.hist .h-breach { fill: var(--breach); }
-svg.hist .h-na { fill: var(--text3); }
+svg.hist .h-na { fill: var(--text3); } svg.hist .h-info { fill: var(--text2); }
 .hist-txt { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text3); }
 .hist-txt .nowrap { white-space: nowrap; }
 .mon-link { text-decoration: none; }
