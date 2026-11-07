@@ -876,6 +876,55 @@
    "vix_method": "cboe_rules",
    "vix_official": 28.18,
    "vix_replicated": 26.17128283
+  },
+  {
+   "arbitrage_quotes_outside_spread": 0,
+   "atm_over_vix_official": 0.7703517335,
+   "executable_arbitrage": false,
+   "models": {
+    "essvi": {
+     "butterfly_violations": 0,
+     "calendar_violations": 0,
+     "common_oos_median_abs_hs": 2.415677091,
+     "inside_spread_pct": 29.66256026,
+     "median_abs_hs": 2.430639999,
+     "oos_inside_spread_pct": 29.90332975,
+     "oos_rmse_vp": 1.21849241,
+     "rmse_vp": 1.296880717
+    },
+    "svi": {
+     "butterfly_violations": 0,
+     "calendar_violations": 255,
+     "common_oos_median_abs_hs": 1.220185079,
+     "inside_spread_pct": 41.21049813,
+     "median_abs_hs": 1.233773208,
+     "oos_inside_spread_pct": 41.41783029,
+     "oos_rmse_vp": 0.285939273,
+     "rmse_vp": 0.3025443905
+    },
+    "svi_cal": {
+     "butterfly_violations": 0,
+     "calendar_violations": 0,
+     "common_oos_median_abs_hs": 1.373467846,
+     "inside_spread_pct": 38.37171934,
+     "median_abs_hs": 1.37901386,
+     "oos_inside_spread_pct": 38.53920516,
+     "oos_rmse_vp": 0.3233998532,
+     "rmse_vp": 0.3415347899
+    }
+   },
+   "n_quotes": 9335,
+   "quote_time": "2026-11-07T00:50:22Z",
+   "report_version": 5,
+   "session": "2026-11-06",
+   "source": "cboe",
+   "vix_gap_attribution": {
+    "residual_pts": -0.01816964928,
+    "truncation_pts": 0.01459771954
+   },
+   "vix_method": "cboe_rules",
+   "vix_official": 25.64,
+   "vix_replicated": 25.64357193
   }
  ]
 }
