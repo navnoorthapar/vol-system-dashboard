@@ -1,0 +1,43 @@
+{
+  "artifacts": {},
+  "backfill": null,
+  "calibration": null,
+  "capture": null,
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-10",
+  "forward_ledger": null,
+  "freeze": null,
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "42942183871",
+    "sha": "1b4f383c29c8c161e2dac8f4a373a3a14310f3aa"
+  },
+  "headline_calibration": {
+    "age_sessions": 1,
+    "session": "2026-11-09"
+  },
+  "publish_blockers": [],
+  "publishable": false,
+  "run_utc": "2026-11-11T01:54:32+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-10",
+  "slot": "close",
+  "steps": [
+    "market",
+    "labels"
+  ],
+  "timings_s": {
+    "labels": 2.0,
+    "market": 41.4,
+    "persist": 0.1,
+    "restore": 2.2,
+    "total": 46.9
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)"
+  ]
+}
