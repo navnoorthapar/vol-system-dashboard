@@ -1,0 +1,92 @@
+{
+  "artifacts": {},
+  "backfill": {
+    "deferred": [],
+    "rebuilt": {}
+  },
+  "calibration": {
+    "chain": {
+      "n_clean": null,
+      "n_expiries_with_carry": null,
+      "n_listed": 48,
+      "n_near_atm": 976,
+      "n_raw": 8059,
+      "n_two_sided": 276,
+      "near_atm_two_sided_share": 0.010245901639344262,
+      "quote_time": null,
+      "symbol": "^SPX",
+      "t_origin": "2026-11-06T16:00:00-05:00",
+      "t_origin_basis": "session close 16:00 ET"
+    },
+    "reason": "SPX book has no live two-sided quotes: 1% of 976 near-ATM lines (|K/S-1|<3%) are two-sided (< 80%)",
+    "session": "2026-11-06",
+    "status": "skipped"
+  },
+  "capture": {
+    "captures": {
+      "SPX": {
+        "file": "spx_2026-11-06_090245Z.parquet",
+        "status": "exists"
+      },
+      "VIX": {
+        "file": "vix_2026-11-06_090247Z.parquet",
+        "status": "exists"
+      }
+    },
+    "reason": "SPX exists; VIX exists",
+    "session": "2026-11-06",
+    "status": "exists"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-06",
+  "forward_ledger": {
+    "book": null,
+    "file": "ledger_2026-11-06.json",
+    "reason": "a ledger for 2026-11-06 is already registered",
+    "status": "exists"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "42367278786",
+    "sha": "1ac35dd5aabb5d4a36a5900a55d78688d4f228a4"
+  },
+  "headline_calibration": {
+    "age_sessions": 1,
+    "session": "2026-11-05"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-07T11:14:40+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-06",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "backfill": 0.1,
+    "calibrate": 3.9,
+    "capture": 0.0,
+    "forward_ledger": 0.0,
+    "freeze": 17.0,
+    "market": 40.5,
+    "persist": 0.2,
+    "restore": 3.1,
+    "total": 66.3
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)",
+    "calibration skipped: SPX book has no live two-sided quotes: 1% of 976 near-ATM lines (|K/S-1|<3%) are two-sided (< 80%)"
+  ]
+}

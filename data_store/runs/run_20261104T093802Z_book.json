@@ -1,0 +1,130 @@
+{
+  "artifacts": {
+    "diagnostics": {
+      "error": null,
+      "ok": true
+    },
+    "greeks": {
+      "error": null,
+      "ok": true
+    },
+    "scenario": {
+      "error": null,
+      "ok": true
+    },
+    "surface": {
+      "error": null,
+      "ok": true
+    }
+  },
+  "backfill": {
+    "deferred": [
+      "2026-03-24"
+    ],
+    "rebuilt": {
+      "2026-03-27": {
+        "surface": true
+      },
+      "2026-05-29": {
+        "surface": true
+      }
+    }
+  },
+  "calibration": {
+    "chain": {
+      "n_clean": 5241,
+      "n_expiries_with_carry": 17,
+      "n_listed": 51,
+      "n_near_atm": 1481,
+      "n_raw": 7971,
+      "n_two_sided": 6006,
+      "near_atm_two_sided_share": 0.9952734638757597,
+      "quote_time": null,
+      "symbol": "^SPX",
+      "t_origin": "2026-11-03T16:00:00-05:00",
+      "t_origin_basis": "session close 16:00 ET"
+    },
+    "reason": "ok",
+    "session": "2026-11-03",
+    "status": "accepted"
+  },
+  "capture": {
+    "captures": {
+      "SPX": {
+        "book_state": "gth",
+        "expiries": 55,
+        "file": "spx_2026-11-03_093806Z.parquet",
+        "quote_time": "2026-11-04T09:22:07Z",
+        "rows": 29576,
+        "sha256": "7ece50066f605a80323ce0d1c8f76103e8fdeda93fe21cc67299c851df7b2a02",
+        "status": "captured",
+        "two_sided_rows": 28627
+      },
+      "VIX": {
+        "book_state": "gth",
+        "expiries": 13,
+        "file": "vix_2026-11-03_093807Z.parquet",
+        "quote_time": "2026-11-04T09:22:06Z",
+        "rows": 1540,
+        "sha256": "e4594d012d9d44197aa72ecb4ad20dac24d59de8aa62248bb8b0e3da1e7adc28",
+        "status": "captured",
+        "two_sided_rows": 1330
+      }
+    },
+    "reason": "SPX captured; VIX captured",
+    "session": "2026-11-03",
+    "status": "captured"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-03",
+  "forward_ledger": {
+    "book": "options/cboe/spx_2026-11-03_093806Z.parquet",
+    "file": "ledger_2026-11-03.json",
+    "reason": null,
+    "status": "recorded"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "41808923853",
+    "sha": "5ec4841b5d5d89bf3619c445e0d6f3f79e86688d"
+  },
+  "headline_calibration": {
+    "age_sessions": 0,
+    "session": "2026-11-03"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-04T09:38:02+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-03",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "artifacts": 251.8,
+    "backfill": 211.5,
+    "calibrate": 5.9,
+    "capture": 1.8,
+    "forward_ledger": 7.9,
+    "freeze": 19.7,
+    "market": 41.5,
+    "persist": 0.3,
+    "restore": 3.0,
+    "total": 544.6
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)"
+  ]
+}

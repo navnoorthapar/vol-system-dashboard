@@ -1,0 +1,121 @@
+{
+  "artifacts": {
+    "diagnostics": {
+      "error": null,
+      "ok": true
+    },
+    "greeks": {
+      "error": null,
+      "ok": true
+    },
+    "scenario": {
+      "error": null,
+      "ok": true
+    },
+    "surface": {
+      "error": null,
+      "ok": true
+    }
+  },
+  "backfill": {
+    "deferred": [],
+    "rebuilt": {}
+  },
+  "calibration": {
+    "chain": {
+      "n_clean": 5253,
+      "n_expiries_with_carry": 18,
+      "n_listed": 50,
+      "n_near_atm": 1523,
+      "n_raw": 7241,
+      "n_two_sided": 5852,
+      "near_atm_two_sided_share": 1.0,
+      "quote_time": null,
+      "symbol": "^SPX",
+      "t_origin": "2026-11-12T16:00:00-05:00",
+      "t_origin_basis": "session close 16:00 ET"
+    },
+    "reason": "ok",
+    "session": "2026-11-12",
+    "status": "accepted"
+  },
+  "capture": {
+    "captures": {
+      "SPX": {
+        "book_state": "gth",
+        "expiries": 55,
+        "file": "spx_2026-11-12_095100Z.parquet",
+        "quote_time": "2026-11-13T09:35:09Z",
+        "rows": 30752,
+        "sha256": "6edcc391d94870d0b72651b0498be569771ef8b5e7707447d552e7b7ce9a0c81",
+        "status": "captured",
+        "two_sided_rows": 29583
+      },
+      "VIX": {
+        "book_state": "gth",
+        "expiries": 13,
+        "file": "vix_2026-11-12_095101Z.parquet",
+        "quote_time": "2026-11-13T09:35:07Z",
+        "rows": 1540,
+        "sha256": "9c823c2e5a64b9ee2ff2f90fc2e7f9e510ce671cd51a517c64505003d6969107",
+        "status": "captured",
+        "two_sided_rows": 1356
+      }
+    },
+    "reason": "SPX captured; VIX captured",
+    "session": "2026-11-12",
+    "status": "captured"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-12",
+  "forward_ledger": {
+    "book": "options/cboe/spx_2026-11-12_095100Z.parquet",
+    "file": "ledger_2026-11-12.json",
+    "reason": null,
+    "status": "recorded"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "43404520043",
+    "sha": "ed026902ac2a451886fb4bba06b9ebd9cb64f6c5"
+  },
+  "headline_calibration": {
+    "age_sessions": 0,
+    "session": "2026-11-12"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-13T09:50:56+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-12",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "artifacts": 128.3,
+    "backfill": 0.0,
+    "calibrate": 4.9,
+    "capture": 1.7,
+    "forward_ledger": 4.2,
+    "freeze": 12.5,
+    "market": 41.2,
+    "persist": 0.2,
+    "restore": 2.8,
+    "total": 196.8
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)"
+  ]
+}

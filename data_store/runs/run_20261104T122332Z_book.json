@@ -1,0 +1,83 @@
+{
+  "artifacts": {},
+  "backfill": {
+    "deferred": [],
+    "rebuilt": {
+      "2026-03-24": {
+        "surface": true
+      }
+    }
+  },
+  "calibration": {
+    "chain": {},
+    "reason": "calibration for session 2026-11-03 already exists",
+    "session": "2026-11-03",
+    "status": "exists"
+  },
+  "capture": {
+    "captures": {
+      "SPX": {
+        "file": "spx_2026-11-03_093806Z.parquet",
+        "status": "exists"
+      },
+      "VIX": {
+        "file": "vix_2026-11-03_093807Z.parquet",
+        "status": "exists"
+      }
+    },
+    "reason": "SPX exists; VIX exists",
+    "session": "2026-11-03",
+    "status": "exists"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-03",
+  "forward_ledger": {
+    "book": null,
+    "file": "ledger_2026-11-03.json",
+    "reason": "a ledger for 2026-11-03 is already registered",
+    "status": "exists"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "41828703380",
+    "sha": "b01a7cd5e8e90c872d8a2402e73117af6108d927"
+  },
+  "headline_calibration": {
+    "age_sessions": 0,
+    "session": "2026-11-03"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-04T12:23:32+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-03",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "backfill": 48.3,
+    "calibrate": 0.4,
+    "capture": 0.0,
+    "forward_ledger": 0.0,
+    "freeze": 14.9,
+    "market": 41.7,
+    "persist": 0.2,
+    "restore": 4.3,
+    "total": 110.7
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)"
+  ]
+}
