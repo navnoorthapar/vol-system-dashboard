@@ -1,0 +1,96 @@
+{
+  "artifacts": {},
+  "backfill": {
+    "deferred": [
+      "2026-11-10",
+      "2026-11-09",
+      "2026-11-06",
+      "2026-11-05",
+      "2026-11-04",
+      "2026-11-03",
+      "2026-11-02",
+      "2026-10-30",
+      "2026-10-29",
+      "2026-10-28",
+      "2026-10-27",
+      "2026-10-26",
+      "2026-10-20",
+      "2026-10-16",
+      "2026-06-18",
+      "2026-05-29",
+      "2026-03-27",
+      "2026-03-24"
+    ],
+    "rebuilt": {
+      "2026-11-11": {
+        "surface": true
+      },
+      "2026-11-12": {
+        "surface": true
+      }
+    }
+  },
+  "calibration": {
+    "chain": {},
+    "reason": "calibration for session 2026-11-12 already exists",
+    "session": "2026-11-12",
+    "status": "exists"
+  },
+  "capture": {
+    "captures": {},
+    "reason": "the live option book at 2026-11-13 10:10 ET holds session 2026-11-13's quotes, not the last closed session 2026-11-12: refusing to store them as 2026-11-12 (calibrate after the 16:15 ET cutoff)",
+    "session": "2026-11-12",
+    "status": "skipped"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-12",
+  "forward_ledger": {
+    "book": null,
+    "file": "ledger_2026-11-12.json",
+    "reason": "a ledger for 2026-11-12 is already registered",
+    "status": "exists"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "workflow_dispatch",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "43449675337",
+    "sha": "b8e958c4d0ff4f1eec6c707381554299bc3b83b3"
+  },
+  "headline_calibration": {
+    "age_sessions": 0,
+    "session": "2026-11-12"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-13T15:10:23+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-12",
+  "slot": "manual",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "backfill": 85.3,
+    "calibrate": 0.3,
+    "capture": 0.0,
+    "forward_ledger": 0.0,
+    "freeze": 16.5,
+    "market": 36.6,
+    "persist": 0.2,
+    "restore": 3.1,
+    "total": 143.1
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)"
+  ]
+}
