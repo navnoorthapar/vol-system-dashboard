@@ -59,28 +59,46 @@ def surface_input_problems(inp: dict, session: str, root) -> list:
     file's sha256. The book is the session's Cboe capture
     (data_store/options/cboe/spx_<session>_<HHMMSS>Z.parquet, whose sidecar
     holds its quote time, book state, download instant and payload hash) or,
-    as the fallback, its Yahoo chain data_store/options/spx_<session>.parquet."""
+    as the fallback, its Yahoo chain data_store/options/spx_<session>.parquet.
+
+    Once the raw books go to the private data repository (DATA_SOURCES.md;
+    scripts/ci/cboe_private.py), a Cboe book is not in the public tree: its
+    public record is the manifest data_store/options/cboe_manifest/<stem>.json
+    (cboe_downloader.write_manifest), which must record the same file (its
+    parquet_sha256 is the surface's chain_sha256) and the same sidecar fields."""
     import re
 
     out = []
     chain = root / str(inp.get("chain"))
+    held_privately = False
     if inp.get("source") == "cboe":
         want = rf"data_store/options/cboe/spx_{session}_\d{{6}}Z\.parquet"
         if not re.fullmatch(want, str(inp.get("chain"))):
             out.append(f"a Cboe-sourced surface names {inp.get('chain')!r}, not a Cboe capture of {session}")
         side = chain.with_suffix(".json")
+        man = root / "data_store" / "options" / "cboe_manifest" / side.name
         if side.exists():
-            sc = json.loads(side.read_text())
-            for key, want in (("quote_time", sc.get("quote_time")), ("raw_sha256", sc.get("sha256")),
-                              ("book_state", sc.get("book_state")), ("fetched_at", sc.get("fetched_at"))):
-                if inp.get(key) != want:
-                    out.append(f"inputs.{key} {inp.get(key)!r} is not the capture's {want!r}")
+            sc, what = json.loads(side.read_text()), "the capture's"
+        elif not chain.exists() and man.exists():
+            # held in the private store: the manifest stands for the book and its sidecar
+            sc, what, held_privately = json.loads(man.read_text()), "its manifest's", True
+            if sc.get("parquet_sha256") != inp.get("chain_sha256"):
+                out.append(f"the manifest {man.name}'s parquet_sha256 is not inputs.chain_sha256: "
+                           "it records another file")
         else:
-            out.append(f"no sidecar {side.name} next to the capture")
+            sc, what = None, ""
+            out.append(f"no sidecar {side.name} next to the capture, and no manifest of it")
+        for key, want in (() if sc is None else (
+                ("quote_time", sc.get("quote_time")), ("raw_sha256", sc.get("sha256")),
+                ("book_state", sc.get("book_state")), ("fetched_at", sc.get("fetched_at")))):
+            if inp.get(key) != want:
+                out.append(f"inputs.{key} {inp.get(key)!r} is not {what} {want!r}")
     else:
         if inp.get("chain") != f"data_store/options/spx_{session}.parquet":
             out.append(f"a {inp.get('source')}-sourced surface names {inp.get('chain')!r}")
-    if not chain.exists():
+    if held_privately:
+        pass                                  # its bytes are checked against the manifest's hash
+    elif not chain.exists():
         out.append(f"{inp.get('chain')} is not committed")
     elif inp.get("chain_sha256") != _sha256(chain):
         out.append(f"inputs.chain_sha256 is not the sha256 of {inp.get('chain')}")

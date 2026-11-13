@@ -28,7 +28,7 @@ from bs4 import Tag
 from . import surface_math as M
 from .chrome import labels as regime_labels
 from .core import DATE, NUM, Audit, Check, norm, numbers_in, rounds_to, text_of
-from .data import Store, chain_words, sessions_between
+from .data import Store, chain_short, chain_stamp, chain_words, fit_chain_inputs, sessions_between
 
 STALE_WARN = 2                      # the page's amber banner from this age (NYSE sessions) on
 STALE_ERROR = 5                     # ... and the red one
@@ -303,6 +303,11 @@ class Ctx:
             v = self.fam[col].get(session) if col in self.fam else None
         return M.num(v)
 
+    def book(self, s: M.Session | None) -> str | None:
+        """The book a session was built from (M.replication_book on its surface.json record)."""
+        return (M.replication_book((s.sj or {}).get("inputs"), s.name, (s.sj or {}).get("universe"))
+                if s is not None else None)
+
     def vix_gap(self, s: M.Session) -> float | None:
         """VIX replicated from the session's chain − the DB's Cboe close of that session."""
         rep = M.num((((s.vx or {}).get("indices") or {}).get("VIX") or {}).get("replicated"))
@@ -532,13 +537,17 @@ def score_tiles(a: Audit, c: Ctx) -> None:
             nums(a, P_SCORES, "maturity, Cboe close (DB)", sub, [*([days] if brackets is False else []), off])
         else:
             vix_tile_sub(a, c, sub, rep, off)
-        rg = M.session_range([c.vix_gap(x) for x in c.all if x.vx])
+        # over the sessions built from the same book as this one (FUND_GRADE_PLAN 0.8)
+        own = c.book(c.s)
+        rg = M.session_range([c.vix_gap(x) for x in c.all if x.vx and (own is None or c.book(x) == own)])
         ci = t.select_one(".kpi-ci")
         if rg is None:
-            a.equal(P_SCORES, "VIX gap range (fewer than 2 sessions)", ci is None, True)
+            a.equal(P_SCORES, "VIX gap range (fewer than 2 sessions of this book)", ci is None, True)
         else:
-            nums(a, P_SCORES, f"VIX gap range over {rg[0]} sessions (replicated − DB close)", ci,
-                 range_nums(rg))
+            nums(a, P_SCORES, f"VIX gap range over {rg[0]} sessions of this session's book "
+                              "(replicated − DB close)", ci, range_nums(rg))
+            a.text(P_SCORES, "VIX gap range: the book it ranges over (surface.json records)", ci,
+                   f"gap, {rg[0]} {BOOK_SESSIONS.get(own or '', 'sessions')}:", contains=True)
 
 
 def vix_tile_sub(a: Audit, c: Ctx, sub: Tag | None, rep: float, off: float | None) -> None:
@@ -749,8 +758,14 @@ def surface_change(a: Audit, c: Ctx) -> None:
         old = M.cm_grid(x)
         tbl = a.one(f"#vs-table-{x.name}")
         gap = sessions_between(x.name, c.session)
-        nums(a, P_CHG, f"vs {x.name}: NYSE sessions earlier", a.one(f"#vs-table-{x.name} > caption"), [gap],
-             [x.name, x.name, c.session, c.session, x.name])
+        cap = a.one(f"#vs-table-{x.name} > caption")
+        stamp = chain_stamp((x.sj or {}).get("inputs") or {}, (x.sj or {}).get("universe") or {})
+        sn = [v for v, _, _ in numbers_in(stamp)] if stamp else []
+        sd = ["-".join(m) for m in DATE.findall(stamp)] if stamp else []
+        nums(a, P_CHG, f"vs {x.name}: NYSE sessions earlier, and its chain", cap, [gap, *sn],
+             [x.name, *sd, x.name, c.session, c.session, x.name])
+        a.equal(P_CHG, f"vs {x.name}: its chain (surface.json inputs)",
+                f"({norm(stamp)})" in text_of(cap) if stamp else "(" not in text_of(cap).split(":")[0], True)
         trs = rows(tbl)
         if not same_len(a, P_CHG, f"vs {x.name} rows", trs, c.cm):
             continue
@@ -1562,6 +1577,40 @@ def scorecard(a: Audit, c: Ctx) -> None:
     for i, m in enumerate(c.score_models):
         a.text(P_SC, f"{M.label(m)} description (scorecard.json)", dds[i] if i < len(dds) else None,
                prose((c.sc_model(m) or {}).get("description") or "—"))
+        if m == "heston_v2":
+            heston_fit_time_note(a, c, dds[i] if i < len(dds) else None)
+
+
+FIT_TIME_NOTE = "after the closing book scored here had given way to the overnight one"
+
+
+def heston_fit_time_note(a: Audit, c: Ctx, dd: Tag | None) -> None:
+    """FUND_GRADE_PLAN 0.8: when the session is scored on its closing book and its Heston
+    fit was made on a chain downloaded once the feed had moved to the next session's
+    overnight book, the Heston row says so, with the download's UTC minute. Rebuilt from
+    the fit's own record (calibrations/joint_cal_<session>.pkl, chain_diagnostics:
+    fetched_at, or quote_time for fits before QUANT-01, which stored the download's
+    clock there) and this audit's clock, not copied from scorecard.json. From
+    report_version 6, which writes it, the clause is there exactly when they call for it."""
+    rel = f"calibrations/joint_cal_{c.session}.pkl"
+    diag: dict = {}
+    if (c.store.root / rel).is_file():
+        cal = c.store.pickle(rel)
+        diag = (cal.get("chain_diagnostics") or {}) if isinstance(cal, dict) else {}
+    when = diag.get("fetched_at") or diag.get("quote_time")
+    fit_on_cboe = str(diag.get("source") or "yfinance").strip().lower() == "cboe"
+    want = (c.book(c.s) == M.BOOK_CLOSING and not fit_on_cboe
+            and bool(M.fit_left_the_closing_book(when, c.session)))
+    shown = FIT_TIME_NOTE in text_of(dd)
+    version = c.vx.get("report_version")
+    if isinstance(version, int) and version >= OVERNIGHT_NOTE_VERSION:
+        a.equal(P_SC, "Heston row: fit-time clause shown (scored on the closing book, fit downloaded "
+                "after it gave way, by the fit's record and this audit's clock)", shown, want)
+    if shown and want:
+        at = dt.datetime.fromisoformat(str(when))
+        at = at.replace(tzinfo=dt.UTC) if at.tzinfo is None else at.astimezone(dt.UTC)
+        a.text(P_SC, "Heston row: when the fit's chain was downloaded (its record, UTC)", dd,
+               f"that chain was downloaded at {at:%Y-%m-%d %H:%M} UTC, {FIT_TIME_NOTE}", contains=True)
 
 
 def scorecard_note_counts(a: Audit, c: Ctx, note: str) -> None:
@@ -1785,6 +1834,13 @@ CAUSE_TIMING, CAUSE_STALE, CAUSE_RATE = ("snapshot timing against the 16:15 ET p
 # how the page names the calculation time of a Cboe book (report_version 5 on)
 CALC_WORDS = {"book_quote_time": "the book’s quote time",
               "closing_book_close": "the close its closing book’s quotes were left at"}
+# how the page names each book (M.replication_book), and its sessions counted
+BOOK_LABELS = {M.BOOK_CLOSING: "Closing book", M.BOOK_OVERNIGHT: "Overnight book",
+               M.BOOK_YAHOO_OVERNIGHT: "Yahoo overnight download", M.BOOK_YAHOO: "Yahoo chain",
+               M.BOOK_OTHER: "Other Cboe book"}
+BOOK_SESSIONS = {M.BOOK_CLOSING: "closing-book sessions", M.BOOK_OVERNIGHT: "overnight-book sessions",
+                 M.BOOK_YAHOO_OVERNIGHT: "Yahoo overnight-download sessions",
+                 M.BOOK_YAHOO: "Yahoo-chain sessions", M.BOOK_OTHER: "other Cboe-book sessions"}
 
 
 def vix_timing(a: Audit, c: Ctx) -> str | None:
@@ -1972,6 +2028,81 @@ def deviations(a: Audit, c: Ctx, vix: GapSplit | None, causes: list[str]) -> Non
         a.text(P_VIX, "gap attribution sentence: what the unexplained part can come from", lis[-1],
                f"({', '.join(causes)}).", contains=True)
     near_next_notes(a, c, lis[len(devs):len(devs) + len(notes)])
+    overnight_note(a, c, lis[len(devs):len(devs) + len(notes)])
+
+
+OVERNIGHT_NOTE = "The book is the overnight (Global Trading Hours) book"
+OVERNIGHT_NOTE_VERSION = 6          # the report_version that writes it
+CLOSE_RUN_VERSION = 7               # the report_version whose reason follows the close slot's run records
+# the reason clauses as the producer writes them (report._timing_note), with its straight
+# apostrophes: the page prints the producer's note as written
+# report_version 6's one reason when no closing book was stored and none refused (a
+# claim about the feed's hours that is not observed); version 7 states what the close
+# slot's run records hold
+OVERNIGHT_WHY_NONE = ("(no closing book of the session is stored: Cboe's delayed feed shows it only until "
+                      "Global Trading Hours open at 20:15 ET)")
+OVERNIGHT_WHY_RUN = {
+    "captured": ("(the close slot captured the session's closing book, but the store holds none: it was "
+                 "not kept)"),
+    "skipped": ("(the close slot's runs stored no closing book: by the clock, or by the quote time of the "
+                "book downloaded, the delayed feed showed another book)"),
+    "no-step": ("(the close slot ran for the session without capturing books: that was before it captured "
+                "closing books)"),
+    "none": "(no run of the close slot is recorded for the session)",
+}
+OVERNIGHT_WHY_FAILED = "(the session's closing book did not pass the quote-state gates)"
+OVERNIGHT_WHY_REFUSED = "(the job did not store the session's closing book: {})"
+
+
+def overnight_note(a: Audit, c: Ctx, lis: list[Tag]) -> None:
+    """FUND_GRADE_PLAN 0.8: the note of a replication built from an overnight book names
+    when the book was quoted and how many hours after the session's Cboe close, rebuilt
+    from surface.json's record of the chain (its quote time) and this audit's calendar
+    (16:15 ET, 13:15 on an NYSE early close). From report_version 6, which wrote it, the
+    note is there exactly when this audit's clock rules make the chain an overnight book, and
+    its reason for not using a closing book follows the stored books and the close slot's
+    run records."""
+    mine = [li for li in lis if text_of(li).startswith(OVERNIGHT_NOTE)]
+    version = c.vx.get("report_version")
+    if not mine and not (isinstance(version, int) and version >= OVERNIGHT_NOTE_VERSION):
+        return
+    inp = c.sj.get("inputs") or {}
+    if isinstance(version, int) and version >= OVERNIGHT_NOTE_VERSION:
+        a.equal(P_VIX, "overnight-book note shown (the chain is an overnight book by this audit's clock)",
+                len(mine), int(M.replication_book(inp, c.session) == M.BOOK_OVERNIGHT))
+    if not mine or not inp.get("quote_time"):
+        return
+    at = dt.datetime.fromisoformat(str(inp["quote_time"])).astimezone(M.NY).replace(tzinfo=None)
+    close = dt.datetime.combine(dt.date.fromisoformat(c.session), M.cboe_close_time(c.session))
+    li = mine[0]
+    a.text(P_VIX, "overnight-book note: when the book was quoted (surface.json quote time, ET)", li,
+           f"quoted at {at:%Y-%m-%d %H:%M} ET, ", contains=True)
+    a.text(P_VIX, "overnight-book note: the print it is set against", li,
+           f" hours after the {close:%H:%M} ET print of {c.session}", contains=True)
+    m = re.search(r"ET, (\S+) hours after", text_of(li))
+    a.num(P_VIX, "overnight-book note: hours from the Cboe close to the book's quote time", m.group(1) if m
+          else None, (at - close).total_seconds() / 3600.0)
+    # why no closing book was used: it failed the gates, or none of the session is stored,
+    # because the close slot did not store the one it fetched (its run record's reason) or
+    # it had none to fetch
+    stored = M.closing_books(c.store, c.session)
+    refusal = None if stored else M.closing_book_refusal(c.store, c.session)
+    run = None if stored else M.closing_book_run(c.store, c.session)
+    if "closing_books" in inp:
+        a.equal(P_VIX, "surface.json closing_books = the session's stored closing books (this audit's clock)",
+                inp.get("closing_books"), stored)
+    if "closing_book_refusal" in inp:
+        a.equal(P_VIX, "surface.json closing_book_refusal = the close slot's run record (data_store/runs)",
+                inp.get("closing_book_refusal"), refusal)
+    if "closing_book_run" in inp:
+        a.equal(P_VIX, "surface.json closing_book_run = the close slot's run records (data_store/runs)",
+                inp.get("closing_book_run"), run)
+    by_runs = isinstance(version, int) and version >= CLOSE_RUN_VERSION
+    a.text(P_VIX, "overnight-book note: why no closing book was used (the stored records)", li,
+           OVERNIGHT_WHY_FAILED if stored else
+           OVERNIGHT_WHY_REFUSED.format(refusal.rstrip(".")) if refusal else
+           OVERNIGHT_WHY_RUN[str(run)] if by_runs else OVERNIGHT_WHY_NONE,
+           contains=True)
 
 
 def near_next_notes(a: Audit, c: Ctx, lis: list[Tag]) -> None:
@@ -2074,7 +2205,7 @@ def history(a: Audit, c: Ctx) -> None:
     # a column for every model a stored session scores: this session's, then the rest
     # by name (a session without a Heston fit keeps the earlier sessions' Heston column)
     hist = history_models(c)
-    want_hd = (["Session", "Scored quotes", "Expiries"]
+    want_hd = (["Session", "Chain", "Book", "Scored quotes", "Expiries"]
                + [f"{M.label(m)} |z|, out of sample" for m in hist]
                + ["Repair moves outside spread", "VIX rep. − close", "VIX-term ATM / VIX"]
                + (["β estimator ATM 30d / VIX"] if beta else []))
@@ -2091,23 +2222,29 @@ def history(a: Audit, c: Ctx) -> None:
         a.date(P_HIST, f"{name} session", td[0], name)
         a.equal(P_HIST, f"{name} highlighted (the page's session)", "em" in (tr.get("class") or []),
                 name == c.session)
-        cell(a, P_HIST, f"{name} scored quotes (its residual table)", td[1],
+        sj = (x.sj if x is not None else None) or {}
+        a.text(P_HIST, f"{name} chain (its surface.json inputs)", td[1],
+               chain_short(sj.get("inputs") or {}, sj.get("universe") or {}) or "source not recorded")
+        td = td[1:]                     # the chain where the session was: later columns keep their index
+        a.text(P_HIST, f"{name} book (its surface.json record, this audit's clock rules)", td[1],
+               BOOK_LABELS.get(c.book(x) or "", "—"))
+        cell(a, P_HIST, f"{name} scored quotes (its residual table)", td[2],
              float(len(x.mkt)) if x is not None else M.num(r.get("n_quotes")))
-        cell(a, P_HIST, f"{name} expiries (its residual table)", td[2],
+        cell(a, P_HIST, f"{name} expiries (its residual table)", td[3],
              float(len(M.expiries(x))) if x is not None and x.sj is not None else None)
         for i, m in enumerate(hist):
             row = (c.sc_model(m, x) or {}) if x else {}
             scored = row.get("available") is not False
             o = ((row.get("metrics") or {}).get("out_of_sample") or {}) if scored else {}
             v = M.num(o.get("median_abs_hs"))
-            cell(a, P_HIST, f"{name} {M.label(m)} OOS median |z| (its scorecard.json)", td[3 + i], v)
+            cell(a, P_HIST, f"{name} {M.label(m)} OOS median |z| (its scorecard.json)", td[4 + i], v)
             gaps |= v is None
             if v is None and m.lower().startswith("heston"):
                 unfit.append(name)
             if x is not None and x.sc and v is not None:
-                a.num(P_HIST, f"{name} {M.label(m)} OOS median |z| (its residual table)", td[3 + i],
+                a.num(P_HIST, f"{name} {M.label(m)} OOS median |z| (its residual table)", td[4 + i],
                       oos_stats(c, m, x)["median_abs_hs"])
-        j = 3 + len(hist)
+        j = 4 + len(hist)
         n_out = float(x.mkt["arb_flag"].astype(bool).sum()) if x is not None and "arb_flag" in x.res else None
         cell(a, P_HIST, f"{name} repair moves outside spread (its residual arb_flag)", td[j],
              n_out if n_out is not None else M.num(r.get("arbitrage_quotes_outside_spread")))
@@ -2134,6 +2271,7 @@ def history(a: Audit, c: Ctx) -> None:
     a.equal(P_HIST, "note: why Heston has no fit, where the run records say (data_store/runs)",
             text_of(note).split(HIST_UNFIT, 1)[1] if HIST_UNFIT in text_of(note) else "",
             f"{norm(why)}." if why else "")
+    gap_by_book(a, c, [by.get(r["session"]) for r in idx])
 
 
 HIST_DASH = "A dash in a model’s column: the model is not scored on that session"
@@ -2179,11 +2317,103 @@ def history_models(c: Ctx) -> list[str]:
     return own + sorted({m for x in c.all for m in x.models} - set(own))
 
 
+GAP_NOTE_CLOSING = "A closing book is set against the Cboe close"
+GAP_NOTE_NO_CLOSING = "No session here was built from a closing book"
+GAP_NOTE_OVERNIGHT = "An overnight book was quoted hours after the close"
+GAP_NOTE_YAHOO_OVERNIGHT = ("A Yahoo overnight download records no quote time and was fetched in the next "
+                            "session’s overnight hours")
+GAP_NOTE_YAHOO = "A Yahoo chain records no quote time and was not fetched overnight"
+GAP_NOTE_OTHER = "Another Cboe book was quoted"
+
+
+def gap_by_book(a: Audit, c: Ctx, sessions: list[M.Session | None]) -> None:
+    """FUND_GRADE_PLAN 0.8: the replication gap (replicated − the DB's Cboe close) of the
+    sessions in index.json, grouped by the book each was built from (M.replication_book):
+    per book its sessions, the median and, with two or more, the range."""
+    by: dict[str, list[float]] = {}
+    for x in sessions:
+        gap = c.vix_gap(x) if x is not None and x.vx else None
+        book = c.book(x)
+        if gap is not None and book in BOOK_LABELS:
+            by.setdefault(book, []).append(gap)
+    want = [(b, sorted(by[b])) for b in M.BOOK_ORDER if by.get(b)]
+    tbl = a.one("#vix-gap-by-book")
+    a.equal(P_HIST, "gap-by-book table shown (a session with a book and a gap)", tbl is not None, bool(want))
+    if tbl is None:
+        return
+    texts(a, P_HIST, "gap-by-book columns", heads(tbl), ["Book", "Sessions", "Median", "Range"])
+    trs = rows(tbl)
+    if not same_len(a, P_HIST, "gap-by-book rows", trs, want):
+        return
+    for tr, (book, xs) in zip(trs, want):
+        td = tds(tr)
+        a.text(P_HIST, f"{book}: label", td[0], BOOK_LABELS[book])
+        a.num(P_HIST, f"{book}: sessions", td[1], float(len(xs)))
+        a.num(P_HIST, f"{book}: median gap", td[2], float(np.median(xs)))
+        if len(xs) > 1:
+            nums(a, P_HIST, f"{book}: range of the gap (lowest, highest)", td[3], [xs[0], xs[-1]])
+        else:
+            a.text(P_HIST, f"{book}: range (one session)", td[3], "—")
+    note = a.one("#vix-gap-by-book-note")
+    statics(a, P_HIST, "gap-by-book note", note, [])
+    # the note explains the books in the table, and no other
+    books = {b for b, _ in want}
+    for phrase, shown in ((GAP_NOTE_CLOSING, M.BOOK_CLOSING in books),
+                          (GAP_NOTE_NO_CLOSING, M.BOOK_CLOSING not in books),
+                          (GAP_NOTE_OVERNIGHT, M.BOOK_OVERNIGHT in books),
+                          (GAP_NOTE_YAHOO_OVERNIGHT, M.BOOK_YAHOO_OVERNIGHT in books),
+                          (GAP_NOTE_YAHOO, M.BOOK_YAHOO in books), (GAP_NOTE_OTHER, M.BOOK_OTHER in books)):
+        a.equal(P_HIST, f"gap-by-book note: {'says' if shown else 'does not say'} {phrase!r}",
+                phrase in text_of(note), shown)
+
+
 # ── the page ──────────────────────────────────────────────────────────────────
+P_FOOT = "panel source lines"
+
+
+def scorecard_fit_file(c: Ctx) -> str | None:
+    """The calibration file of the scorecard's Heston row (scorecard.json fit.source) when
+    the row says it is scored on another chain than its fit's (fit.scored_on_fit_chain
+    false) and the file is stored; None otherwise."""
+    for m in (c.sc or {}).get("models") or []:
+        fit = (m.get("fit") or {}) if isinstance(m, dict) else {}
+        if (str(m.get("model", "")).startswith("heston") and m.get("available") is not False
+                and fit.get("scored_on_fit_chain") is False and fit.get("source")
+                and (c.store.root / "calibrations" / str(fit["source"])).is_file()):
+            return str(fit["source"])
+    return None
+
+
+def chain_feet(a: Audit, c: Ctx) -> None:
+    """Every panel's source line (tier 0.2): the session's chain, its name and badge
+    parts as the chain badge has them ('Chain: Cboe · quotes at …'); the comparison's
+    names the session ('Chain of 2026-10-30: …'), whose earlier sessions' captions name
+    theirs. The scorecard's second line names the chain its Heston row was fitted on,
+    rebuilt from the fit's own record, exactly when the row is scored on another one."""
+    parts = chain_parts(c)
+    feet = a.soup.select("section.panel > .panel-foot.src-foot")
+    a.equal(P_FOOT, "source lines (a recorded chain source)", bool(feet), bool(parts))
+    fit_file = scorecard_fit_file(c)
+    a.equal(P_FOOT, "#scorecard fit chain line (its Heston row scored on another chain than its fit's)",
+            a.one("#scorecard-chain-2") is not None, fit_file is not None)
+    for el in feet:
+        sec = el.find_parent("section")
+        pid = str(sec.get("id")) if sec is not None else "?"
+        if pid == "scorecard" and el.get("id") == "scorecard-chain-2" and fit_file is not None:
+            cal = c.store.pickle(f"calibrations/{fit_file}")
+            m = re.search(r"\d{4}-\d{2}-\d{2}", fit_file)       # joint_cal_<session>.pkl
+            w = chain_words(fit_chain_inputs(c.store, cal, m.group(0) if m else c.session))
+            a.text(P_FOOT, "#scorecard fit chain line (the fit's own record)", el,
+                   "Fit chain: " + " · ".join([w[0], *w[2]]) if w else "Fit chain: source not recorded")
+            continue
+        label = f"Chain of {c.session}" if pid == "surface-change" else "Chain"
+        a.text(P_FOOT, f"#{pid} source line", el, f"{label}: " + " · ".join(parts))
+
+
 PANELS: tuple[Callable[[Audit, Ctx], None], ...] = (
     page_head, staleness, state_tiles, score_tiles, arb_tile, delta_grid, surface_change, atm_term,
     vol_cone, rnd, iv_heat, residual_heat, residual_table, slices_panel, scorecard, by_expiry, arbitrage,
-    vix_replication, varswap, history)
+    vix_replication, varswap, history, chain_feet)
 
 
 def run(a: Audit, store: Store) -> None:

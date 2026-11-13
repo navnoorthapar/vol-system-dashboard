@@ -29,8 +29,9 @@ import pandas as pd
 from bs4 import Tag
 
 from . import overview_math as om
+from . import surface_math as SM
 from .core import DATE, Audit, norm, numbers_in, rounds_to, text_of
-from .data import Store, chain_words, sessions_between
+from .data import Store, book_short, chain_stamp, chain_words, fit_chain_inputs, sessions_between
 
 P_BADGE, P_FIND, P_KEY = "page badge", "findings", "key results"
 P_REG, P_TS, P_PDV = "regime", "term structure", "implied vs forecast"
@@ -515,6 +516,29 @@ def stale_cause(store: Store, f: Facts, session: str) -> str | tuple[str, str, b
 Item = tuple[str, str, Parts, str]          # (link, lead, parts, note)
 
 
+def surface_stamp(store: Store, session: str) -> str:
+    """The chain a surface session was built from, as a page names it (tier 0.2):
+    'Cboe, quotes at …' from its surface.json inputs."""
+    path = f"surface/{session}/surface.json"
+    sj = store.json(path) if (store.root / path).exists() else {}
+    return chain_stamp(sj.get("inputs") or {}, sj.get("universe") or {}) or "chain source not recorded"
+
+
+def fit_stamp(store: Store, f: Facts, session: str) -> str:
+    """The chain the gate-passing fit of ``session`` was made on (its chain_diagnostics
+    and stored chain), as a page names it."""
+    own = next((r for r in reversed(f["gated"]) if r["session"] == session), None)
+    return ((chain_stamp(fit_chain_inputs(store, own["cal"], session)) if own else None)
+            or "chain source not recorded")
+
+
+def chains_said(stamps: list[tuple[str, str]]) -> str:
+    """' Chain: …; fit chain: ….': the end of a finding that names its chains, labelled
+    by what they are ('Chain' a surface's book, 'Fit chain' a fit's)."""
+    out = [f"{lab if i == 0 else lab[0].lower() + lab[1:]}: {s}" for i, (lab, s) in enumerate(stamps)]
+    return " " + "; ".join(out) + "."
+
+
 def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
     """'Works': the surface on held-out strikes (the headline fit's session), the VIX
     replication of the session Surface shows (its stored gap checked against replicated
@@ -525,8 +549,9 @@ def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
     if sh and sh["cur"]["mhs"] is not None:
         c = sh["cur"]
         items.append(("surface.html#scorecard", "Arbitrage-free SVI surface",
-                      [c["mhs"], c["inside"], sh["sess"], *([sh["newer"]] if sh["newer"] else [])],
-                      "scorecard.json out_of_sample of the headline fit's session"))
+                      [c["mhs"], c["inside"], sh["sess"], *([sh["newer"]] if sh["newer"] else []),
+                       chains_said([("Chain", surface_stamp(store, sh["sess"]))])],
+                      "scorecard.json out_of_sample of the headline fit's session; its surface's chain"))
         # the replication of the session the Surface page shows (the newest surface session),
         # which the item links to, not the headline fit's: no Heston figure is paired with it
         shown = store.surface_sessions()[-1]
@@ -543,7 +568,8 @@ def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
                       rep_v - off)
             n_dep = om.vix_departures(rep)
             items.append(("surface.html#vix-replication", "VIX replicated from the stored chain",
-                          [gap, shown, *([float(n_dep)] if n_dep else [])],
+                          [gap, shown, *([float(n_dep)] if n_dep else []),
+                           chains_said([("Chain", surface_stamp(store, shown))])],
                           ("gap from vix_replication.json of the session Surface shows; departures are "
                            "its listed deviations")))
     legacy = sum(r["legacy"] for r in f["arc"])
@@ -552,20 +578,23 @@ def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
     items.append(("calibration.html#history", "The gate keeps broken-data fits off the page",
                   [float(legacy), float(len(cur)), *([float(n_ok)] if n_ok != len(cur) else [])],
                   "every joint_cal_*.pkl, legacy flag and gate restated"))
-    sk = skew_item(f)
+    sk = skew_item(store, f)
     return items + ([sk[1]] if sk and sk[0] else [])
 
 
-def skew_item(f: Facts) -> tuple[bool, Item] | None:
+def skew_item(store: Store, f: Facts) -> tuple[bool, Item] | None:
     """Heston's ATM skew against the SVI-cal market's: (within 10% at every listed
     expiry, the item)."""
     sk = f["skew"]
     if not sk:
         return None
     f0 = sk["rows"][0]
+    # the market's skew is read off the surface's book, Heston's off the headline fit
+    stamps = chains_said([("Chain", surface_stamp(store, sk["head"])),
+                          ("Fit chain", fit_stamp(store, f, f["head"]["session"]))]) if f["head"] else ""
     parts = [sk["lo"], sk["hi"], *([] if sk["steeper"] or sk["flatter"] else [float(len(sk["rows"]))]),
              sk["head"], abs(f0["heston"]), abs(f0["svi"]), f0["T_days"], min(sk["slopes"]),
-             max(sk["slopes"]), float(len(sk["slopes"]))]
+             max(sk["slopes"]), float(len(sk["slopes"])), *([stamps] if stamps else [])]
     works = sk["lo"] >= 0.9 and sk["hi"] <= 1.1
     lead = ("Heston's ATM skew matches the market's" if works else
             "Heston's ATM skew is steeper than the market's" if sk["steeper"] else
@@ -595,9 +624,10 @@ def fails_items(store: Store, f: Facts) -> list[Item]:
     if head and se:
         vv = own_vvix(f)
         items.append(("calibration.html#oos", "One-factor Heston at the short end",
-                      [se[2], se[0], se[1], *(vv or ()), head["session"]],
+                      [se[2], se[0], se[1], *(vv or ()), head["session"],
+                       chains_said([("Fit chain", fit_stamp(store, f, head["session"]))])],
                       f"worst expiry ≤ {SHORT_END_DAYS:.0f} days of the headline pickle"))
-    sk = skew_item(f)
+    sk = skew_item(store, f)
     if sk and not sk[0]:
         items.append(sk[1])
     inf, bt = f["inf"], f["bt"]
@@ -633,7 +663,8 @@ def next_items(store: Store, f: Facts) -> list[Item]:
         side = h_side(jr["cur"])
         items.append(("calibration.html#rough-vs-heston", "Rough Heston in production",
                       [float(jr["lower"]), float(jr["n"]),
-                       *([jr["cur"]["joint_rough_H"]] if side == "floor" else []), jr["cur"]["session"]],
+                       *([jr["cur"]["joint_rough_H"]] if side == "floor" else []), jr["cur"]["session"],
+                       chains_said([("Fit chain", fit_stamp(store, f, jr["cur"]["session"]))])],
                       "diagnostics/summary.json rows"))
     legs = f["legs"]
     with_leg = [v["leg"] for v in legs["views"] if v["leg"]]
@@ -681,7 +712,43 @@ def check_findings(a: Audit, store: Store, f: Facts) -> None:
             if li is not None:
                 a.text(P_FIND, f"{href}: lead", li.a, lead)
             said(a, P_FIND, href, li, parts, note)
+            for p_ in parts:                    # the chains it names, word for word (tier 0.2)
+                if isinstance(p_, str) and p_.startswith((" Chain: ", " Fit chain: ")):
+                    says(a, P_FIND, f"{href}: its chains", li, p_.strip(), True)
     check_finding_words(a, f)
+    check_replication_book(a, store)
+
+
+# FUND_GRADE_PLAN 0.8: the book the VIX replication's gap was taken on, as the finding
+# names it (no number in it): only a closing book's gap is the replication's own error
+BOOK_BUILT = {
+    SM.BOOK_CLOSING: ("Built from the session’s closing book, whose quotes are the ones standing when the "
+                      "Cboe close is computed."),
+    SM.BOOK_OVERNIGHT: ("Built from the session’s overnight book, quoted hours after the close, so the gap "
+                        "also holds the market’s move overnight."),
+    SM.BOOK_YAHOO_OVERNIGHT: ("Built from a Yahoo download fetched in the next session’s overnight "
+                              "hours; Yahoo records no quote time, so the gap may hold the market’s move "
+                              "overnight."),
+    SM.BOOK_YAHOO: ("Built from a Yahoo chain that records no quote time and was not fetched overnight, so "
+                    "when its quotes stood is not known."),
+    SM.BOOK_OTHER: "Built from a Cboe book quoted neither at the close nor overnight.",
+}
+
+
+def check_replication_book(a: Audit, store: Store) -> None:
+    """The VIX replication finding names the book of the session the Surface page shows
+    (the newest surface session), classified by this audit's clock (SM.replication_book
+    on its surface.json record: a Cboe book by its quote time, a Yahoo chain by when it
+    was downloaded), and no other book."""
+    li = by_text(a.one("#find-list-works"), "li", "VIX replicated from the stored chain")
+    if li is None:
+        return
+    shown = store.surface_sessions()[-1]
+    path = f"surface/{shown}/surface.json"
+    sj = store.json(path) if (store.root / path).exists() else {}
+    book = SM.replication_book(sj.get("inputs"), shown, sj.get("universe"))
+    for b, phrase in BOOK_BUILT.items():
+        says(a, P_FIND, f"VIX replication: the book of {shown}", li, phrase, b == book)
 
 
 def check_finding_words(a: Audit, f: Facts) -> None:
@@ -729,7 +796,7 @@ def check_key_results(a: Audit, store: Store, f: Facts) -> None:
     if sh and sh["cur"]["mhs"] is not None:
         surface_card(a, store, sh, card.get("surface.html#scorecard"))
     if jr:
-        joint_card(a, f, jr, card.get("calibration.html#rough-vs-heston"))
+        joint_card(a, store, f, jr, card.get("calibration.html#rough-vs-heston"))
     if f["inf"] and f["bt"]:
         backtest_card(a, f["inf"], f["bt"], card.get("research.html#inference"))
 
@@ -750,18 +817,19 @@ def surface_card(a: Audit, store: Store, sh: dict[str, Any], c: Tag | None) -> N
     a.text(P_KEY, "surface card: what is held out", part(c, ".result-k"),
            f"Arbitrage-free SVI surface · {held}")
     said(a, P_KEY, "surface card: median |model − mid|, half-spreads", part(c, ".result-v"), [cur["mhs"]])
-    words = chain_words(inputs)
+    words = chain_words(inputs, sj.get("universe") or {})
     detail: Parts = [float(cur["n"]), sh["sess"], *([sh["newer"]] if sh["newer"] else []), cur["inside"]]
     if cur["butterfly"] is not None and cur["calendar"] is not None:
         detail += [float(cur["butterfly"]), float(cur["calendar"])]
     if hes:
         detail += [hes["mhs"], hes["inside"]]
-    detail += [f" {words[0]}, {words[1]}."] if words else []  # (name, time clause, badge parts)
+    # (name, time clause, badge parts ending with the two-sided share)
+    detail += [f" {words[0]}, {words[1]}, {words[2][-1]}."] if words else []
     el = part(c, ".result-d")
     said(a, P_KEY, "surface card: detail", el, detail, "scorecard.json, surface.json inputs")
     says(a, P_KEY, "surface card: detail", el, NEWER, bool(sh["newer"]))
     if words:
-        says(a, P_KEY, "surface card: detail", el, f"{words[0]}, {words[1]}.", True)
+        says(a, P_KEY, "surface card: detail", el, f"{words[0]}, {words[1]}, {words[2][-1]}.", True)
     rng = part(c, ".kpi-ci.kpi-range")
     if present(a, P_KEY, "surface card: range over sessions", rng, sh["n_sessions"] > 1) and rng is not None:
         mh = [r["mhs"] for r in sh["rows"] if r["mhs"] is not None]
@@ -771,7 +839,7 @@ def surface_card(a: Audit, store: Store, sh: dict[str, Any], c: Tag | None) -> N
     a.text(P_KEY, "surface card: source", part(c, ".src"), f"data_store/surface/{sh['sess']}/scorecard.json")
 
 
-def joint_card(a: Audit, f: Facts, jr: dict[str, Any], c: Tag | None) -> None:
+def joint_card(a: Audit, store: Store, f: Facts, jr: dict[str, Any], c: Tag | None) -> None:
     """Heston's out-of-sample RMSE on the headline session, rough Heston beside it, the
     counts over diagnosed sessions and the ranges (with κ's curvature SE)."""
     cur, head = jr["cur"], f["head"]
@@ -781,8 +849,11 @@ def joint_card(a: Audit, f: Facts, jr: dict[str, Any], c: Tag | None) -> None:
     detail += [cur["session"], cur["joint_rough_oos"]]
     detail += [cur["joint_rough_H"]] if cur.get("joint_rough_H") is not None else []
     detail += [float(jr["lower"]), float(jr["n"]), float(jr["same"])]
+    stamp = fit_stamp(store, f, cur["session"])
+    detail += [f" Fit chain: {stamp}."]
     el = part(c, ".result-d")
     said(a, P_KEY, "joint fit card: detail", el, detail, "diagnostics/summary.json")
+    says(a, P_KEY, "joint fit card: its fit's chain (chain_diagnostics)", el, f" Fit chain: {stamp}.", True)
     says(a, P_KEY, "joint fit card", el, "(σ on its box cap)", "sigma" in (cur.get("on_bound") or []))
     says(a, P_KEY, "joint fit card", el, "on its floor", h_side(cur) == "floor")
     says(a, P_KEY, "joint fit card", el, "(= Heston)", h_side(cur) == "ceiling")
@@ -1306,6 +1377,11 @@ def check_fit(a: Audit, store: Store, f: Facts) -> None:
         a.num(P_FIT, f"{key} value", sp, v)
     check_surface_line(a, store, f, sec)
     check_constraints(a, f, sec, box)
+    stamp = chain_stamp(fit_chain_inputs(store, cal, head["session"])) or "chain source not recorded"
+    fc = sec.select_one("#fit-chain")
+    if present(a, P_FIT, "the fit's chain", fc, True) and fc is not None:
+        said(a, P_FIT, "the fit's chain (its chain_diagnostics)", fc, [stamp])
+        a.text(P_FIT, "the fit's chain (its chain_diagnostics)", fc, f"Fit chain: {stamp}.")
 
 
 def check_surface_line(a: Audit, store: Store, f: Facts, sec: Tag) -> None:
@@ -1323,10 +1399,14 @@ def check_surface_line(a: Audit, store: Store, f: Facts, sec: Tag) -> None:
     if not present(a, P_FIT, "surface line", el, cm is not None) or cm is None or el is None or sess is None:
         return
     age = sessions_between(sess, f["ref_mkt"])
-    said(a, P_FIT, "1M ATMF, RR25, BF25 (SVI-cal, 30 days) and age", el,
+    sj = store.json(f"surface/{sess}/surface.json")
+    stamp = chain_stamp(sj.get("inputs") or {}, sj.get("universe") or {})
+    said(a, P_FIT, "1M ATMF, RR25, BF25 (SVI-cal, 30 days), age and the surface's chain", el,
          [f"at {CM_DAYS} days", cm["atmf"], *[x for x in (cm["rr25"], cm["bf25"]) if x is not None], sess,
-          *([float(age)] if age else [])],
+          *([float(age)] if age else []), *([stamp] if stamp else [])],
          "linear in total variance at fixed forward delta between the bracketing expiries")
+    if stamp:
+        says(a, P_FIT, "surface line: its chain (surface.json inputs)", el, f"; {stamp})", True)
     says(a, P_FIT, "surface line", el, "RR25 —", cm["rr25"] is None)
     a.text(P_FIT, "surface age wording", el,
            "the newest session" if age == 0 else f"{om.plural(age, 'session')} old", contains=True)
@@ -1399,39 +1479,71 @@ def check_constraints(a: Audit, f: Facts, sec: Tag, box: dict[str, tuple[float, 
 
 
 # ── pipeline ─────────────────────────────────────────────────────────────────
+def check_pipeline_books(a: Audit, store: Store, books: Tag | None) -> None:
+    """The pipeline panel's "Cboe option books" cell: every book of each
+    underlying's newest session (a weekday session can hold its closing and its
+    overnight book, FUND_GRADE_PLAN 0.8), oldest quote first, its counts
+    recomputed from its stored quotes (a manifest's book is held privately: its
+    record's counts), each named by its recorded state and by its chain (tier 0.2:
+    Cboe, its quote time, the share of its lines that are two-sided, from those
+    counts)."""
+    # every book record: beside a raw book committed here, or the manifest of one
+    # held in the private data repository
+    by_und: dict[str, list[dict[str, Any]]] = {}
+    for sub in ("cboe", "cboe_manifest"):
+        for jp in sorted((store.root / "options" / sub).glob("*.json")):
+            rec = store.json(f"options/{sub}/{jp.name}")
+            und = str(rec.get("underlying") or jp.name.split("_")[0]).upper()
+            by_und.setdefault(und, []).append({**rec, "path": jp})
+    newest: dict[str, list[dict[str, Any]]] = {}
+    for und, recs in by_und.items():
+        recs.sort(key=lambda r: (str(r.get("session")), str(r.get("quote_time"))))
+        newest[und] = [r for r in recs if str(r.get("session")) == str(recs[-1].get("session"))]
+    parts: Parts = []
+    named_as: dict[tuple[str, int], str] = {}
+    for und in sorted(newest):
+        parts.append(newest[und][0]["session"])
+        for i, rec in enumerate(newest[und]):
+            book = rec["path"].with_suffix(".parquet")
+            n: Any
+            two: Any
+            exp: Any
+            if rec["path"].parent.name == "cboe" and book.exists():
+                q = pd.read_parquet(book, columns=["expiry", "bid", "ask"])
+                two_sided = (q["bid"] > 0) & (q["ask"] >= q["bid"])
+                n, two, exp = len(q), int(two_sided.sum()), int(q["expiry"].nunique())
+            else:
+                n, two, exp = rec.get("rows"), rec.get("two_sided_rows"), rec.get("expiries")
+            named_as[(und, i)] = book_short(rec.get("quote_time"), n, two)
+            parts += [float(n) if n is not None else None, float(two) if two is not None else None,
+                      float(exp) if exp is not None else None, named_as[(und, i)]]
+    said(a, P_PIPE, "Cboe option books (counts from the stored quotes; each book's chain)", books, parts,
+         "rows; two-sided = bid > 0 and ask ≥ bid; expiries; Cboe, quote time, two-sided share of the lines")
+    flag = {"gth": "(overnight book)", "closing": "(closing book)"}
+    # (each book is an element of its own: the text read has a space where one ends)
+    segs = [x.strip() for x in text_of(books).split(";")] if books is not None else []
+    a.equal(P_PIPE, "Cboe option books: one entry per underlying", len(segs), len(newest))
+    for und, seg in zip(sorted(newest), segs):
+        named = [x.strip() for x in seg.split(" and ")]
+        a.equal(P_PIPE, f"{und} {newest[und][0]['session']}: every book of the session named",
+                len(named), len(newest[und]))
+        for i, (rec, part) in enumerate(zip(newest[und], named)):
+            got = next((f for f in flag.values() if part.endswith(f)), None)
+            a.equal(P_PIPE, f"{und} book {i + 1}: named by its recorded state ({rec.get('book_state')})",
+                    got, flag.get(str(rec.get("book_state"))))
+            a.text(P_PIPE, f"{und} book {i + 1}: its chain (tier 0.2)", part, named_as[(und, i)],
+                   contains=True)
+
+
 def check_pipeline(a: Audit, store: Store, f: Facts) -> None:
-    """What the repository holds: the newest Cboe book per underlying (counts
-    recomputed from its stored quotes), accepted fits, surface reports, diagnostics,
+    """What the repository holds: every Cboe book of each underlying's newest
+    session (check_pipeline_books), accepted fits, surface reports, diagnostics,
     the forward ledger and the backtest window."""
     tbl = a.need("table#pipeline", P_PIPE)
     if tbl is None:
         return
     rows = {text_of(tr.th): tr.td for tr in tbl.select("tbody tr") if tr.th is not None}
-    newest: dict[str, dict[str, Any]] = {}
-    for jp in sorted((store.root / "options" / "cboe").glob("*.json")):
-        rec = store.json(f"options/cboe/{jp.name}")
-        und = str(rec.get("underlying") or jp.name.split("_")[0]).upper()
-        key = (str(rec.get("session")), str(rec.get("quote_time")))
-        if und not in newest or key > (str(newest[und].get("session")), str(newest[und].get("quote_time"))):
-            newest[und] = {**rec, "path": jp}
-    parts: Parts = []
-    for und in sorted(newest):
-        rec = newest[und]
-        book = rec["path"].with_suffix(".parquet")
-        if book.exists():
-            q = pd.read_parquet(book, columns=["expiry", "bid", "ask"])
-            two_sided = (q["bid"] > 0) & (q["ask"] >= q["bid"])
-            n, two, exp = len(q), int(two_sided.sum()), int(q["expiry"].nunique())
-        else:
-            n, two, exp = rec["rows"], rec["two_sided_rows"], rec["expiries"]
-        parts += [rec["session"], float(n), float(two), float(exp),
-                  str(rec.get("quote_time") or "").replace("T", " ").replace("Z", " UTC")]
-    books = rows.get("Cboe option books")
-    said(a, P_PIPE, "Cboe option books (counts from the stored quotes)", books, parts,
-         "rows; two-sided = bid > 0 and ask ≥ bid; expiries")
-    for und, seg in zip(sorted(newest), text_of(books).split("; ")):
-        a.equal(P_PIPE, f"{und} book: overnight flag (book_state gth)", seg.endswith("(overnight book)"),
-                newest[und].get("book_state") == "gth")
+    check_pipeline_books(a, store, rows.get("Cboe option books"))
     said(a, P_PIPE, "accepted joint fits", rows.get("Accepted joint fits"),
          [float(len(f["gated"])), f"model_version {om.GATE['model_version']}",
           *([f["head"]["session"]] if f["head"] else [])])

@@ -5,7 +5,7 @@
 
 {% block content %}
 {% set f = d.fit or {} %}
-<div class="page-head">
+<div class="page-head" data-chain="parts">
   <h1 class="page-title">Joint SPX/VIX calibration</h1>
   <p class="page-sub" id="what-it-is">An end-of-day research system for SPX and VIX options. Its daily job is built to store each U.S. session's option books, fit an arbitrage-free market surface and one stochastic-volatility model jointly to the SPX smile and the VIX index term structure (VIX options are a research leg, not in the fit), and score both on quotes they were not fitted to, in units of the quoted half-spread; the pipeline panel lists what is stored so far. Greeks, scenarios and a mark-to-model backtest with its statistical inference are built from the same fits.</p>
   <div class="page-badge">
@@ -23,7 +23,7 @@
   <section class="find-col" aria-labelledby="find-{{ col.key }}">
     <h3 class="find-head" id="find-{{ col.key }}" data-disclose="find-list-{{ col.key }}" data-count="{{ col['items']|length }}"><span class="find-glyph" aria-hidden="true">{{ col.glyph }}</span>{{ col.title }}</h3>
     <ul class="find-list fold-body" id="find-list-{{ col.key }}">
-      {% for it in col['items'] %}<li class="find-item"><a href="{{ it.href }}">{{ it.lead }}</a>: {{ it.text|dates }}</li>{% endfor %}
+      {% for it in col['items'] %}<li class="find-item"{% if it.chain %} data-chain="{{ it.chain }}"{% endif %}><a href="{{ it.href }}">{{ it.lead }}</a>: {{ it.text|dates }}</li>{% endfor %}
     </ul>
   </section>
   {% endfor %}
@@ -33,7 +33,7 @@
 <h2 class="section-title">Key results</h2>
 <div class="kpis" id="key-results" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:8px;">
   {% for r in d.key_results %}
-  <a class="result" href="{{ r.href }}" style="text-decoration:none;color:inherit;">
+  <a class="result" href="{{ r.href }}"{% if r.chain %} data-chain="{{ r.chain }}"{% endif %} style="text-decoration:none;color:inherit;">
     <span class="result-k">{{ r.key }}</span>
     <span class="result-v">{{ r.value }}<span class="unit">{{ r.unit }}</span></span>
     <span class="result-d">{{ r.detail }}</span>
@@ -47,7 +47,7 @@
 <p class="note" style="margin:0 0 12px;">Every figure is read from the committed artifact named under it. A half-spread is half the quoted bid–ask in implied-vol terms, so a model within one half-spread of the mid sits inside the quote. Backtest dollars are mark-to-model, never traded fills.</p>
 
 <div class="g trio">
-  {% call m.panel('state-regime', 'Regime · rule label', 's4', d.regime_date) %}
+  {% call m.panel('state-regime', 'Regime · rule label', 's4', d.regime_date, chain='none') %}
     {% if d.regime is not none %}
     <div class="kpi-value" style="display:flex;align-items:center;gap:8px;">
       <span aria-hidden="true" style="width:10px;height:10px;border-radius:2px;background:{{ d.regime_color }};flex-shrink:0;"></span>
@@ -79,14 +79,14 @@
     {% endcall %}
   {% endcall %}
 
-  {% call m.panel('state-ts', 'VIX term structure', 's4', d.ts_date) %}
+  {% call m.panel('state-ts', 'VIX term structure', 's4', d.ts_date, chain='none') %}
     {% if d.charts.ts %}
     {{ m.chart(d.charts.ts, 'h220 grow') }}
     <p class="note">{{ d.ts_tenors[0] }} {{ d.ts_values[0]|fmt(".2f") }} → {{ d.ts_tenors[-1] }} {{ d.ts_values[-1]|fmt(".2f") }} (slope {{ (d.ts_values[-1] - d.ts_values[0])|signed(".2f") }} index pts, {{ d.ts_regime|lower }}){% if d.ts_date != d.vix_date %}; latest full curve — VIX itself is from {{ d.vix_date|fmt }}{% endif %}.</p>
     {% else %}<p class="note">No term-structure data.</p>{% endif %}
   {% endcall %}
 
-  {% call m.panel('state-pdv', 'Implied vs forecast vol', 's4', d.pdv_date) %}
+  {% call m.panel('state-pdv', 'Implied vs forecast vol', 's4', d.pdv_date, chain='none') %}
     {% if d.pdv_forecast is not none %}
     {% if d.pdv_stale %}
     <div id="pdv-stale-flag" class="banner banner-stale-warn" role="status">
@@ -137,7 +137,7 @@
 {% set vc = d.vx_curve %}{% set vr = d.vix_ratio %}
 {% if vc or (vr and d.charts.vix_ratio) %}
 <div class="g pair">
-  {% call m.panel('vx-curve', 'VX futures curve · on its own date', 's6', vc.date if vc else None) %}
+  {% call m.panel('vx-curve', 'VX futures curve · on its own date', 's6', vc.date if vc else None, chain='none') %}
     {% if vc and d.charts.vx_curve %}
     <p class="note" id="vx-curve-age"><span class="age-{{ vc.level if vc.level in ('ok', 'warn', 'error') else 'ok' }}">Settlements of <span class="nowrap">{{ vc.date }}</span>{% if vc.age == 0 %}, the newest session{% elif vc.age is not none %}, {{ vc.age|plural('NYSE session') }} before the newest session, <span class="nowrap">{{ vc.ref }}</span>{% endif %}{% if vc.ref_source and vc.age is not none %} ({{ vc.ref_source }}){% endif %}</span>; the daily job stores each session’s Cboe settlements after its close.</p>
     {% if vc.settled_text %}<p class="note" id="vx-settled">Left out: {{ vc.settled_text }}, settled by <span class="nowrap">{{ vc.cut }}</span>; M1 is the first contract still trading on it.</p>{% endif %}
@@ -148,7 +148,7 @@
     {% else %}<p class="note" id="vx-basis">VX1 − VIX: the market database has no VIX close of <span class="nowrap">{{ vc.date }}</span>.</p>{% endif %}
     {% else %}<p class="note" id="vx-empty">{{ d.vx_empty }}</p>{% endif %}
   {% endcall %}
-  {% call m.panel('vix-ratio', 'VIX / VIX3M · since ' ~ (vr.first if vr else ''), 's6', vr.last if vr else None) %}
+  {% call m.panel('vix-ratio', 'VIX / VIX3M · since ' ~ (vr.first if vr else ''), 's6', vr.last if vr else None, chain='none') %}
     {% if vr and d.charts.vix_ratio %}
     {{ m.chart(d.charts.vix_ratio, 'h220 grow') }}
     <p class="note" id="vix-ratio-line">Above 1 (backwardation: the 30-day index over the 3-month one) on <strong>{{ vr.share_above|fmt('.1f') }}% of {{ vr.n|fmt(',') }} sessions</strong>, shaded. Today {{ vr.today|fmt('.3f') }}, the <strong>{{ vr.rank.big }}{% if not vr.rank.record %} percentile{% endif %}</strong> of the {{ vr.n_prior|fmt(',') }} prior sessions since <span class="nowrap">{{ vr.first }}</span>{% if vr.rank.tail %} ({{ vr.rank.tail }}){% endif %}.</p>
@@ -158,7 +158,7 @@
 {% endif %}
 
 <div class="g pair top">
-  {% call m.panel('state-fit', 'Headline fit · Heston, joint SPX/VIX', 's6', f.session) %}
+  {% call m.panel('state-fit', 'Headline fit · Heston, joint SPX/VIX', 's6', f.session, chain=('fit:' ~ f.session) if f.session else 'none', foot=False) %}
     <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">
       {{ m.kpi('SPX RMSE in sample', f.spx_rmse|fmt('.2f'), unit='vol pts', sub=(f.n_spx_options|fmt) ~ ' anchors, ' ~ (f.n_spx_expiries|fmt) ~ ' expiries') }}
       {{ m.kpi('Out of sample', f.spx_oos_rmse|fmt('.2f'), unit='vol pts', sub=(f.n_oos|fmt(',')) ~ ' quotes') }}
@@ -166,29 +166,29 @@
       {{ m.kpi('VIX indices', f.vix_index_rmse|fmt('.2f'), unit='index pts RMSE') }}
       {% if f.vvix %}{{ m.kpi('VVIX model / market', (f.vvix.model|fmt('.0f')) ~ ' / ' ~ (f.vvix.market|fmt('.0f')), sub='30-day vol of VIX, index pts') }}{% endif %}
     </div>
-    <p class="note" id="fit-evidence">Evidence on the Calibration page: {{ m.cite('out-of-sample error by expiry', 'calibration.html#oos') }} · {{ m.cite('the VIX leg, indices and VX futures', 'calibration.html#vixleg') }}.</p>
+    <p class="note" id="fit-evidence">{% if f.session %}<span id="fit-chain">Fit chain: {{ f.chain or 'chain source not recorded' }}.</span> {% endif %}Evidence on the Calibration page: {{ m.cite('out-of-sample error by expiry', 'calibration.html#oos') }} · {{ m.cite('the VIX leg, indices and VX futures', 'calibration.html#vixleg') }}.</p>
     <p class="note">
       {% for t in f.tiles %}<span class="nowrap">{{ t.sym }} {{ t.value|fmt(t.spec) }}{% if t.side %} {{ m.chip('at ' ~ (t.side if t.side != 'bound' else '') ~ ' bound', 'watch') }}{% endif %}</span>{{ ' · ' if not loop.last else '' }}{% endfor %}
     </p>
-    {% if d.surface_line %}{% set sl = d.surface_line %}<p class="note" id="surface-line">Market surface, SVI-cal at 30 days: <span class="nowrap">1M ATMF {{ sl.atmf }}%</span> · <span class="nowrap">RR25 {{ sl.rr25 }}</span> · <span class="nowrap">BF25 {{ sl.bf25 }} vol pts</span> (surface <span class="nowrap">{{ sl.session }}</span>, {{ sl.age }}). <a href="/surface#delta-grid">Delta grid</a>.</p>{% endif %}
+    {% if d.surface_line %}{% set sl = d.surface_line %}<p class="note" id="surface-line" data-chain="surface:{{ sl.session }}">Market surface, SVI-cal at 30 days: <span class="nowrap">1M ATMF {{ sl.atmf }}%</span> · <span class="nowrap">RR25 {{ sl.rr25 }}</span> · <span class="nowrap">BF25 {{ sl.bf25 }} vol pts</span> (surface <span class="nowrap">{{ sl.session }}</span>, {{ sl.age }}{% if sl.chain %}; {{ sl.chain }}{% endif %}). <a href="/surface#delta-grid">Delta grid</a>.</p>{% endif %}
     {% set rg = f.ridge or {} %}
     <p class="note" id="fit-constraints">{% if f.active_constraints %}On a bound: {{ f.active_constraints|join('; ') }}. The other {{ f.effective_dof }} parameters are interior, fitted given that bound{% if rg.moves %}, and κ is not pinned by the data either: it moves with the σ cap along a κ–σ ridge (σ profile: κ {{ rg.kappa_lo|fmt('.1f') }} at σ ≤ {{ rg.cap_lo|fmt('g') }}, {{ rg.kappa_fit|fmt('.1f') }} at the fit's cap, {{ rg.kappa_top|fmt('.1f') }} at σ ≤ {{ rg.cap_top|fmt('g') }}){% if rg.kappa_rse is not none %}; κ's curvature SE is {{ (rg.kappa_rse * 100)|fmt('.0f') }}%{% endif %}{% endif %}.{% else %}No parameter on a bound.{% endif %} Feller {{ f.feller_state|fmt }} (margin {{ f.feller_margin|signed('.2f') }}; diagnostic, not imposed).{% if f.free_sigma %}{% set fs = f.free_sigma %} <span id="free-sigma">{% if fs.sigma_max is not none and fs.kappa_max is not none %}Refitted in a wider box (σ ≤ {{ fs.sigma_max|fmt('g') }}, κ ≤ {{ fs.kappa_max|fmt('g') }}; production has κ ≤ {{ fs.kappa_box|fmt('g') }}){% else %}Refitted without the σ cap{% endif %}, it goes to σ {{ fs.sigma|fmt('.2f') }}, κ {{ fs.kappa|fmt('.1f') }}{% if fs.loss_rel is not none %}, loss {{ (fs.loss_rel * 100)|signed('.1f') }}%{% endif %}, out-of-sample RMSE {{ fs.oos_cap|fmt('.2f') }} → {{ fs.oos|fmt('.2f') }} vol pts.</span>{% endif %} <a href="/calibration">Calibration page</a>.</p>
   {% endcall %}
 
-  {% call m.panel('state-pipeline', 'Pipeline · what is stored', 's6', 'build ' ~ (chrome.build.short or 'unknown')) %}
+  {% call m.panel('state-pipeline', 'Pipeline · what is stored', 's6', 'build ' ~ (chrome.build.short or 'unknown'), chain=('parts' if (d.pipeline or {}).captures else 'none')) %}
     {% set pl = d.pipeline %}
     {% if pl %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Pipeline state (scrollable)">
     <table class="tbl dense" id="pipeline">
       <caption class="sr-only">What the repository has stored, and which records the scheduled job wrote</caption>
       <tbody>
-        <tr><th scope="row">Cboe option books</th><td>{% for c in pl.captures %}<span class="nowrap">{{ c.underlying }} {{ c.session }}:</span> {{ c.rows|fmt(',') }} lines ({{ c.two_sided_rows|fmt(',') }} two-sided, {{ c.expiries|fmt }} expiries), quotes {{ (c.quote_time or '')|replace('T', ' ')|replace('Z', ' UTC')|dates }}{% if c.book_state == 'gth' %} (overnight book){% endif %}{{ '; ' if not loop.last else '' }}{% else %}none stored yet{% endfor %}</td></tr>
-        <tr><th scope="row">Accepted joint fits</th><td>{{ pl.fits|fmt }} (model_version 2), newest {{ pl.fits_newest|fmt }}</td></tr>
-        <tr><th scope="row">Surface reports</th><td>{{ pl.surface_sessions|length }} sessions{% if pl.surface_sessions %}, {{ pl.surface_sessions[0] }} → {{ pl.surface_sessions[-1] }}{% endif %}</td></tr>
-        <tr><th scope="row">Calibration diagnostics</th><td>{{ pl.diag_sessions|length }} sessions (σ profile, identifiability, rough Heston)</td></tr>
-        <tr><th scope="row">Forward ledger</th><td>{% if pl.forward and pl.forward.state == 'ok' %}{{ pl.forward.n|plural('session') }}, {{ pl.forward.first }} → {{ pl.forward.last }}{% else %}{{ pl.forward_pending }}{% endif %}</td></tr>
-        {% if pl.deploys %}<tr id="deploy-streak"><th scope="row">Deployed (gh-pages)</th><td>{{ pl.deploys.streak|plural('consecutive NYSE session') }}, {{ pl.deploys.first }} → {{ pl.deploys.through }}</td></tr>{% endif %}
-        <tr><th scope="row">Backtest window</th><td>ends {{ chrome.sources|selectattr('short', 'equalto', 'BACKTEST')|map(attribute='date')|first|fmt }}, fixed (mark-to-model)</td></tr>
+        <tr data-chain="{{ 'parts' if pl.captures else 'none' }}"><th scope="row">Cboe option books</th><td>{% for c in pl.captures %}{% set last_und = loop.last %}<span class="nowrap">{{ c.underlying }} {{ c.session }}:</span> {% for b in c.books %}{% set bk = 'book:' ~ (b.file|replace('.json', '')) %}<span data-chain="{{ bk }}">{{ b.rows|fmt(',') }} lines ({{ b.two_sided_rows|fmt(',') }} two-sided, {{ b.expiries|fmt }} expiries), {{ key_cell(bk) }}{% if b.book_state == 'gth' %} (overnight book){% elif b.book_state == 'closing' %} (closing book){% endif %}</span>{{ ' and ' if not loop.last else '' }}{% endfor %}{{ '; ' if not last_und else '' }}{% else %}none stored yet{% endfor %}</td></tr>
+        <tr data-chain="none"><th scope="row">Accepted joint fits</th><td>{{ pl.fits|fmt }} (model_version 2), newest {{ pl.fits_newest|fmt }}</td></tr>
+        <tr data-chain="none"><th scope="row">Surface reports</th><td>{{ pl.surface_sessions|length }} sessions{% if pl.surface_sessions %}, {{ pl.surface_sessions[0] }} → {{ pl.surface_sessions[-1] }}{% endif %}</td></tr>
+        <tr data-chain="none"><th scope="row">Calibration diagnostics</th><td>{{ pl.diag_sessions|length }} sessions (σ profile, identifiability, rough Heston)</td></tr>
+        <tr data-chain="none"><th scope="row">Forward ledger</th><td>{% if pl.forward and pl.forward.state == 'ok' %}{{ pl.forward.n|plural('session') }}, {{ pl.forward.first }} → {{ pl.forward.last }}{% else %}{{ pl.forward_pending }}{% endif %}</td></tr>
+        {% if pl.deploys %}<tr id="deploy-streak" data-chain="none"><th scope="row">Deployed (gh-pages)</th><td>{{ pl.deploys.streak|plural('consecutive NYSE session') }}, {{ pl.deploys.first }} → {{ pl.deploys.through }}</td></tr>{% endif %}
+        <tr data-chain="none"><th scope="row">Backtest window</th><td>ends {{ chrome.sources|selectattr('short', 'equalto', 'BACKTEST')|map(attribute='date')|first|fmt }}, fixed (mark-to-model)</td></tr>
       </tbody>
     </table>
     </div>

@@ -211,6 +211,25 @@ pieces; the work is to pose it exactly and report it honestly.
 
 ## 6. Decisions and progress (append; newest first)
 
+- **2026-11-03.** Wave 1 shipped (PR #19, with PR #21 for its first deploy). Wave 2 goes to main in one PR, and completes tier 0:
+  - 0.2: the enumerating badge test. Every number read off a quote chain names that chain (vendor, quote or fetch time, two-sided share), checked against the record in every state the bot publishes.
+  - 0.4: the forced-failure check of the alert issue.
+  - 0.6: certifi.
+  - 0.8: the session's closing Cboe book, with each VIX gap labelled by its book.
+  - The fixes from the wave's adversarial review.
+
+  Verification:
+  - recompute audit 0 mismatches on four record states;
+  - axe 0 violations and interact 0 failures;
+  - page budget ok;
+  - the whole suite, with the browser tests;
+  - the next-session simulation through the bot's three gates.
+
+  Open:
+  - the private-store secrets (an owner action);
+  - the T origin of a Yahoo chain downloaded in overnight hours (found in review; next PR).
+
+  Critic medians: the four-critic review runs once wave 2 is on main.
 - **2026-11-01.** Wave 1 goes to main in one PR. It carries:
   - 0.3, 0.4 (run records, streak and alert issue), 0.5, 0.6, 0.7, 0.9, 0.10 and 0.11;
   - the producer half of 0.2;

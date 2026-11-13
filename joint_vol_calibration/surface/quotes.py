@@ -25,9 +25,10 @@ Added per quote:
                    180-365d, 365-730d (right-closed)
 
 Inputs are read through the repo's look-ahead-gated getters: the session's
-newest stored Cboe book (data_store/options/cboe/spx_<session>_<HHMMSS>Z
-.parquet, its sidecar's quote time, the full listing) when it passes the
-forward ledger's quote-state gates, else the session's Yahoo chain
+closing Cboe book, else its newest stored one (data_store/options/cboe/
+spx_<session>_<HHMMSS>Z.parquet, its sidecar's quote time and book state, the
+full listing) when it passes the forward ledger's quote-state gates, else the
+session's Yahoo chain
 data_store/options/spx_<session>.parquet (database.options_snapshot_path;
 select_session_chain records which and why), the session's SPX close
 (get_spx_ohlcv(as_of_date=session)) and the reference rate the session's
@@ -110,32 +111,143 @@ CAPTURE_EXTRA_COLUMNS = ("bid_size", "ask_size", "theo", "rho", "last_trade_pric
                          "option_last_trade_time")
 
 
-def cboe_capture_dir() -> Path:
-    """data_store/options/cboe/ (follows database.OPTIONS_DIR)."""
-    return Path(db.OPTIONS_DIR) / "cboe"
+def _book_files(pattern: str) -> list:
+    """The stored Cboe books matching ``pattern``, wherever they are: the private
+    store the daily workflow checks out (cboe_downloader.BOOKS_DIR_ENV) first, then
+    data_store/options/cboe/; a book in both is taken once, from the first. The
+    close slot's closing book is moved to the private store when its run ends, so
+    the book slot that builds the session's surface finds it only there.
+    data_store/ is the parent of database.OPTIONS_DIR."""
+    from joint_vol_calibration.data import cboe_downloader as cd
+    seen: dict = {}
+    for d in cd.book_dirs(Path(db.OPTIONS_DIR).parent):
+        for p in sorted(d.glob(pattern)):
+            seen.setdefault(p.name, p)
+    return [seen[n] for n in sorted(seen)]
+
+
+# cboe_downloader.book_state_at: the session's closing book, quoted after its close
+CLOSING_BOOK = "closing"
+
+
+def _fetched(cap: tuple) -> tuple:
+    """session_captures' sort key: (fetched_at, file name)."""
+    return (str(cap[1].get("fetched_at") or ""), cap[0].name)
 
 
 def session_captures(session: str, underlying: str = "SPX") -> list:
-    """Every stored Cboe capture of ``session``, newest first by fetch time:
+    """Every stored Cboe capture of ``session`` (_book_files: the private store
+    and the public tree), newest first by fetch time:
     [(parquet path, sidecar dict)] (cloud_refresh.capture_cboe_chains writes
     <und>_<session>_<HHMMSS>Z.parquet and .json; the sidecar holds quote_time,
     book_state, fetched_at, rows, two_sided_rows and the raw payload's sha256)."""
     import json
 
     out = []
-    for p in cboe_capture_dir().glob(f"{underlying.lower()}_{session}_*.parquet"):
+    for p in _book_files(f"{underlying.lower()}_{session}_*.parquet"):
         js = p.with_suffix(".json")
         try:
             side = json.loads(js.read_text()) if js.exists() else {}
         except (OSError, ValueError):
             side = {}                 # no sidecar record: the frame's own quote_time is read
         out.append((p, side if isinstance(side, dict) else {}))
-    return sorted(out, key=lambda x: (str(x[1].get("fetched_at") or ""), x[0].name), reverse=True)
+    return sorted(out, key=_fetched, reverse=True)
+
+
+def _close_slot_runs(session: str) -> list:
+    """The close slot's runs of ``session``, from their run records
+    (data_store/runs/run_*.json, scripts/cloud_refresh.py run_record, schema
+    run_ledger/1): each record whose slot is "close", or whose steps hold the
+    closebook step (a manual dispatch of it), without the book slot's full
+    "capture" step, and whose session (its capture's, else expected_session) is
+    ``session``: [(run_utc, outcome)], oldest first. The outcome is the run's
+    SPX capture record ({} when it holds none), or {"status": CLOSE_RUN_NO_STEP}
+    for a run without the closebook step: the close slot ran market data and
+    labels only before it captured closing books (as main's workflow did for
+    2026-11-02). data_store/ is the parent of database.OPTIONS_DIR."""
+    import json
+
+    runs = Path(db.OPTIONS_DIR).parent / "runs"
+    found = []
+    for p in sorted(runs.glob("run_*.json")) if runs.is_dir() else []:
+        try:
+            rec = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("schema") != "run_ledger/1":
+            continue
+        steps = rec.get("steps") or []
+        capt = rec.get("capture") or {}
+        if "capture" in steps or not (rec.get("slot") == "close" or "closebook" in steps):
+            continue
+        if str(capt.get("session") or rec.get("expected_session")) != session:
+            continue
+        if "closebook" not in steps:
+            found.append((str(rec.get("run_utc")), {"status": CLOSE_RUN_NO_STEP}))
+            continue
+        spx = (capt.get("captures") or {}).get("SPX")
+        if not isinstance(spx, dict) or not spx:
+            # no SPX record: the capture step's own (skipped as a whole by the clock or
+            # the session check, or crashed: "capture step crashed: ..."; None with none)
+            spx = {"status": capt.get("status"), "reason": capt.get("reason")}
+        found.append((str(rec.get("run_utc")), spx))
+    return sorted(found, key=lambda x: x[0])
+
+
+# a close-slot run's SPX outcomes (_close_slot_runs) that are not a refusal
+_NOT_REFUSED = ("captured", "exists", "skipped", "no-step")
+
+
+def closing_book_refusal(session: str) -> str | None:
+    """Why the job did not store ``session``'s closing SPX book, as its run
+    records say: the recorded reason of the newest close-slot run
+    (_close_slot_runs) whose SPX capture neither stored the book nor was
+    "skipped": "rejected" (it failed the quote-state gate, was empty or was
+    another session's book), "failed", or a capture step that crashed. None
+    when no such run is recorded (closing_book_run says what the records do
+    hold). None too when a close-slot run stored the book: an earlier or later
+    refusal does not say why the store holds none (closing_book_run's
+    "captured")."""
+    runs = _close_slot_runs(session)
+    if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
+        return None
+    found = [(t, str(spx.get("reason") or "its run record gives no reason for it"))
+             for t, spx in runs if spx.get("status") not in _NOT_REFUSED]
+    return max(found)[1] if found else None
+
+
+# closing_book_run statuses: what the close slot's run records say of a session
+# whose closing book is not stored
+CLOSE_RUN_REFUSED, CLOSE_RUN_CAPTURED, CLOSE_RUN_SKIPPED, CLOSE_RUN_NO_STEP, CLOSE_RUN_NONE = (
+    "refused", "captured", "skipped", "no-step", "none")
+
+
+def closing_book_run(session: str) -> str:
+    """What the close slot's run records (_close_slot_runs) say of ``session``'s
+    closing SPX book, for a session whose store holds none, in this order:
+    "captured" (a run captured it, or found it stored, yet the store holds none:
+    it was not kept, as when the move to the private store fails; whatever
+    another run of the session did), "refused" (a run did not store it and says
+    why: closing_book_refusal), "skipped" (a run's record says it skipped the
+    book: by the clock, or by the quote time of the book it downloaded, the
+    delayed feed showed another book), "no-step" (the close slot ran for the
+    session without the closebook step, before it captured closing books) or
+    "none" (no run of the close slot is recorded for the session: it had not
+    run yet, or did not exist then). Nothing here says how long the feed shows
+    a closing book: that is not observed."""
+    runs = _close_slot_runs(session)
+    if any(spx.get("status") in ("captured", "exists") for _, spx in runs):
+        return CLOSE_RUN_CAPTURED
+    if closing_book_refusal(session):
+        return CLOSE_RUN_REFUSED
+    if any(spx.get("status") == "skipped" for _, spx in runs):
+        return CLOSE_RUN_SKIPPED
+    return CLOSE_RUN_NO_STEP if runs else CLOSE_RUN_NONE
 
 
 def captured_sessions(underlying: str = "SPX") -> list:
     """Every session with a stored Cboe capture of ``underlying``, newest first."""
-    names = (p.name for p in cboe_capture_dir().glob(f"{underlying.lower()}_*.parquet"))
+    names = (p.name for p in _book_files(f"{underlying.lower()}_*.parquet"))
     return sorted({n.split("_")[1] for n in names if len(n.split("_")) == 3}, reverse=True)
 
 
@@ -197,25 +309,61 @@ def file_sha256(path: Path) -> str | None:
     return h.hexdigest()
 
 
+def unreadable_closing_book(session: str, readable: set) -> None:
+    """Raise FileNotFoundError when a manifest (data_store/options/cboe_manifest,
+    the public record of a book held in the private store) records a closing
+    SPX book of ``session`` that is not among the books this run can read
+    (``readable``: their parquet file names): the private store was not checked
+    out, or its clone failed. Building the session from its other books would
+    put the overnight book where the record holds the closing one, and the
+    surface would be committed and never rebuilt, so the session is not built
+    (it fails closed; a later run with the store builds it)."""
+    import json
+
+    from joint_vol_calibration.data import cboe_downloader as cd
+
+    for mp in sorted(cd.manifest_dir(Path(db.OPTIONS_DIR).parent).glob(f"spx_{session}_*.json")):
+        try:
+            rec = json.loads(mp.read_text())
+        except (OSError, ValueError):
+            continue
+        if (isinstance(rec, dict) and rec.get("book_state") == CLOSING_BOOK
+                and f"{mp.stem}.parquet" not in readable):
+            raise FileNotFoundError(
+                f"the closing book {mp.stem} of {session} is held in the private store (its manifest "
+                f"options/cboe_manifest/{mp.name}) and this run cannot read it: not building the session "
+                "from another book")
+
+
 def select_session_chain(session: str, spot: float, r_clean, *,
                          source: str = "auto") -> tuple:
     """(raw, clean, inputs): the chain ``session``'s surface is built from.
 
-    The newest stored Cboe SPX capture of the session (session_captures)
-    that passes the forward ledger's quote-state gates
-    (forward_ledger.book_time_refusal: quoted at or after the 16:00 ET close;
-    book_share_refusal: >= option_chain.MIN_TWO_SIDED_SHARE of near-ATM lines
-    two-sided) and cleans, with T from its quote time (option_chain.t_origin);
-    else the session's Yahoo chain data_store/options/spx_<session>.parquet,
-    the calibration's download, as the labelled fallback. ``source``:
-    "auto" (that order), "cboe" (the capture or ValueError), "yahoo" (the
-    stored Yahoo chain only). ``inputs`` records which and why."""
+    The session's closing book when one is stored (session_captures, book
+    state 'closing': the regular session's last quotes, standing at the 16:15
+    ET close, 13:15 on an early close, when the official VIX-family closes are
+    computed, so the VIX replication is set against them at one instant;
+    FUND_GRADE_PLAN 0.8), else its newest stored Cboe SPX capture (the
+    overnight Global Trading Hours book), the first of them that passes the
+    forward ledger's quote-state gates (forward_ledger.book_time_refusal:
+    quoted at or after the 16:00 ET close; book_share_refusal: >=
+    option_chain.MIN_TWO_SIDED_SHARE of near-ATM lines two-sided) and cleans,
+    with T from its quote time (option_chain.t_origin); else the session's
+    Yahoo chain data_store/options/spx_<session>.parquet, the calibration's
+    download, as the labelled fallback. ``source``: "auto" (that order),
+    "cboe" (a capture or ValueError), "yahoo" (the stored Yahoo chain only).
+    ``inputs`` records which and why."""
     from joint_vol_calibration.backtest import forward_ledger as fl
 
     if source not in ("auto", "cboe", "yahoo"):
         raise ValueError(f"source must be 'auto', 'cboe' or 'yahoo', got {source!r}")
     refused: list[str] = []
-    caps = session_captures(session) if source != "yahoo" else []
+    # closing books first, each kind newest first
+    caps = sorted(session_captures(session) if source != "yahoo" else [],
+                  key=lambda c: c[1].get("book_state") != CLOSING_BOOK)
+    n_closing = sum(c[1].get("book_state") == CLOSING_BOOK for c in caps)
+    if source != "yahoo":
+        unreadable_closing_book(session, {p.name for p, _ in caps})
     for path, side in caps:
         label = f"options/cboe/{path.name}"
         try:
@@ -237,18 +385,32 @@ def select_session_chain(session: str, spot: float, r_clean, *,
         if why:
             refused.append(f"{label}: {why}")
             continue
-        newest = "the newest" if path == caps[0][0] else "an earlier"
+        if side.get("book_state") == CLOSING_BOOK:
+            which = (f"the session's closing book (its quotes the ones standing at the "
+                     f"{db.close_data_cutoff(session):%H:%M} ET close, when the official VIX-family "
+                     "closes are computed)")
+        else:
+            newest = "the newest" if path == max(caps, key=_fetched)[0] else "an earlier"
+            which = (f"{newest} stored Cboe book of the session"
+                     + ("" if n_closing else " (no closing book of the session is stored)"))
         return raw, clean, {
             "source": "cboe",
-            "source_reason": (f"{newest} stored Cboe book of the session; it passes the "
+            "source_reason": (f"{which}; it passes the "
                               "quote-state gates (quoted at or after the 16:00 ET close, "
                               f"{clean.diagnostics['near_atm_two_sided_share']:.1%} of near-ATM "
                               "lines two-sided)"
                               + (f"; refused: {'; '.join(refused)}" if refused else "")),
+            # the book's name in either store (options/cboe/<name> in the private
+            # repository); once it is held there, its public record is the manifest
+            # data_store/options/cboe_manifest/<stem>.json, whose parquet_sha256 the
+            # artifact gate matches against chain_sha256
             "chain": f"data_store/options/cboe/{path.name}", "chain_sha256": file_sha256(path),
             "raw_sha256": side.get("sha256"), "book_state": side.get("book_state"),
             "fetched_at": side.get("fetched_at"), "capture_rows": side.get("rows"),
-            "capture_two_sided_rows": side.get("two_sided_rows"), "refused": refused}
+            "capture_two_sided_rows": side.get("two_sided_rows"), "refused": refused,
+            "closing_books": n_closing,
+            "closing_book_refusal": None if n_closing else closing_book_refusal(session),
+            "closing_book_run": None if n_closing else closing_book_run(session)}
     if source == "cboe":
         raise ValueError(f"no stored Cboe book of {session} passes the quote-state gates"
                          + (f": {'; '.join(refused)}" if refused else ""))
@@ -265,7 +427,10 @@ def select_session_chain(session: str, spot: float, r_clean, *,
         "source": clean.diagnostics.get("source"),
         "source_reason": f"{why}; the session's Yahoo chain (the calibration's download) is the fallback",
         "chain": f"data_store/options/spx_{session}.parquet", "chain_sha256": file_sha256(path),
-        "raw_sha256": None, "book_state": None, "fetched_at": None, "refused": refused}
+        "raw_sha256": None, "book_state": None, "fetched_at": None, "refused": refused,
+        "closing_books": n_closing,
+        "closing_book_refusal": None if n_closing else closing_book_refusal(session),
+        "closing_book_run": None if n_closing else closing_book_run(session)}
 
 
 def read_stored_chain(session: str, underlying: str = "SPX") -> pd.DataFrame:

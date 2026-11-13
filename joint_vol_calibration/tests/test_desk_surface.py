@@ -630,3 +630,68 @@ def test_a_gap_split_that_does_not_add_up_is_not_shown():
     assert r["reason"] == "fewer than two usable terms"
     assert ds.vix_terms(None) == []
     assert ds.vix_terms({"indices": {}}) == []
+
+
+def test_each_session_names_the_book_its_vix_gap_was_measured_on():
+    """FUND_GRADE_PLAN 0.8: the Surface page listed every session's VIX replication
+    gap, and the tile ranged over all of them, whether the replication was set
+    against the 16:15 ET close at the instant it is computed (a Cboe closing book)
+    or hours after it (the overnight book) or at no recorded instant (a Yahoo
+    chain). Each session's book is read from its surface.json record, and the gap's
+    distribution is given per book: sessions, median, and a range from two."""
+    assert ds.replication_book({"source": "cboe", "book_state": "closing"}) == ds.BOOK_CLOSING
+    assert ds.replication_book({"source": "cboe", "book_state": "gth"}) == ds.BOOK_OVERNIGHT
+    assert ds.replication_book({"source": "cboe", "book_state": "pre_open"}) == ds.BOOK_OTHER
+    assert ds.replication_book({"source": "cboe"}) == ds.BOOK_OTHER
+    for src in ("yfinance", "yahoo"):              # a report_version 1 record names the vendor
+        assert ds.replication_book({"source": src, "quote_time": "2026-10-27T05:26:50Z"}) == ds.BOOK_YAHOO
+    assert ds.replication_book({}) is None
+    assert ds.replication_book(None) is None
+    rows = [{"book": ds.BOOK_YAHOO, "gap": -0.29}, {"book": ds.BOOK_OVERNIGHT, "gap": 1.32},
+            {"book": ds.BOOK_YAHOO, "gap": 0.09}, {"book": ds.BOOK_CLOSING, "gap": -0.05},
+            {"book": ds.BOOK_OVERNIGHT, "gap": -0.35}, {"book": ds.BOOK_OVERNIGHT, "gap": 0.28},
+            {"book": ds.BOOK_YAHOO, "gap": None}, {"book": None, "gap": 0.5}]
+    for i, r in enumerate(rows):
+        r["session"] = f"2026-10-{20 - i:02d}"     # listed newest first: each book's are given oldest first
+    got = ds.gap_by_book(rows)
+    assert [g["book"] for g in got] == [ds.BOOK_CLOSING, ds.BOOK_OVERNIGHT, ds.BOOK_YAHOO]
+    for g in got:
+        xs = sorted(r["gap"] for r in rows if r["book"] == g["book"] and r["gap"] is not None)
+        assert g["label"] == ds.BOOK_LABELS[g["book"]]
+        assert g["n"] == len(xs)
+        assert g["median"] == pytest.approx(float(np.median(xs)))
+        assert (g["lo"], g["hi"]) == ((xs[0], xs[-1]) if len(xs) > 1 else (None, None))
+        # the sessions it is taken over (tier 0.2: the page declares their chains)
+        assert g["sessions"] == sorted(r["session"] for r in rows
+                                       if r["book"] == g["book"] and r["gap"] is not None)
+    assert ds.gap_by_book([]) == []
+
+
+def test_a_yahoo_download_fetched_overnight_is_its_own_book():
+    """w5 review, major 3: a Yahoo chain records no quote time, and the bot downloads
+    it in the next session's overnight hours, so its gap may hold the market's move
+    overnight as an overnight Cboe book's does; the Surface page put it in one 'Yahoo
+    chain' row with the C23 close snapshots. A Yahoo chain is now classified by when
+    it was downloaded, as a Cboe book is by its quote time: given the book state of
+    its fetch instant, 'gth' makes it an overnight download, any other state (or none)
+    a Yahoo chain. A Cboe book still goes by its recorded state, whatever is passed."""
+    assert ds.replication_book({"source": "yfinance"}, "gth") == ds.BOOK_YAHOO_OVERNIGHT
+    for state in ("closing", "intraday", "pre_open", None):
+        assert ds.replication_book({"source": "yfinance"}, state) == ds.BOOK_YAHOO, state
+    assert ds.replication_book({"source": "cboe", "book_state": "closing"}, "gth") == ds.BOOK_CLOSING
+    # the instant it goes by: a pre-QUANT-01 chain's quote time (the download instant),
+    # else its fetch time, from inputs or universe; none for a Cboe book
+    assert ds.yahoo_fetch_instant({"source": "yfinance", "fetched_at": "2026-11-03T03:30:03Z"}) \
+        == "2026-11-03T03:30:03Z"
+    assert ds.yahoo_fetch_instant({"source": "yfinance", "quote_time": "2026-10-27T05:26:50Z"}) \
+        == "2026-10-27T05:26:50Z"
+    assert ds.yahoo_fetch_instant({"source": "yfinance"}, {"fetched_at": "2026-10-31T08:50:33Z"}) \
+        == "2026-10-31T08:50:33Z"
+    assert ds.yahoo_fetch_instant({"source": "yfinance"}) is None
+    assert ds.yahoo_fetch_instant({"source": "cboe", "fetched_at": "2026-10-31T08:40:19Z"}) is None
+    # every book is labelled, counted and named in a sentence that holds no number
+    assert set(ds.BOOK_LABELS) == set(ds.BOOK_SESSIONS) == set(ds.BOOK_BUILT)
+    assert ds.BOOK_LABELS[ds.BOOK_YAHOO_OVERNIGHT] == "Yahoo overnight download"
+    for book, text in ds.BOOK_BUILT.items():
+        assert text.startswith("Built from "), book
+        assert not any(ch.isdigit() for ch in text), book

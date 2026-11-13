@@ -111,3 +111,14 @@ def test_a_two_sided_check_keeps_each_sessions_sign():
     assert one_sided["range"] == "0.09–0.78"
     tiny = dmo.history_view([("a", 0.0), ("b", -0.001)], (0.5, 1.5), two_sided=True)
     assert tiny["dots"][1]["text"] == "0.00"
+
+
+def test_a_history_whose_limits_do_not_apply_colours_no_dot_by_them():
+    """w5 review, major 3: a VIX replication gap taken on an overnight book or an
+    overnight download holds the market's move overnight, so the check's limits
+    (set for a closing book's gap) do not apply to it. Its history is given without
+    limits: every dot 'info', the signed range and today's rank as before."""
+    h = dmo.history_view([("a", -0.78), ("b", 1.25), ("c", 0.34)], None, two_sided=True)
+    assert [d["status"] for d in h["dots"]] == ["info", "info", "info"]
+    assert h["range"] == "−0.78 to +1.25"
+    assert h["rank"] == "best of 3"                      # |+0.34| the smallest

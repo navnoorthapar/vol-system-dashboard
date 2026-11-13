@@ -123,6 +123,10 @@ All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log
 - **docs/model_validation/README.md line ~171** still says M14 replicates the VIX '(Cboe rules)'; the site now says 'the Cboe formula, with its listed departures' (T3). Align the doc, and note the departures count is 12 on 2026-10-26 (6 deviations + 6 gap notes), not 8.
 - **The Calibration page's census sentence** ('k of k fits pass') was not reworded with the Overview's (T2). Reword it the same way. **Done 2026-10-29 (PR #15).**
 - **B1/B2 (cone and frontier labels)** were fixed in the chart specs with spec-level tests; no pixel-level browser measurement of label rectangles at 390–1920 px was added. Add one to the interact gate.
+- **A closing-book check (0.8, follow-up).** A Cboe book is named the session's closing book by its quote time alone.
+  - The underlying's last trade cannot check it: VIX's close is stamped 16:15:01, and every SPX overnight book records the session's 16:14:59, as its closing book does.
+  - The option lines' own last-trade times could: a closing book should hold no option trade after the 16:15 ET cutoff, and an overnight book holds the overnight session's trades once any are made. They are dropped today: `option_last_trade_time` is kept only with `include_extras`, and the capture's record does not hold it.
+  - To do: record each capture's latest option trade time in its record, read it across the stored books before setting a rule (the vendor may stamp a trade a second late, as it stamps the VIX close), then check it in the close slot and in `quotes.select_session_chain`.
 
 ### E. Owner decisions (ask the owner; do not decide alone)
 - The licence of `data_store/benchmarks/*.csv` (Cboe strategy-index data).
@@ -131,6 +135,12 @@ All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log
 - **Surface page growth (D2, from the w3/surface fixes).** The page compares at most four earlier sessions (the newest, and the newest at least 5, 21 and 63 NYSE sessions back). Six horizons (adding about half a year and a year) would cost about 11 kB each at 45 expiries and need about 456 kB: raise the 450 kB budget, or keep four. The "Every session the surface report covers" table still grows about 300 B a stored session; at 45 expiries the page has about 28 kB of headroom, so with a fourth 45-expiry session compared and a default expiry of ~380 quotes CI's "Surface page weight" step can fail after roughly 25–90 more daily sessions. Cap that table at recent sessions (the full record stays in `data_store/surface/index.json`), or let the budget count its rows.
 - **The 80 kB gzip figure (D2).** `page_budget.py` prints the gzipped size at level 6 and does not gate on it (the server picks the level; the 45-expiry page is about 78 kB at level 6, 76 kB at level 9). Gate it, at which level, or drop the figure.
 - **AM / PM tags (D3).** The tabs and status line show AM / PM only from the residual table's OCC root, which no stored session carries; near-dated third Fridays are PM (SPXW) lines and from April 2027 AM. Have the producer write `root`, or tag from the time of day in T.
+- **Private Cboe store (0.8, owner action).** You chose a private data repository for the raw Cboe books. Until the secrets `CBOE_DATA_REPO` and `CBOE_DATA_TOKEN` are set, the bot commits the books publicly and warns on every run.
+- **Fit source (0.7).** The Heston fit runs on the Yahoo chain and is scored on the session's Cboe book (as built). Fit on the Cboe book too, or keep the two apart.
+- **D3's 100 ms at 4× CPU.** Out of reach while ECharts draws the chart (`setOption` alone takes 70–300 ms at 4×); the switch takes about 40 ms and click-to-chart about 150 ms. Restate the target.
+- **README snapshot (0.10).** `make readme-results` regenerates `docs/results/readme_results.json`; a person reviews each regeneration (as built). Or let the bot regenerate it.
+- **Python Playwright in CI.** The 55 browser tests in `test_dashboard.py` skip in CI and in the bot's gates (only Node Playwright is installed), so they run only by hand. Add Python Playwright to `tests.yml`, or keep them manual.
+- **pip-audit exceptions.** The filelock, pillow and setuptools advisories are allowed until 2026-12-31 (`scripts/ci/pip_audit_allowlist.json`); clearing them needs a reviewed rebuild of the lock files.
 
 ## The fund-grade bar (the stop condition for the UI loop)
 
@@ -186,7 +196,7 @@ Before building any of these, have the critics confirm it adds value. Each one g
 - The CSP stays `script-src 'self'`: no inline scripts or handlers.
 - axe must report 0 violations, with no horizontal overflow at 320–1920 px, including the 0.06em letter-spacing stress at 320.
 - Every number on a page comes from the data, never from a template or test literal.
-- The ruff (1295) and mypy (368) baselines may only shrink: `make lint typecheck`.
+- The ruff (1293) and mypy (368) baselines may only shrink: `make lint typecheck`.
 - desk.js stays within its gzip budget (31 KB; raise it by at most 1 KB, with a reason).
 - Git:
   - No WIP or unverified commits.
@@ -221,6 +231,55 @@ python scripts/ci/simulate_next_session.py --full                               
    - re-dispatch. The data it captured is committed before the gates, so nothing is lost.
 
 ## Status log (newest first; every session appends one entry)
+
+- **2026-11-03, fund-grade session 1, continued: wave 2 (the rest of tier 0) shipping.**
+  - **Shipped to main since the last entry:**
+    - PR #19, wave 1;
+    - PR #21, which let the first post-wave-1 deploy through: Model Risk's order test holds for any breach tally, and the simulation job gets 60 minutes.
+    - Runs 150 (2026-10-30) and 151 (2026-11-02 close slot) deployed.
+  - **Wave 2, in one PR from `w5/wave2`:**
+    - w4/gates: 0.2's enumerating badge test, 0.4's forced-failure check, and the certifi bump;
+    - w2/closebook: 0.8, the session's closing Cboe book;
+    - their integration;
+    - an adversarial review's three majors and five minors, fixed:
+      - Research and Model Risk name each stored chain as the fit made on it names it;
+      - the presentation gate passes when the newest surface is a Yahoo download (it failed on main);
+      - every VIX gap names its book, and Model Risk V2 ranks and limits within it;
+      - the overnight note states only what the run records hold;
+      - a closing book is named by its quote time, as before (a check by the underlying's last trade was tried and dropped: see the final check below);
+      - a run fails closed on a privately held closing book it cannot read;
+      - β aggregates declare their chains;
+      - DATA_SOURCES' ledger sentence matches the code.
+    - Verification found two more, also fixed:
+      - surface.json now records the close slot's runs, which the audit reads;
+      - the VX-leg acceptance test reads the record, not the tracked cache. It failed on main's CI.
+    - A final adversarial check found a blocker, two majors and minor gaps. All are fixed but one major, Research's "same-time VIX" β sentence, which goes with the overnight-Yahoo timing work below:
+      - the close slot refused every VIX closing book: the underlying's last trade cannot name the closing book (Cboe stamps the VIX close 16:15:01, and an SPX overnight book records the session's 16:14:59, as its closing book does), so that check is gone from the close slot, the chain choice and the audit;
+      - the overnight note reads the close slot's runs by the run record's slot and session, so a close-slot run made by main's workflow (no closebook step) is not reported as no run, and has its own reason;
+      - a crashed capture step gives its recorded reason, and a run that captured the closing book stands over another run's refusal;
+      - the next-session simulation defers a session that fails closed on a closing book held privately, so CI does not fail once books are held there;
+      - the presentation gate derives a Cboe session's book from its quote time, as the audit does, not from the recorded state the pages read.
+  - **Verified on the branch** (`docs/roadmap` aside, at 77e1da1):
+    - the whole suite (2,960 passed, plus the fixed test), with `test_dashboard.py`'s browser tests (443 passed);
+    - lint and typecheck at baseline (ruff 1,293, mypy 368); the pip-audit gate;
+    - the committed record: audit 15,931 of 15,931, page budget ok, a11y 0, interact 0;
+    - the bot's three gates, audit, budget, a11y and interact on three further states:
+      - the newest surface from a Yahoo download;
+      - the books held privately;
+      - every surface rebuilt at report version 7 with two books on the newest session;
+    - the next-session simulation through all three gates.
+  - **Found, not fixed (next PR):** a Yahoo chain downloaded during Cboe's overnight session holds live overnight quotes.
+    - Evidence: the 2026-10-30 chain's forwards are about 21 points over Friday's close. On 10-27 to 10-29, the Yahoo downloads match Cboe's overnight book to within about 1 point.
+    - Since QUANT-01 its T runs from the 16:00 ET close. That is about 5.5 hours early on a weekday book slot, and about 53 hours on the 10-30 weekend fit.
+    - The fix: time such a download from when it was fetched. Fits already made keep their numbers, since the forward ledger recorded their forecasts, and the pages say what was done.
+  - **Also open:**
+    - the weekly reproduction (2026-11-02) has 11 of 16 artifacts within tolerance;
+    - the four-critic review, with its medians in FUND_GRADE_PLAN §6;
+    - extending the recompute audit to Calibration, Research, Risk and Model Risk.
+  - **Learned:**
+    - Run every gate test in every state the bot can publish. The Yahoo-newest failure hid because the test ran only on the committed pages, whose newest surface was a Cboe book.
+    - Check a vendor's timing claim against the data before building on it. QUANT-01 assumed Yahoo serves a close snapshot; in overnight hours it serves the live book.
+    - Read a field in every record that holds it before building a rule on it: the underlying's last trade is the same in a session's closing and overnight books, and main's close-slot runs have no closebook step, so both rules misread real records no test had fed them.
 
 - **2026-11-01, fund-grade session 1, continued: wave 1 shipping; 0.8 and the tier-0 checks building.**
   - **Shipped to main since the last entry:** PR #18. It unblocked the 2026-10-29 deploy:

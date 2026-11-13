@@ -28,7 +28,52 @@ def test_daily_cron_is_split_by_data_source():
     assert all(int(c.split()[1]) * 60 + int(c.split()[0]) >= 2 * 60 + 15 for c in book)
     close = [c for c in crons if c.split()[1] == "22"]
     assert close and close[0].split()[0] != "0"                    # off the top of the hour
-    assert '"market,labels"' in DAILY and "market,capture,calibrate,freeze" in DAILY
+    assert '"market,labels,closebook"' in DAILY and "market,capture,calibrate,freeze" in DAILY
+
+
+def _slot_steps():
+    """{cron: (steps, slot)} for every scheduled cron, from the workflow's "Choose
+    steps" case (a cron without a branch of its own takes the "*)" branch)."""
+    case = _step(DAILY, "Choose steps")
+    own = {cron: (steps, slot) for cron, steps, slot in
+           re.findall(r'"([^"]+)"\)\s*steps="([a-z,]+)"; slot="(\w+)"', case)}
+    rest = re.search(r'\*\)\s*steps="([a-z,]+)"; slot="(\w+)"', case)
+    assert rest
+    return {c: own.get(c, (rest.group(1), rest.group(2))) for c in _crons(DAILY)}
+
+
+def test_the_close_slot_captures_the_sessions_closing_book():
+    """FUND_GRADE_PLAN 0.8: the replicated VIX was set against the 16:15 ET print
+    on an overnight book only, so its gap mixed the replication's error with the
+    overnight move. The close slot now runs cloud_refresh's closebook step, which
+    stores Cboe's closing book while the delayed feed still shows it (16:15 ET to
+    the 20:15 ET Global Trading Hours open); every scheduled cron reaches a branch
+    of the steps case, every step it names is one cloud_refresh knows, the book
+    slots still capture and fit, and the
+    close slot starts after the 16:15 ET close under EST (21:15 UTC) and EDT."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cloud_refresh_slots",
+                                                  ROOT / "scripts" / "cloud_refresh.py")
+    cr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cr)
+    slots = _slot_steps()
+    for steps, _slot in slots.values():
+        assert set(steps.split(",")) <= set(cr.ALL_STEPS), steps
+    (close,) = [c for c, (_, slot) in slots.items() if slot == "close"]
+    steps = slots[close][0].split(",")
+    assert "closebook" in steps
+    assert not {"capture", "calibrate"} & set(steps)
+    minute, hour = (int(x) for x in close.split()[:2])
+    assert hour * 60 + minute > 21 * 60 + 15
+    assert close.split()[4] == "1-5"
+    book = [steps.split(",") for steps, slot in slots.values() if slot == "book"]
+    assert len(book) == 2
+    assert all({"capture", "calibrate"} <= set(b) for b in book)
+    # the manual run's input names every step it can take
+    m = re.search(r'description: "cloud_refresh.py --steps \(any of ([a-z,]+)\)"', DAILY)
+    assert m
+    assert m.group(1).split(",") == list(cr.ALL_STEPS)
 
 
 def test_daily_job_persists_captures_and_rebases_before_push():
@@ -139,10 +184,14 @@ def test_every_lock_pin_is_hashed_and_every_install_requires_hashes():
 def test_lock_keeps_the_security_floors():
     """C23-E2: pip-audit found advisories in idna 3.11, urllib3 2.6.3 and
     werkzeug 3.1.8; requirements.txt floors them and the lock must honour the
-    floors (a recompile that drops one fails here)."""
+    floors (a recompile that drops one fails here). The audit gate's first run
+    found PYSEC-2026-4320 in certifi 2026.2.25 (a root whose intermediates' keys
+    were compromised, in the bundle the bot's downloads trust); its fix,
+    2026.10.18, left the 14-day release cooldown on 2026-11-01 and is floored
+    the same way, so the allowlist entry that excepted it is gone."""
     from packaging.version import Version
 
-    floors = {"idna": "3.15", "urllib3": "2.8.0", "werkzeug": "3.1.9"}
+    floors = {"idna": "3.15", "urllib3": "2.8.0", "werkzeug": "3.1.9", "certifi": "2026.10.18"}
     req = (ROOT / "requirements.txt").read_text()
     pins = _lock_pins()
     for name, floor in floors.items():
@@ -224,6 +273,31 @@ def test_a_presentation_test_cannot_lose_the_captures():
     cond = re.search(r"if:\s*>?\s*(.*?)\n\s*uses:", deploy, re.S).group(1)
     assert "steps.datatests.outcome == 'success'" in cond and "steps.tests.outcome == 'success'" in cond
     assert "steps.commitartifacts.outcome == 'success'" in cond
+
+
+def test_a_failed_private_push_holds_back_the_artifact_commit():
+    """Minor 3 of the 0.8 check: with the private book store set up, a failed push of
+    this run's raw books leaves them on the runner with no manifest. The artifact gate
+    still passed (it found the runner's copy), so a surface built from such a book was
+    committed, and every later run, on a runner without the book, failed the gate on
+    that surface ("no sidecar ... and no manifest of it"); the surface is not stale, so
+    no backfill rebuilt it. The derived-artifacts commit now waits for the move: it is
+    skipped when that step failed, and runs when it succeeded or did not run (no
+    private store), so the deploy, which needs that commit, waits too."""
+    import yaml
+
+    steps = yaml.safe_load(DAILY)["jobs"]["refresh"]["steps"]
+    by = {s.get("name"): s for s in steps}
+    move = by["Move this run's raw Cboe books to the private store"]
+    assert move["id"] == "privatebooks"
+    cond = by["Commit derived artifacts"]["if"]
+    assert "steps.privatebooks.outcome != 'failure'" in cond
+    assert "steps.privatebooks.outcome == 'success'" not in cond        # skipped: no private store
+    names = list(by)
+    assert names.index("Move this run's raw Cboe books to the private store") < names.index(
+        "Commit derived artifacts")
+    deploy = by["Deploy to GitHub Pages"]["if"]
+    assert "steps.commitartifacts.outcome == 'success'" in deploy
 
 
 def test_each_commit_adds_its_own_paths():

@@ -75,13 +75,37 @@ def gated():
     return _gated_cals()
 
 
-def test_vx_leg_reproduces_each_fits_recorded_out_of_sample_rmse(gated):
+@pytest.fixture(scope="module")
+def record_db(tmp_path_factory):
+    """A scratch copy of the SQLite cache with the committed record's VX
+    settlements (the data_store/market partitions) upserted into it, as
+    app.record_db, freeze_site and the daily job load them before they read it.
+    The job never commits data_store/vol_system.db (a rebuildable cache), so the
+    tracked file lags the record: a fit of a session after the cache's last VX
+    date was scored on settlements the cache does not hold."""
+    import shutil
+
+    from joint_vol_calibration.data import database as dbm
+
+    copy = tmp_path_factory.mktemp("record_db") / "vol_system.db"
+    shutil.copy2(DB, copy)
+    saved = dbm.DB_PATH
+    dbm.DB_PATH = copy
+    try:
+        dbm.import_market_partitions(ROOT / "data_store" / "market", tables=["vix_futures_daily"])
+    finally:
+        dbm.DB_PATH = saved
+    return copy
+
+
+def test_vx_leg_reproduces_each_fits_recorded_out_of_sample_rmse(gated, record_db):
     """Acceptance 1: for every gated fit that recorded a VX score, the model curve
     recomputed from its parameters against the stored settlements of its own
-    session gives losses.vx_futures_rmse_oos to 1e-6. A fit that recorded none
-    ran before its session's settlements were stored; once the daily job stores
-    them (FUND_GRADE_PLAN 1.12) its leg is drawn from them, as Calibration says."""
-    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    session (the committed record, as the pages read it: record_db) gives
+    losses.vx_futures_rmse_oos to 1e-6. A fit that recorded none ran before its
+    session's settlements were stored; once the daily job stores them
+    (FUND_GRADE_PLAN 1.12) its leg is drawn from them, as Calibration says."""
+    con = sqlite3.connect(f"file:{record_db}?mode=ro", uri=True)
     checked = 0
     for session, cal in gated:
         rec = _losses(cal).get("vx_futures_rmse_oos")

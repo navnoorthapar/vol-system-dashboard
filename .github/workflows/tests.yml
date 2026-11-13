@@ -32,9 +32,11 @@ jobs:
   test:
     name: pytest (Python 3.11)
     runs-on: ubuntu-latest
-    # the suite with coverage took about 31 minutes on this PR's head (it reached 97% at
-    # the old 30-minute limit, every test passing), after wave 1 added about 600 tests
-    timeout-minutes: 45
+    # the suite with coverage took about 31 minutes on wave 1's head (it reached 97% at
+    # the old 30-minute limit, every test passing), after wave 1 added about 600 tests;
+    # on wave 2's head (PR #23) it took 42 minutes, and was cancelled at 45 on the next
+    # push with the simulation job's full suite of the same tests green
+    timeout-minutes: 60
     env:
       # ci: derandomized (the same examples every run); thorough: 10x, random
       HYPOTHESIS_PROFILE: ${{ github.event_name == 'schedule' && 'thorough' || 'ci' }}
