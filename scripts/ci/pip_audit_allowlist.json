@@ -3,12 +3,6 @@
   "about": "Reviewed exceptions to the pip-audit gate (scripts/ci/pip_audit_gate.py, tests.yml `audit`). Each entry: id (the advisory id or any alias, e.g. a CVE), package, reason (why it does not apply here or cannot be fixed yet), expires (YYYY-MM-DD, at most 180 days ahead). An expired or malformed entry fails the gate; the fix is a pin bump or a renewed, re-reasoned entry.",
   "entries": [
     {
-      "id": "PYSEC-2026-4320",
-      "package": "certifi",
-      "reason": "Applies: the bot's HTTPS downloads (requests, curl_cffi) trust certifi's bundle, which still holds the emSign ECC Root CA - G3 root whose intermediates had their keys compromised. Not fixed in the change that added the hashes, which kept every pin; the fix (2026.10.18) is inside the repo's 14-day release cooldown until 2026-11-01. Bump certifi then and delete this entry.",
-      "expires": "2026-11-08"
-    },
-    {
       "id": "CVE-2026-112940",
       "package": "filelock",
       "reason": "No code in this repository imports filelock; it is installed as a torch dependency. The advisories are in its SQLite-backed ReadWriteLock/AsyncReadWriteLock and (two of three, Windows only) its soft locks, which nothing here uses; CI and the bot run on Linux. Fixed in 4.2.1 (a major-version bump of a torch dependency): take it in a reviewed lock recompile.",
@@ -318,6 +312,36 @@
       "id": "PYSEC-2026-4332",
       "package": "pillow",
       "reason": "No code in this repository opens, decodes or appends to an image or PDF (Pillow is installed for matplotlib, which only writes the repo's own figures); the advisory needs an attacker-supplied lossless JPEG decoded with draft() or thumbnail(). Fixed in 13.0.0 (a major release under matplotlib): take it in a reviewed lock recompile.",
+      "expires": "2026-12-31"
+    },
+    {
+      "id": "PYSEC-2026-4363",
+      "package": "pillow",
+      "reason": "No code in this repository opens, decodes or appends to an image or PDF (Pillow is installed for matplotlib, which only writes the repo's own figures); the advisory needs an attacker-supplied image. Fixed in 13.0.0 (a major release under matplotlib): take it in a reviewed lock recompile.",
+      "expires": "2026-12-31"
+    },
+    {
+      "id": "CVE-2026-128067",
+      "package": "pillow",
+      "reason": "No code in this repository opens, decodes or appends to an image or PDF (Pillow is installed for matplotlib, which only writes the repo's own figures); the advisory needs an attacker-supplied image. Fixed in 13.0.0 (a major release under matplotlib): take it in a reviewed lock recompile.",
+      "expires": "2026-12-31"
+    },
+    {
+      "id": "CVE-2026-128066",
+      "package": "pillow",
+      "reason": "No code in this repository opens, decodes or appends to an image or PDF (Pillow is installed for matplotlib, which only writes the repo's own figures); the advisory needs an attacker-supplied image. Fixed in 13.0.0 (a major release under matplotlib): take it in a reviewed lock recompile.",
+      "expires": "2026-12-31"
+    },
+    {
+      "id": "CVE-2026-126192",
+      "package": "soupsieve",
+      "reason": "soupsieve is only reached through BeautifulSoup in the recompute audit (scripts/ci/recompute), which applies the repository's own constant CSS selectors to the site's own frozen pages in CI; no selector or page comes from outside. Fixed in 2.10.0: take it in a reviewed lock recompile.",
+      "expires": "2026-12-31"
+    },
+    {
+      "id": "CVE-2026-126190",
+      "package": "soupsieve",
+      "reason": "soupsieve is only reached through BeautifulSoup in the recompute audit (scripts/ci/recompute), which applies the repository's own constant CSS selectors to the site's own frozen pages in CI; no selector or page comes from outside. Fixed in 4.0.0: take it in a reviewed lock recompile.",
       "expires": "2026-12-31"
     }
   ]

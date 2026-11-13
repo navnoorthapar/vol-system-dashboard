@@ -30,6 +30,9 @@ from .chrome import labels as regime_labels
 from .core import DATE, NUM, Audit, Check, norm, numbers_in, rounds_to, text_of
 from .data import Store, chain_words, sessions_between
 
+# option roots whose settlement Cboe gives (SPX AM, SPXW PM; VIX, VIXW AM)
+KNOWN_ROOTS = frozenset({"SPX", "SPXW", "VIX", "VIXW"})
+
 STALE_WARN = 2                      # the page's amber banner from this age (NYSE sessions) on
 STALE_ERROR = 5                     # ... and the red one
 RESID_RAMP = 5.0                    # the residual heatmaps' colour scale: ±5 half-spreads
@@ -364,8 +367,14 @@ def chain_badge(a: Audit, c: Ctx) -> None:
     if rows_el is not None:
         chain = c.store.root.parent / str(inp.get("chain") or "")
         if inp.get("chain") and chain.is_file():
-            stored = pd.read_parquet(chain, columns=["strike", "quote_time"])
-            a.num(P_HEAD, "chain rows (rows of the stored chain file)", rows_el, float(len(stored)), index=0)
+            stored = pd.read_parquet(chain)
+            # the surface reads the lines of the roots whose settlement is known
+            # (SPX AM, SPXW PM); a root such as SPXO (no settlement, from 2026-11-09)
+            # is left out of the chain
+            if "root" in stored.columns:
+                stored = stored[stored["root"].astype(str).str.strip().str.upper().isin(KNOWN_ROOTS)]
+            a.num(P_HEAD, "chain rows (rows of the stored chain file, roots of known settlement)",
+                  rows_el, float(len(stored)), index=0)
             cq = stored["quote_time"].dropna().astype(str)
             if qt and len(cq):
                 a.equal(P_HEAD, "quote time = the stored chain's", str(qt)[:19].replace("T", " "),

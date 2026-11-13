@@ -170,9 +170,17 @@ def stored_chain_from_capture(frame: pd.DataFrame, underlying: str = "SPX") -> p
       extras              CAPTURE_EXTRA_COLUMNS are dropped
       quote_time, source  kept: the capture's delayed-quote instant and 'cboe'
 
-    Every line is kept, zero bids and one-sided lines included: the cleaner
-    keeps two-sided lines only, and the VIX replication's zero-bid stop reads
-    the rest. delta..theta stay as Cboe delivers them."""
+    Every line of a root whose settlement is known (database.ROOT_SETTLEMENT:
+    SPX AM and SPXW PM, the roots Cboe's VIX method uses) is kept, zero bids
+    and one-sided lines included: the cleaner keeps two-sided lines only, and
+    the VIX replication's zero-bid stop reads the rest. Lines of any other
+    root are dropped: from 2026-11-09 Cboe's book also lists SPXO, whose
+    settlement it does not give, on the same expiries and strikes as SPXW, so
+    the surface held two quotes per strike. delta..theta stay as Cboe
+    delivers them."""
+    if "root" in frame.columns:
+        known = frame["root"].astype(str).str.strip().str.upper().isin(list(db.ROOT_SETTLEMENT))
+        frame = frame[known]
     df = frame.drop(columns=[c for c in CAPTURE_EXTRA_COLUMNS if c in frame.columns]).copy()
     df.insert(1, "underlying", underlying.upper())
     df["vendor_iv"] = (pd.to_numeric(df["implied_vol"], errors="coerce") if "implied_vol" in df.columns
