@@ -110,7 +110,10 @@ SCHEMA_VERSION = 1
 #      recorded as calculation_time_basis; that is Cboe's own timing rule, so
 #      it is no longer a listed departure, and its comparison with the Cboe
 #      print (cboe_close_ny) is a gap note
-REPORT_VERSION = 5
+#   6  a Cboe book's lines of a root with no known settlement (SPXO, from
+#      2026-11-09) are dropped, so each strike has one quote
+#      (see quotes' capture mapping)
+REPORT_VERSION = 6
 SURFACE_DIR = DATA_DIR / "surface"
 
 

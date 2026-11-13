@@ -779,3 +779,19 @@ def test_a_closing_book_of_an_early_close_is_timed_at_its_1315_close():
     calc, basis = report._calc_time_ny(sq)
     assert (f"{calc:%Y-%m-%dT%H:%M}", basis) == ("2026-11-27T12:00", report.CALC_BOOK_QUOTE_TIME)
     assert "the 13:15 ET print of 2026-11-27 (an early close)" in report._timing_note(sq, calc, basis)
+
+
+def test_a_capture_keeps_only_the_roots_whose_settlement_is_known():
+    """From 2026-11-09 Cboe's SPX book also lists SPXO, with no settlement, on the
+    same expiries and strikes as SPXW; the surface then held two quotes per strike
+    and its residual table and out-of-sample count disagreed with the pages. The
+    mapping keeps SPX and SPXW lines only."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    frame = pd.DataFrame({
+        "snapshot_date": ["2026-11-12"] * 3, "expiry": ["2026-12-16"] * 3, "strike": [6100.0] * 3,
+        "right": ["P"] * 3, "bid": [6.8, 5.6, 6.0], "ask": [7.1, 7.8, 7.0],
+        "implied_vol": [0.37] * 3, "open_interest": [1, 2, 3], "volume": [0, 0, 0],
+        "root": ["SPXW", "SPXO", "SPX"], "settlement": ["PM", None, "AM"]})
+    got = sqm.stored_chain_from_capture(frame)
+    assert sorted(got["root"]) == ["SPX", "SPXW"]
