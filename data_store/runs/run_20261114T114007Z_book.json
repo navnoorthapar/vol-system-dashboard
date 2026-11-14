@@ -1,0 +1,115 @@
+{
+  "artifacts": {},
+  "backfill": {
+    "deferred": [
+      "2026-11-05",
+      "2026-11-04",
+      "2026-11-03",
+      "2026-11-02",
+      "2026-10-30",
+      "2026-10-29",
+      "2026-10-28",
+      "2026-10-27",
+      "2026-10-26",
+      "2026-10-20",
+      "2026-10-16",
+      "2026-06-18",
+      "2026-05-29",
+      "2026-03-27",
+      "2026-03-24"
+    ],
+    "rebuilt": {
+      "2026-11-06": {
+        "surface": true
+      },
+      "2026-11-09": {
+        "surface": true
+      }
+    }
+  },
+  "calibration": {
+    "chain": {
+      "n_clean": null,
+      "n_expiries_with_carry": null,
+      "n_listed": 54,
+      "n_near_atm": 1558,
+      "n_raw": 7231,
+      "n_two_sided": 122,
+      "near_atm_two_sided_share": 0.0,
+      "quote_time": null,
+      "symbol": "^SPX",
+      "t_origin": "2026-11-13T16:00:00-05:00",
+      "t_origin_basis": "session close 16:00 ET"
+    },
+    "reason": "SPX book has no live two-sided quotes: 0% of 1558 near-ATM lines (|K/S-1|<3%) are two-sided (< 80%)",
+    "session": "2026-11-13",
+    "status": "skipped"
+  },
+  "capture": {
+    "captures": {
+      "SPX": {
+        "file": "spx_2026-11-13_091412Z.parquet",
+        "status": "exists"
+      },
+      "VIX": {
+        "file": "vix_2026-11-13_091414Z.parquet",
+        "status": "exists"
+      }
+    },
+    "reason": "SPX exists; VIX exists",
+    "session": "2026-11-13",
+    "status": "exists"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-13",
+  "forward_ledger": {
+    "book": null,
+    "file": "ledger_2026-11-13.json",
+    "reason": "a ledger for 2026-11-13 is already registered",
+    "status": "exists"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "43591042229",
+    "sha": "a9355c7ad38280dcdaee550e6cd7b8a1e5ce1e20"
+  },
+  "headline_calibration": {
+    "age_sessions": 1,
+    "session": "2026-11-12"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-14T11:40:07+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-13",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "backfill": 83.6,
+    "calibrate": 2.3,
+    "capture": 0.0,
+    "forward_ledger": 0.0,
+    "freeze": 15.7,
+    "market": 40.1,
+    "persist": 0.2,
+    "restore": 3.1,
+    "total": 145.9
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)",
+    "calibration skipped: SPX book has no live two-sided quotes: 0% of 1558 near-ATM lines (|K/S-1|<3%) are two-sided (< 80%)"
+  ]
+}
