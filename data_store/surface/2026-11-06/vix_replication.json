@@ -748,7 +748,7 @@
   "method": "cboe_cmt_bounded_spline",
   "source": "The session close's curve: the U.S. Treasury par yield curve (CMT) of 2026-11-05, the newest before the session, the one Cboe computes the session's close with, at Cboe's tenors. Each term's rate is Cboe's bounded natural cubic spline at its expiration, in calendar days counted from that curve's date as Cboe's published sample counts them, the bond-equivalent yield taken to an annual percentage yield and then to continuous compounding (Cboe Volatility Index Mathematics Methodology sec. 2.1). A book timed after the close (in Global Trading Hours) keeps this curve and this day count, so each term's rate is the one the Cboe close it is compared with used; each term records the rate it used"
  },
- "report_version": 5,
+ "report_version": 6,
  "schema_version": 1,
  "session": "2026-11-06",
  "strip": [

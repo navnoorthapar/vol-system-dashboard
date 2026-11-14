@@ -736,7 +736,7 @@
   "t_origin": "2026-11-06T16:00:00-05:00",
   "t_origin_basis": "session close 16:00 ET"
  },
- "report_version": 5,
+ "report_version": 6,
  "schema_version": 1,
  "session": "2026-11-06",
  "surfaces": {
