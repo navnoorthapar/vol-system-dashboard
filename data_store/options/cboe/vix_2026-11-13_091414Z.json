@@ -1,0 +1,21 @@
+{
+  "underlying": "VIX",
+  "session": "2026-11-13",
+  "quote_time": "2026-11-14T00:49:50Z",
+  "book_state": "closing",
+  "fetched_at": "2026-11-14T09:14:14Z",
+  "payload_timestamp": "2026-11-14T01:04:50Z",
+  "stated_delay_minutes": 15,
+  "underlying_last_trade_time": "2026-11-13T16:15:01",
+  "underlying_price": 19.3,
+  "url": "https://cdn.cboe.com/api/global/delayed_quotes/options/_VIX.json",
+  "sha256": "3224e4966245f818ef0b0f33ab5144c1a2518545b21ea8d8ead267f6a5e3d47d",
+  "n_bytes": 688254,
+  "rows": 1540,
+  "two_sided_rows": 1437,
+  "expiries": 13,
+  "roots": [
+    "VIX",
+    "VIXW"
+  ]
+}
