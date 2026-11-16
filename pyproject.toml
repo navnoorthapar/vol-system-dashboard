@@ -27,7 +27,7 @@ dev = [
     "hypothesis>=6.170,<7",
     "pytest-benchmark>=5.3,<6",
     "mypy>=2.4,<2.5",
-    "pandas-stubs>=3.0.5,<3.1",
+    "pandas-stubs>=3.0.5,<3.2",
     "scipy-stubs>=1.17.1,<1.18",
     # Test oracles: QuantLib (BSD-3) Heston/Bates/rough-Heston engines,
     # py_lets_be_rational (MIT) implied vol, statsmodels (BSD-3) Diebold-Mariano.

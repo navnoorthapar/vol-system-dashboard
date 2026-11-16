@@ -16,7 +16,7 @@ pytest-benchmark>=5.3,<6
 # Type-check gate (scripts/ci/baseline_gate.py mypy), with the pandas and
 # SciPy stubs it checks against; baseline counts are version-specific too.
 mypy>=2.4,<2.5
-pandas-stubs>=3.0.5,<3.1
+pandas-stubs>=3.0.5,<3.2
 scipy-stubs>=1.17.1,<1.18
 # Independent test oracles (C23), never imported by runtime code: the tests
 # that use them call pytest.importorskip and skip cleanly without them.
