@@ -736,7 +736,7 @@
   "t_origin": "2026-11-04T04:22:07-05:00",
   "t_origin_basis": "quote_time (GTH book)"
  },
- "report_version": 5,
+ "report_version": 6,
  "schema_version": 1,
  "session": "2026-11-03",
  "surfaces": {

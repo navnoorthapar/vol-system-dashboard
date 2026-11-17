@@ -649,9 +649,9 @@
     "essvi": {
      "butterfly_violations": 0,
      "calendar_violations": 0,
-     "common_oos_median_abs_hs": 5.410465666,
+     "common_oos_median_abs_hs": 5.410465664,
      "inside_spread_pct": 14.54299865,
-     "median_abs_hs": 5.429024043,
+     "median_abs_hs": 5.429024059,
      "oos_inside_spread_pct": 14.77888087,
      "oos_rmse_vp": 1.391229223,
      "rmse_vp": 1.473067722
@@ -669,32 +669,32 @@
     "svi": {
      "butterfly_violations": 0,
      "calendar_violations": 147,
-     "common_oos_median_abs_hs": 1.726284058,
+     "common_oos_median_abs_hs": 1.726271327,
      "inside_spread_pct": 30.47050878,
-     "median_abs_hs": 1.731078763,
+     "median_abs_hs": 1.731084715,
      "oos_inside_spread_pct": 30.46028881,
-     "oos_rmse_vp": 0.2220202778,
-     "rmse_vp": 0.2272311342
+     "oos_rmse_vp": 0.2220202604,
+     "rmse_vp": 0.2272311159
     },
     "svi_cal": {
      "butterfly_violations": 0,
      "calendar_violations": 0,
-     "common_oos_median_abs_hs": 2.009411688,
-     "inside_spread_pct": 28.08419631,
-     "median_abs_hs": 2.018135841,
-     "oos_inside_spread_pct": 28.04602888,
-     "oos_rmse_vp": 0.2719950062,
-     "rmse_vp": 0.2812596871
+     "common_oos_median_abs_hs": 2.005211211,
+     "inside_spread_pct": 28.11796488,
+     "median_abs_hs": 2.01672116,
+     "oos_inside_spread_pct": 28.11371841,
+     "oos_rmse_vp": 0.2680608255,
+     "rmse_vp": 0.2766488621
     }
    },
    "n_quotes": 8884,
    "quote_time": "2026-11-03T09:35:08Z",
-   "report_version": 5,
+   "report_version": 6,
    "session": "2026-11-02",
    "source": "cboe",
    "vix_gap_attribution": {
-    "residual_pts": -0.4807036704,
-    "truncation_pts": 0.008315086468
+    "residual_pts": -0.4819572133,
+    "truncation_pts": 0.009568629386
    },
    "vix_method": "cboe_rules",
    "vix_official": 21.15,
@@ -748,7 +748,7 @@
    },
    "n_quotes": 8931,
    "quote_time": "2026-11-04T09:22:07Z",
-   "report_version": 5,
+   "report_version": 6,
    "session": "2026-11-03",
    "source": "cboe",
    "vix_gap_attribution": {
