@@ -1,0 +1,98 @@
+{
+  "artifacts": {},
+  "backfill": {
+    "deferred": [
+      "2026-10-30",
+      "2026-10-29",
+      "2026-10-28",
+      "2026-10-27",
+      "2026-10-26",
+      "2026-10-20",
+      "2026-10-16",
+      "2026-06-18",
+      "2026-05-29",
+      "2026-03-27",
+      "2026-03-24"
+    ],
+    "rebuilt": {
+      "2026-11-02": {
+        "surface": true
+      },
+      "2026-11-03": {
+        "surface": true
+      }
+    }
+  },
+  "calibration": {
+    "chain": {},
+    "reason": "calibration for session 2026-11-16 already exists",
+    "session": "2026-11-16",
+    "status": "exists"
+  },
+  "capture": {
+    "captures": {
+      "SPX": {
+        "file": "spx_2026-11-16_105726Z.parquet",
+        "status": "exists"
+      },
+      "VIX": {
+        "file": "vix_2026-11-16_105728Z.parquet",
+        "status": "exists"
+      }
+    },
+    "reason": "SPX exists; VIX exists",
+    "session": "2026-11-16",
+    "status": "exists"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-16",
+  "forward_ledger": {
+    "book": null,
+    "file": "ledger_2026-11-16.json",
+    "reason": "a ledger for 2026-11-16 is already registered",
+    "status": "exists"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "44095365568",
+    "sha": "0071b2a8d58fc849e12439a7b3d638d5ed56212b"
+  },
+  "headline_calibration": {
+    "age_sessions": 0,
+    "session": "2026-11-16"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-17T13:43:25+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-16",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "backfill": 112.3,
+    "calibrate": 0.4,
+    "capture": 0.0,
+    "forward_ledger": 0.0,
+    "freeze": 17.5,
+    "market": 37.8,
+    "persist": 0.2,
+    "restore": 4.2,
+    "total": 173.7
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)"
+  ]
+}
