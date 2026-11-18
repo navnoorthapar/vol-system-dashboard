@@ -1,0 +1,94 @@
+{
+  "artifacts": {},
+  "backfill": {
+    "deferred": [
+      "2026-10-26",
+      "2026-10-20",
+      "2026-10-16",
+      "2026-06-18",
+      "2026-05-29",
+      "2026-03-27",
+      "2026-03-24"
+    ],
+    "rebuilt": {
+      "2026-10-27": {
+        "surface": true
+      },
+      "2026-10-28": {
+        "surface": true
+      }
+    }
+  },
+  "calibration": {
+    "chain": {},
+    "reason": "calibration for session 2026-11-17 already exists",
+    "session": "2026-11-17",
+    "status": "exists"
+  },
+  "capture": {
+    "captures": {
+      "SPX": {
+        "file": "spx_2026-11-17_102921Z.parquet",
+        "status": "exists"
+      },
+      "VIX": {
+        "file": "vix_2026-11-17_102923Z.parquet",
+        "status": "exists"
+      }
+    },
+    "reason": "SPX exists; VIX exists",
+    "session": "2026-11-17",
+    "status": "exists"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-17",
+  "forward_ledger": {
+    "book": null,
+    "file": "ledger_2026-11-17.json",
+    "reason": "a ledger for 2026-11-17 is already registered",
+    "status": "exists"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "44312200257",
+    "sha": "2ca0f7173053ec3728927fa47c040182cbc95a1b"
+  },
+  "headline_calibration": {
+    "age_sessions": 0,
+    "session": "2026-11-17"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-18T13:18:43+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-17",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "backfill": 172.1,
+    "calibrate": 0.5,
+    "capture": 0.0,
+    "forward_ledger": 0.0,
+    "freeze": 24.8,
+    "market": 40.9,
+    "persist": 0.3,
+    "restore": 5.3,
+    "total": 245.3
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)"
+  ]
+}
