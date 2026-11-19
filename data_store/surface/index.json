@@ -227,7 +227,7 @@
    },
    "n_quotes": 7022,
    "quote_time": null,
-   "report_version": 5,
+   "report_version": 6,
    "session": "2026-06-18",
    "source": "yfinance",
    "vix_gap_attribution": {
@@ -286,7 +286,7 @@
    },
    "n_quotes": 2913,
    "quote_time": null,
-   "report_version": 5,
+   "report_version": 6,
    "session": "2026-10-16",
    "source": "yfinance",
    "vix_gap_attribution": {
