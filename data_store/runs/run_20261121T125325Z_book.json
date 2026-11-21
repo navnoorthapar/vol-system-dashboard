@@ -1,0 +1,94 @@
+{
+  "artifacts": {},
+  "backfill": {
+    "deferred": [],
+    "rebuilt": {}
+  },
+  "calibration": {
+    "chain": {
+      "n_clean": null,
+      "n_expiries_with_carry": null,
+      "n_listed": 53,
+      "n_near_atm": 922,
+      "n_raw": 8221,
+      "n_two_sided": 94,
+      "near_atm_two_sided_share": 0.0021691973969631237,
+      "quote_time": null,
+      "symbol": "^SPX",
+      "t_origin": "2026-11-20T16:00:00-05:00",
+      "t_origin_basis": "session close 16:00 ET"
+    },
+    "reason": "SPX book has no live two-sided quotes: 0% of 922 near-ATM lines (|K/S-1|<3%) are two-sided (< 80%)",
+    "session": "2026-11-20",
+    "status": "skipped"
+  },
+  "capture": {
+    "captures": {
+      "SPX": {
+        "reason": "HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_SPX.json",
+        "status": "failed"
+      },
+      "VIX": {
+        "reason": "HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_VIX.json",
+        "status": "failed"
+      }
+    },
+    "reason": "SPX failed (HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_SPX.json); VIX failed (HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_VIX.json)",
+    "session": "2026-11-20",
+    "status": "failed"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-20",
+  "forward_ledger": {
+    "book": null,
+    "file": null,
+    "reason": "no captured book of the session is usable: yahoo: not a live book (0% of near-ATM lines two-sided)",
+    "status": "no_live_book"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "44906047899",
+    "sha": "bdf6b6581c04742aa9e6f1bdf3930a06e9297371"
+  },
+  "headline_calibration": {
+    "age_sessions": 1,
+    "session": "2026-11-19"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-21T12:53:25+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-20",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "backfill": 0.1,
+    "calibrate": 2.7,
+    "capture": 0.1,
+    "forward_ledger": 0.1,
+    "freeze": 13.8,
+    "market": 38.2,
+    "persist": 0.2,
+    "restore": 3.6,
+    "total": 59.6
+  },
+  "warnings": [
+    "Cboe chain capture failed: SPX failed (HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_SPX.json); VIX failed (HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_VIX.json)",
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)",
+    "calibration skipped: SPX book has no live two-sided quotes: 0% of 922 near-ATM lines (|K/S-1|<3%) are two-sided (< 80%)",
+    "forward ledger for 2026-11-20 not recorded: no captured book of the session is usable: yahoo: not a live book (0% of near-ATM lines two-sided)"
+  ]
+}
