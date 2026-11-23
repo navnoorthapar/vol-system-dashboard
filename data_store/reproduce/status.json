@@ -1,12 +1,12 @@
 {
  "schema": "reproduce_status/1",
- "commit": "f7f9a35aab90ec4ceba84309bdcd95ae4a15c939",
- "run_url": "https://github.com/navnoorthapar/vol-system-dashboard/actions/runs/43907343233",
- "finished_utc": "2026-11-16T16:28:27+00:00",
+ "commit": "785aaa05882a36757cc7c5c8010f6f19f5ae15d5",
+ "run_url": "https://github.com/navnoorthapar/vol-system-dashboard/actions/runs/45241617977",
+ "finished_utc": "2026-11-23T18:46:37+00:00",
  "full": false,
- "n_checks": 24,
+ "n_checks": 28,
  "n_ok": 11,
- "n_exact": 0,
+ "n_exact": 4,
  "max_deviation": 13.274624512724209,
  "max_deviation_artifact": "calibration-2026-10-26: data_store/calibrations/joint_cal_2026-10-26.pkl",
  "failed": [
@@ -159,6 +159,38 @@
   },
   {
    "artifact": "calibration-2026-11-12: data_store/calibrations/joint_cal_2026-11-12.pkl",
+   "deviation": 0.0,
+   "tolerance": 1e-06,
+   "problems": [
+    "not regenerated"
+   ]
+  },
+  {
+   "artifact": "calibration-2026-11-16: data_store/calibrations/joint_cal_2026-11-16.pkl",
+   "deviation": 0.0,
+   "tolerance": 1e-06,
+   "problems": [
+    "not regenerated"
+   ]
+  },
+  {
+   "artifact": "calibration-2026-11-17: data_store/calibrations/joint_cal_2026-11-17.pkl",
+   "deviation": 0.0,
+   "tolerance": 1e-06,
+   "problems": [
+    "not regenerated"
+   ]
+  },
+  {
+   "artifact": "calibration-2026-11-18: data_store/calibrations/joint_cal_2026-11-18.pkl",
+   "deviation": 0.0,
+   "tolerance": 1e-06,
+   "problems": [
+    "not regenerated"
+   ]
+  },
+  {
+   "artifact": "calibration-2026-11-19: data_store/calibrations/joint_cal_2026-11-19.pkl",
    "deviation": 0.0,
    "tolerance": 1e-06,
    "problems": [
