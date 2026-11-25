@@ -1,0 +1,70 @@
+{
+  "artifacts": {},
+  "backfill": {
+    "deferred": [],
+    "rebuilt": {}
+  },
+  "calibration": {
+    "chain": {},
+    "reason": "calibration for session 2026-11-24 already exists",
+    "session": "2026-11-24",
+    "status": "exists"
+  },
+  "capture": {
+    "captures": {},
+    "reason": "the live option book at 2026-11-25 09:46 ET holds session 2026-11-25's quotes, not the last closed session 2026-11-24: refusing to store them as 2026-11-24 (calibrate after the 16:15 ET cutoff)",
+    "session": "2026-11-24",
+    "status": "skipped"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-24",
+  "forward_ledger": {
+    "book": null,
+    "file": "ledger_2026-11-24.json",
+    "reason": "a ledger for 2026-11-24 is already registered",
+    "status": "exists"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "45637519144",
+    "sha": "4e7cb2d2360b7ce583c2e07f6dd5f9c089e46d6a"
+  },
+  "headline_calibration": {
+    "age_sessions": 0,
+    "session": "2026-11-24"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-25T14:46:22+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-24",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "backfill": 0.1,
+    "calibrate": 0.3,
+    "capture": 0.0,
+    "forward_ledger": 0.0,
+    "freeze": 12.4,
+    "market": 44.2,
+    "persist": 0.2,
+    "restore": 3.9,
+    "total": 62.2
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)"
+  ]
+}
