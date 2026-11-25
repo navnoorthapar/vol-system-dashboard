@@ -1,0 +1,110 @@
+{
+  "artifacts": {
+    "diagnostics": {
+      "error": null,
+      "ok": true
+    },
+    "greeks": {
+      "error": null,
+      "ok": true
+    },
+    "scenario": {
+      "error": null,
+      "ok": true
+    },
+    "surface": {
+      "error": null,
+      "ok": true
+    }
+  },
+  "backfill": {
+    "deferred": [],
+    "rebuilt": {}
+  },
+  "calibration": {
+    "chain": {
+      "n_clean": 5377,
+      "n_expiries_with_carry": 18,
+      "n_listed": 52,
+      "n_near_atm": 1405,
+      "n_raw": 7187,
+      "n_two_sided": 5836,
+      "near_atm_two_sided_share": 1.0,
+      "quote_time": null,
+      "symbol": "^SPX",
+      "t_origin": "2026-11-24T16:00:00-05:00",
+      "t_origin_basis": "session close 16:00 ET"
+    },
+    "reason": "ok",
+    "session": "2026-11-24",
+    "status": "accepted"
+  },
+  "capture": {
+    "captures": {
+      "SPX": {
+        "reason": "HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_SPX.json",
+        "status": "failed"
+      },
+      "VIX": {
+        "reason": "HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_VIX.json",
+        "status": "failed"
+      }
+    },
+    "reason": "SPX failed (HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_SPX.json); VIX failed (HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_VIX.json)",
+    "session": "2026-11-24",
+    "status": "failed"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-24",
+  "forward_ledger": {
+    "book": "yahoo",
+    "file": "ledger_2026-11-24.json",
+    "reason": null,
+    "status": "recorded"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "45605464526",
+    "sha": "6cd3fef192f5c4b9e1cb98363c0c78c43f40aa52"
+  },
+  "headline_calibration": {
+    "age_sessions": 0,
+    "session": "2026-11-24"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-25T11:34:13+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-24",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "artifacts": 88.0,
+    "backfill": 0.0,
+    "calibrate": 3.5,
+    "capture": 0.2,
+    "forward_ledger": 5.2,
+    "freeze": 14.4,
+    "market": 35.4,
+    "persist": 0.2,
+    "restore": 4.4,
+    "total": 152.6
+  },
+  "warnings": [
+    "Cboe chain capture failed: SPX failed (HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_SPX.json); VIX failed (HTTPError: 403 Client Error: Forbidden for url: https://cdn-api.cboe.com/api/global/delayed_quotes/options/_VIX.json)",
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)"
+  ]
+}

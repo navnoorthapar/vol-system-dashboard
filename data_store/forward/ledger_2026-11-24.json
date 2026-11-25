@@ -1,0 +1,136 @@
+{
+ "actions": [],
+ "closed": [],
+ "inputs": {
+  "beta": 0.82,
+  "book": {
+   "extra_expiries": [],
+   "extra_expiries_failed": [],
+   "fetched_at": "2026-11-25T11:34:56Z",
+   "near_atm_two_sided_share": 1.0,
+   "rows": 7187,
+   "source": "yahoo",
+   "symbol": "^SPX"
+  },
+  "chain_expiries": 18,
+  "chain_rows_two_sided": 5836,
+  "chain_sha256": "35751610c12988051daf69554c0beeeee7e76dad20ab22769875400552ebdf1d",
+  "open_expiries_not_in_book": [],
+  "quote_after_close": null,
+  "quote_time": null,
+  "r_ref": 0.04260604415,
+  "spot": 7201.089844,
+  "t_origin": null
+ },
+ "positions": [],
+ "previous": {
+  "session": "2026-11-23",
+  "sha256": "157fd28aa00239a4a95520d4993d599dd3c5749f69997878e763e8ba00e11342"
+ },
+ "schema": "forward_ledger/1",
+ "session": "2026-11-24",
+ "signals": {
+  "s1": {
+   "k_mult": null,
+   "kelly": 0.0,
+   "kelly_base": 0.0,
+   "position": 0,
+   "straddle_direction": 0
+  },
+  "s1c": {
+   "k_mult": 0.6727971476,
+   "kelly": 0.0,
+   "kelly_base": 0.0,
+   "position": 0,
+   "straddle_direction": 0
+  },
+  "s2": {
+   "k_mult": null,
+   "kelly": 0.0,
+   "kelly_base": 0.0,
+   "position": 0,
+   "straddle_direction": 0
+  },
+  "s3": {
+   "k_mult": 1.0,
+   "kelly": 0.0,
+   "kelly_base": 0.0,
+   "position": 0,
+   "straddle_direction": 0
+  },
+  "s4": {
+   "k_mult": 1.0,
+   "kelly": 0.0,
+   "kelly_base": 0.0,
+   "position": 0,
+   "straddle_direction": 0
+  }
+ },
+ "summary": {
+  "s1": {
+   "n_closed": 2,
+   "n_opened": 2,
+   "open_id": null,
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "open_reason_code": null,
+   "open_status": null,
+   "realised_hedge_pnl": -19371.45195,
+   "realised_pnl_exec": -35000.0,
+   "realised_pnl_mid": -29355.0,
+   "realised_pnl_net": -35023.4
+  },
+  "s1c": {
+   "n_closed": 2,
+   "n_opened": 2,
+   "open_id": null,
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "open_reason_code": null,
+   "open_status": null,
+   "realised_hedge_pnl": 1724.168559,
+   "realised_pnl_exec": -15740.0,
+   "realised_pnl_mid": -13310.0,
+   "realised_pnl_net": -15755.6
+  },
+  "s2": {
+   "n_closed": 0,
+   "n_opened": 0,
+   "open_id": null,
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "open_reason_code": null,
+   "open_status": null,
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  },
+  "s3": {
+   "n_closed": 0,
+   "n_opened": 0,
+   "open_id": null,
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "open_reason_code": null,
+   "open_status": null,
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  },
+  "s4": {
+   "n_closed": 1,
+   "n_opened": 1,
+   "open_id": null,
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "open_reason_code": null,
+   "open_status": null,
+   "realised_hedge_pnl": -871.1220823,
+   "realised_pnl_exec": 22680.0,
+   "realised_pnl_mid": 24150.0,
+   "realised_pnl_net": 22664.4
+  }
+ }
+}
