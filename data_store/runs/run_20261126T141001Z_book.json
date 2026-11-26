@@ -1,0 +1,72 @@
+{
+  "artifacts": {},
+  "backfill": {
+    "deferred": [],
+    "rebuilt": {}
+  },
+  "calibration": {
+    "chain": {},
+    "reason": "NYSE holiday 2026-11-26 lies between session 2026-11-25 and 2026-11-26 09:10 ET: the live book is not session 2026-11-25's (Global Trading Hours after a holiday trade for the next session); refusing to store it as 2026-11-25",
+    "session": "2026-11-25",
+    "status": "skipped"
+  },
+  "capture": {
+    "captures": {},
+    "reason": "NYSE holiday 2026-11-26 lies between session 2026-11-25 and 2026-11-26 09:10 ET: the live book is not session 2026-11-25's (Global Trading Hours after a holiday trade for the next session); refusing to store it as 2026-11-25",
+    "session": "2026-11-25",
+    "status": "skipped"
+  },
+  "complete": true,
+  "errors": [],
+  "exit_code": 0,
+  "expected_session": "2026-11-25",
+  "forward_ledger": {
+    "book": null,
+    "file": null,
+    "reason": "no Cboe capture or Yahoo chain of 2026-11-25 in this run",
+    "status": "no_live_book"
+  },
+  "freeze": {
+    "ok": true,
+    "reason": "ok"
+  },
+  "github": {
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "run_attempt": "1",
+    "run_id": "45836065326",
+    "sha": "17436d24c40b5e19d576d961ba0c9a12df06a4fc"
+  },
+  "headline_calibration": {
+    "age_sessions": 1,
+    "session": "2026-11-24"
+  },
+  "publish_blockers": [],
+  "publishable": true,
+  "run_utc": "2026-11-26T14:10:01+00:00",
+  "schema": "run_ledger/1",
+  "session": "2026-11-25",
+  "slot": "book",
+  "steps": [
+    "market",
+    "capture",
+    "calibrate",
+    "freeze"
+  ],
+  "timings_s": {
+    "backfill": 0.1,
+    "calibrate": 0.3,
+    "capture": 0.0,
+    "forward_ledger": 0.0,
+    "freeze": 12.9,
+    "market": 35.9,
+    "persist": 0.2,
+    "restore": 3.9,
+    "total": 54.3
+  },
+  "warnings": [
+    "1 VIX-family print(s) differ between Cboe and Yahoo by more than 0.25 pts; Cboe's values are stored (2026-02-06 ^VIX Cboe 17.76 vs Yahoo 20.37)",
+    "calibration skipped: NYSE holiday 2026-11-26 lies between session 2026-11-25 and 2026-11-26 09:10 ET: the live book is not session 2026-11-25's (Global Trading Hours after a holiday trade for the next session); refusing to store it as 2026-11-25",
+    "forward ledger for 2026-11-25 not recorded: no Cboe capture or Yahoo chain of 2026-11-25 in this run"
+  ]
+}
